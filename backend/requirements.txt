@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+opencv-python
+ultralytics
+numpy
+matplotlib
+sqlalchemy
+pydantic
+
