@@ -26,6 +26,33 @@ class Camera(Base):
 
     # 一个摄像头可以映射到多张平面图（不同楼层 / 不同配置版本）
     mappings = relationship("CameraMapping", back_populates="camera")
+    virtual_views = relationship(
+        "CameraVirtualView", back_populates="camera", cascade="all, delete-orphan"
+    )
+
+
+class CameraVirtualView(Base):
+    """
+    360 全景相机的虚拟 PTZ 透视视窗配置。
+    """
+
+    __tablename__ = "camera_virtual_views"
+
+    id = Column(Integer, primary_key=True, index=True)
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=False, index=True)
+    name = Column(String(255), nullable=False, default="View")
+    enabled = Column(Boolean, nullable=False, default=True)
+
+    # 视角参数（单位：度）
+    yaw_deg = Column(Float, nullable=False, default=0.0)
+    pitch_deg = Column(Float, nullable=False, default=0.0)
+    fov_deg = Column(Float, nullable=False, default=90.0)
+
+    # 输出分辨率
+    out_w = Column(Integer, nullable=False, default=960)
+    out_h = Column(Integer, nullable=False, default=540)
+
+    camera = relationship("Camera", back_populates="virtual_views")
 
 
 class FloorPlan(Base):

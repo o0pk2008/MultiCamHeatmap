@@ -31,6 +31,42 @@ class CameraOut(CameraBase):
         orm_mode = True
 
 
+class CameraVirtualViewBase(BaseModel):
+    name: str = "View"
+    enabled: bool = True
+    yaw_deg: float = 0.0
+    pitch_deg: float = 0.0
+    fov_deg: float = 90.0
+    out_w: int = 960
+    out_h: int = 540
+
+
+class CameraVirtualViewCreate(CameraVirtualViewBase):
+    camera_id: int
+
+
+class CameraVirtualViewUpdate(BaseModel):
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    yaw_deg: Optional[float] = None
+    pitch_deg: Optional[float] = None
+    fov_deg: Optional[float] = None
+    out_w: Optional[int] = None
+    out_h: Optional[int] = None
+
+
+class CameraVirtualViewOut(CameraVirtualViewBase):
+    id: int
+    camera_id: int
+
+    class Config:
+        orm_mode = True
+
+
+class CameraVirtualViewWithCameraOut(CameraVirtualViewOut):
+    camera_name: str
+
+
 class FloorPlanBase(BaseModel):
     name: str
     image_path: str

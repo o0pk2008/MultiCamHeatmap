@@ -32,38 +32,58 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
 
   return (
-    <div className="min-h-screen bg-slate-50 px-4 py-4 font-sans text-slate-900">
-      {/* 顶部标题栏 */}
-      <header className="mb-4 flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-slate-900 shadow-sm">
-        <div className="flex items-center gap-3">
-          {/* 简单热力图风格 Icon */}
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 via-yellow-300 to-red-500 shadow-inner">
-            <div className="h-5 w-5 rounded-full bg-white/70 mix-blend-screen" />
+    <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
+      <div className="flex min-h-screen">
+        {/* 左侧侧边栏 */}
+        <aside className="w-60 shrink-0 border-r border-slate-200 bg-white px-3 py-4 shadow-sm">
+          <div className="mb-4 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 via-yellow-300 to-red-500 shadow-inner">
+              <div className="h-5 w-5 rounded-full bg-white/70 mix-blend-screen" />
+            </div>
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-slate-900">
+                MultiCam Heatmap
+              </div>
+              <div className="text-[11px] text-slate-500">
+                多路摄像头热力图解决方案
+              </div>
+            </div>
           </div>
-          <div>
-            <h1 className="text-lg font-semibold leading-snug text-slate-900 md:text-xl">
-              MultiCam Heatmap
-            </h1>
-            <p className="text-xs text-slate-500 md:text-[13px]">
-              多路摄像头 · 实时热力图 · 映射管理
-            </p>
-          </div>
-        </div>
-      </header>
 
-      <div className="mb-4 flex flex-wrap gap-2">
-        <TabButton label="实时画面" tab="realtime" activeTab={activeTab} onChange={setActiveTab} />
-        <TabButton label="热力图" tab="heatmap" activeTab={activeTab} onChange={setActiveTab} />
-        <TabButton label="映射管理" tab="mapping" activeTab={activeTab} onChange={setActiveTab} />
+          <nav className="space-y-2">
+            <SidebarTabButton
+              label="实时画面"
+              tab="realtime"
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
+            <SidebarTabButton
+              label="热力图"
+              tab="heatmap"
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
+            <SidebarTabButton
+              label="映射管理"
+              tab="mapping"
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
+          </nav>
+        </aside>
+
+        {/* 右侧内容区 */}
+        <main className="flex-1 px-4 py-4">
+          {activeTab === "realtime" && <RealtimeView />}
+          {activeTab === "heatmap" && <HeatmapView />}
+          {activeTab === "mapping" && <MappingView />}
+        </main>
       </div>
-      {activeTab === "realtime" && <RealtimeView />}
-      {activeTab === "heatmap" && <HeatmapView />}
-      {activeTab === "mapping" && <MappingView />}
     </div>
   );
 };
 
-const TabButton: React.FC<{
+const SidebarTabButton: React.FC<{
   label: string;
   tab: TabKey;
   activeTab: TabKey;
@@ -71,13 +91,20 @@ const TabButton: React.FC<{
 }> = ({ label, tab, activeTab, onChange }) => (
   <button
     onClick={() => onChange(tab)}
-    className={`rounded-full px-4 py-1.5 text-sm font-medium transition ${
+    className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition ${
       activeTab === tab
-        ? "bg-emerald-500 text-white shadow-sm"
-        : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+        ? "bg-emerald-600 text-white shadow-sm"
+        : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
     }`}
   >
-    {label}
+    <span>{label}</span>
+    <span
+      className={`text-xs ${
+        activeTab === tab ? "text-white/80" : "text-slate-400"
+      }`}
+    >
+      →
+    </span>
   </button>
 );
 
@@ -271,6 +298,18 @@ interface FloorPlan {
   height_px: number;
   grid_rows: number;
   grid_cols: number;
+}
+
+interface CameraVirtualView {
+  id: number;
+  camera_id: number;
+  name: string;
+  enabled: boolean;
+  yaw_deg: number;
+  pitch_deg: number;
+  fov_deg: number;
+  out_w: number;
+  out_h: number;
 }
 
 function floorPlanImageUrl(fp: FloorPlan): string {
@@ -501,8 +540,8 @@ const FloorPlanCanvas: React.FC<{
   return (
     <div
       ref={containerRef}
-      className={`overflow-hidden rounded-lg border border-slate-200 bg-slate-100 ${className}`}
-      style={{ minHeight: 320, userSelect: "none" }}
+      className={`relative h-full w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100 ${className}`}
+      style={{ height: "100%", minHeight: 0, userSelect: "none" }}
       onWheel={onWheel}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
@@ -516,6 +555,125 @@ const FloorPlanCanvas: React.FC<{
         className="block cursor-grab active:cursor-grabbing"
         style={{ display: "block", width: "100%", height: "100%" }}
       />
+
+      {/* 角落显示当前缩放倍数 */}
+      <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-white/80 px-2 py-0.5 text-[11px] text-slate-700">
+        zoom {zoom.toFixed(2)}
+      </div>
+    </div>
+  );
+};
+
+/** 通用视窗：支持拖拽平移/滚轮缩放，并提供 overlay canvas 作为后续绘制层 */
+const PanZoomViewport: React.FC<{
+  className?: string;
+  children: React.ReactNode;
+}> = ({ className = "", children }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
+  const [size, setSize] = useState({ w: 600, h: 400 });
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [dragging, setDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const { width, height } = entries[0]?.contentRect ?? { width: 600, height: 400 };
+      setSize({ w: width, h: height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // 保持 overlay canvas 像素尺寸匹配容器（便于后续绘制）
+  useEffect(() => {
+    const c = overlayCanvasRef.current;
+    if (!c) return;
+    c.width = Math.max(1, Math.floor(size.w));
+    c.height = Math.max(1, Math.floor(size.h));
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+  }, [size]);
+
+  const onWheel = (e: React.WheelEvent) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const cssX = e.clientX - rect.left;
+    const cssY = e.clientY - rect.top;
+
+    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+    setZoom((oldZoom) => {
+      const newZoom = Math.min(5, Math.max(0.3, oldZoom * zoomFactor));
+      // 以鼠标位置为缩放中心：让屏幕点 (cssX,cssY) 在缩放前后落在同一“世界点”
+      setPan((oldPan) => ({
+        x: cssX - ((cssX - oldPan.x) / oldZoom) * newZoom,
+        y: cssY - ((cssY - oldPan.y) / oldZoom) * newZoom,
+      }));
+      return newZoom;
+    });
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    // 避免 <img> 默认拖拽、以及浏览器选择行为
+    e.preventDefault();
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    setDragging(true);
+    setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!dragging) return;
+    setPan({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
+  };
+  const endDrag = (e: React.PointerEvent) => {
+    try {
+      (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+    } catch {
+      // ignore
+    }
+    setDragging(false);
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      className={`relative h-full w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100 ${className}`}
+      style={{ minHeight: 0, userSelect: "none", touchAction: "none" }}
+      onWheel={onWheel}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onPointerLeave={endDrag}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      <div
+        className="absolute inset-0"
+        style={{
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: "0 0",
+          cursor: dragging ? "grabbing" : "grab",
+        }}
+      >
+        {children}
+      </div>
+
+      {/* overlay canvas：后续用于画点/框/多边形；默认不拦截鼠标事件 */}
+      <canvas
+        ref={overlayCanvasRef}
+        className="absolute inset-0"
+        style={{ width: "100%", height: "100%", pointerEvents: "none" }}
+      />
+
+      {/* 角落显示当前缩放倍数（可删） */}
+      <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-white/80 px-2 py-0.5 text-[11px] text-slate-700">
+        zoom {zoom.toFixed(2)}
+      </div>
     </div>
   );
 };
@@ -538,13 +696,16 @@ const MappingView: React.FC = () => {
   const [editUploading, setEditUploading] = useState(false);
   const [editPreviewUrl, setEditPreviewUrl] = useState<string | null>(null);
 
-  type MappingTabKey = "bind" | "cameras" | "floorPlans";
+  type MappingTabKey = "bind" | "cameras" | "floorPlans" | "panoramaViews";
   const [mappingTab, setMappingTab] = useState<MappingTabKey>("bind");
 
-  // 映射绑定子页使用的摄像头和平面图选择状态
-  const [bindCameras, setBindCameras] = useState<Camera[]>([]);
+  // 映射绑定子页使用的摄像头/virtual PTZ 选择状态
+  type BindCameraOption =
+    | { kind: "camera"; key: string; camera: Camera; label: string }
+    | { kind: "virtual"; key: string; view: CameraVirtualView & { camera_name?: string }; label: string };
+  const [bindCameraOptions, setBindCameraOptions] = useState<BindCameraOption[]>([]);
   const [bindFloorPlanId, setBindFloorPlanId] = useState<number | "">("");
-  const [bindCameraId, setBindCameraId] = useState<number | "">("");
+  const [bindCameraId, setBindCameraId] = useState<string>("");
   // 左侧平面图网格设置（可本地修改，保存时写回平面图）
   const [bindGridRows, setBindGridRows] = useState("");
   const [bindGridCols, setBindGridCols] = useState("");
@@ -561,10 +722,29 @@ const MappingView: React.FC = () => {
 
   const loadBindCameras = async () => {
     const res = await fetch(`${API_BASE}/api/cameras/`);
-    const data: Camera[] = await res.json();
-    setBindCameras(data);
-    if (data.length > 0 && bindCameraId === "") {
-      setBindCameraId(data[0].id);
+    const cams: Camera[] = await res.json();
+
+    const res2 = await fetch(`${API_BASE}/api/cameras/virtual-views/all`);
+    const allViews: (CameraVirtualView & { camera_name: string })[] = res2.ok ? await res2.json() : [];
+
+    const options: BindCameraOption[] = [
+      ...cams.map((c) => ({
+        kind: "camera" as const,
+        key: `cam:${c.id}`,
+        camera: c,
+        label: `${c.name} #${c.id}`,
+      })),
+      ...allViews.map((v) => ({
+        kind: "virtual" as const,
+        key: `vv:${v.id}`,
+        view: v,
+        label: `${v.camera_name} / ${v.name} (virtual)`,
+      })),
+    ];
+
+    setBindCameraOptions(options);
+    if (options.length > 0 && bindCameraId === "") {
+      setBindCameraId(options[0].key);
     }
   };
 
@@ -706,6 +886,12 @@ const MappingView: React.FC = () => {
           映射绑定
         </button>
         <button
+          className={subTabClass("panoramaViews")}
+          onClick={() => setMappingTab("panoramaViews")}
+        >
+          virtual PTZ配置
+        </button>
+        <button
           className={subTabClass("cameras")}
           onClick={() => setMappingTab("cameras")}
         >
@@ -721,7 +907,7 @@ const MappingView: React.FC = () => {
 
       {/* 1. 映射绑定：左侧平面图，右侧单路摄像头预览 */}
       {mappingTab === "bind" && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr,3fr]">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr,3fr,1fr]">
           {/* 左侧：选择平面图、网格设置、Canvas 预览（拖拽/缩放/网格/hover） */}
           <div className="flex flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
@@ -794,7 +980,7 @@ const MappingView: React.FC = () => {
                       imageUrl={url}
                       gridRows={rows}
                       gridCols={cols}
-                      className="w-full"
+                      className="w-full h-full"
                     />
                   );
                 })()
@@ -812,54 +998,83 @@ const MappingView: React.FC = () => {
               <span className="text-sm font-semibold text-slate-800">摄像头选择</span>
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
-                value={bindCameraId ?? ""}
-                onChange={(e) =>
-                  setBindCameraId(
-                    e.target.value ? Number(e.target.value) : "",
-                  )
-                }
+                value={bindCameraId}
+                onChange={(e) => setBindCameraId(e.target.value || "")}
               >
-                {bindCameras.length === 0 && <option value="">无摄像头</option>}
-                {bindCameras.map((cam) => (
-                  <option key={cam.id} value={cam.id}>
-                    {cam.name || cam.id}
+                {bindCameraOptions.length === 0 && <option value="">无摄像头</option>}
+                {bindCameraOptions.map((opt) => (
+                  <option key={opt.key} value={opt.key}>
+                    {opt.label}
                   </option>
                 ))}
               </select>
             </div>
-            <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-              {bindCameraId !== "" ? (
-                (() => {
-                  const cam =
-                    bindCameras.find((c) => c.id === bindCameraId) || null;
-                  if (!cam) {
+            <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100 min-h-64 max-h-[calc(100vh-220px)]">
+                {bindCameraId !== "" ? (
+                  (() => {
+                    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                    if (!opt) {
+                      return (
+                        <span className="text-xs text-slate-400">
+                          未找到对应摄像头，请检查配置。
+                        </span>
+                      );
+                    }
+                    if (opt.kind === "camera") {
+                      const cam = opt.camera;
+                      if (!cam.webrtc_url) {
+                        return (
+                          <span className="text-xs text-slate-400">
+                            该摄像头未配置 WebRTC 播放地址，请在“摄像头管理”中补充。
+                          </span>
+                        );
+                      }
+                      return (
+                        <PanZoomViewport className="h-full w-full">
+                          <iframe
+                            src={cam.webrtc_url}
+                            className="h-full w-full border-none"
+                            allow="autoplay; fullscreen"
+                            title={`mapping-bind-camera-${cam.id}`}
+                          />
+                        </PanZoomViewport>
+                      );
+                    }
+                    // virtual PTZ：用 MJPEG 预览
+                    const view = opt.view;
+                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview.mjpeg?t=${Date.now()}`;
                     return (
-                      <span className="text-xs text-slate-400">
-                        未找到对应摄像头，请检查配置。
-                      </span>
+                      <PanZoomViewport className="h-full w-full">
+                        <img
+                          src={url}
+                          alt={`virtual-view-${view.id}`}
+                          draggable={false}
+                          onDragStart={(e) => e.preventDefault()}
+                          className="h-full w-full object-contain"
+                        />
+                      </PanZoomViewport>
                     );
-                  }
-                  if (!cam.webrtc_url) {
-                    return (
-                      <span className="text-xs text-slate-400">
-                        该摄像头未配置 WebRTC 播放地址，请在“摄像头管理”中补充。
-                      </span>
-                    );
-                  }
-                  return (
-                    <iframe
-                      src={cam.webrtc_url}
-                      className="h-full w-full border-none"
-                      allow="autoplay; fullscreen"
-                      title={`mapping-bind-camera-${cam.id}`}
-                    />
-                  );
-                })()
-              ) : (
-                <span className="text-xs text-slate-400">
-                  当前无摄像头配置，请在“摄像头管理”子页中添加。
-                </span>
-              )}
+                  })()
+                ) : (
+                  <span className="text-xs text-slate-400">
+                    当前无摄像头配置，请在“摄像头管理”子页中添加。
+                  </span>
+                )}
+            </div>
+          </div>
+
+          {/* 摄像头预览右侧：映射数据列表（独立面板） */}
+          <div className="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white p-0 shadow-sm">
+            <div className="border-b border-slate-200 bg-slate-50 px-3 py-3">
+              <div className="text-sm font-semibold text-slate-800">映射数据列表</div>
+              <div className="mt-0.5 text-[11px] text-slate-500">
+                未来显示：平面图网格ID ↔ 摄像头画面网格ID
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3">
+              <div className="rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
+                暂无数据。后续你绑定网格后，会在这里展示对应关系列表。
+              </div>
             </div>
           </div>
         </div>
@@ -867,6 +1082,9 @@ const MappingView: React.FC = () => {
 
       {/* 2. 摄像头管理：复用现有 CameraManageView */}
       {mappingTab === "cameras" && <CameraManageView />}
+
+      {/* 2.5 全景相机视窗配置：virtual PTZ 视口参数 + MJPEG 预览 */}
+      {mappingTab === "panoramaViews" && <PanoramaViewsView />}
 
       {/* 3. 平面图管理：使用你原来的平面图表单 + 列表 */}
       {mappingTab === "floorPlans" && (
@@ -1116,6 +1334,302 @@ const MappingView: React.FC = () => {
               </div>
             )}
           </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const PanoramaViewsView: React.FC = () => {
+  const [cameras, setCameras] = useState<Camera[]>([]);
+  const [cameraId, setCameraId] = useState<number | "">("");
+  const [views, setViews] = useState<CameraVirtualView[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [creating, setCreating] = useState(false);
+  // 用于强制 MJPEG 预览重连（保存参数后刷新画面）
+  const [previewNonce, setPreviewNonce] = useState<Record<number, number>>({});
+
+  const loadCameras = useCallback(async () => {
+    const res = await fetch(`${API_BASE}/api/cameras/`);
+    const data: Camera[] = await res.json();
+    setCameras(data);
+    if (data.length > 0 && cameraId === "") setCameraId(data[0].id);
+  }, [cameraId]);
+
+  const loadViews = useCallback(async () => {
+    if (cameraId === "") return;
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views`);
+      const data: CameraVirtualView[] = await res.json();
+      setViews(data);
+    } finally {
+      setLoading(false);
+    }
+  }, [cameraId]);
+
+  useEffect(() => {
+    loadCameras();
+  }, [loadCameras]);
+
+  useEffect(() => {
+    loadViews();
+  }, [loadViews]);
+
+  useEffect(() => {
+    // 切换摄像机时，清空 nonce，避免不同 camera 混用
+    setPreviewNonce({});
+  }, [cameraId]);
+
+  const bumpPreview = (viewId: number) => {
+    setPreviewNonce((m) => ({ ...m, [viewId]: Date.now() }));
+  };
+
+  const createView = async () => {
+    if (cameraId === "") return;
+    setCreating(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          camera_id: cameraId,
+          name: `View ${views.length + 1}`,
+          enabled: true,
+          yaw_deg: 0,
+          pitch_deg: 0,
+          fov_deg: 90,
+          out_w: 960,
+          out_h: 540,
+        }),
+      });
+      if (!res.ok) {
+        alert("创建视窗失败");
+        return;
+      }
+      const created: CameraVirtualView = await res.json();
+      await loadViews();
+      bumpPreview(created.id);
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const updateView = async (v: CameraVirtualView) => {
+    if (cameraId === "") return;
+    const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views/${v.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: v.name,
+        enabled: v.enabled,
+        yaw_deg: v.yaw_deg,
+        pitch_deg: v.pitch_deg,
+        fov_deg: v.fov_deg,
+        out_w: v.out_w,
+        out_h: v.out_h,
+      }),
+    });
+    if (!res.ok) {
+      alert("保存失败");
+      return;
+    }
+    await loadViews();
+    // 强制 <img> 重新建立 MJPEG 连接，才能看到新参数的画面
+    bumpPreview(v.id);
+  };
+
+  const deleteView = async (viewId: number) => {
+    if (cameraId === "") return;
+    if (!confirm("确定删除该视窗吗？")) return;
+    const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views/${viewId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      alert("删除失败");
+      return;
+    }
+    await loadViews();
+    setPreviewNonce((m) => {
+      const next = { ...m };
+      delete next[viewId];
+      return next;
+    });
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold text-slate-800">选择摄像机</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+            value={cameraId}
+            onChange={(e) => setCameraId(e.target.value ? Number(e.target.value) : "")}
+          >
+            {cameras.length === 0 && <option value="">无摄像机</option>}
+            {cameras.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} #{c.id}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button
+          className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          disabled={cameraId === "" || creating}
+          onClick={createView}
+        >
+          {creating ? "创建中…" : "新增视窗"}
+        </button>
+      </div>
+
+      <p className="text-[11px] text-slate-500">
+        说明：此页面用于 360 全景相机的 virtual PTZ 透视视窗配置。预览使用 MJPEG 流（首次实现），后续可替换为 WebRTC。
+      </p>
+
+      {loading ? (
+        <div className="text-xs text-slate-500">加载中…</div>
+      ) : views.length === 0 ? (
+        <div className="text-xs text-slate-500">暂无视窗配置，点击“新增视窗”。</div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+          {views.map((v, idx) => {
+            const previewUrl =
+              cameraId === ""
+                ? ""
+                : `${API_BASE}/api/cameras/${cameraId}/virtual-views/${v.id}/preview.mjpeg`;
+            const nonce = previewNonce[v.id] ?? 0;
+            const previewUrlWithNonce = previewUrl ? `${previewUrl}?t=${nonce}` : "";
+            return (
+              <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-slate-800">
+                      视窗 {idx + 1}{" "}
+                      <span className="text-[11px] font-normal text-slate-400">#{v.id}</span>
+                    </div>
+                    <input
+                      className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-xs"
+                      value={v.name}
+                      onChange={(e) =>
+                        setViews((old) => old.map((x) => (x.id === v.id ? { ...x, name: e.target.value } : x)))
+                      }
+                    />
+                  </div>
+                  <button
+                    className="rounded border border-rose-300 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
+                    onClick={() => deleteView(v.id)}
+                  >
+                    删除
+                  </button>
+                </div>
+
+                <div className="mb-2 flex items-center gap-2">
+                  <label className="text-xs text-slate-600">
+                    <input
+                      type="checkbox"
+                      className="mr-1 align-middle"
+                      checked={v.enabled}
+                      onChange={(e) =>
+                        setViews((old) => old.map((x) => (x.id === v.id ? { ...x, enabled: e.target.checked } : x)))
+                      }
+                    />
+                    启用
+                  </label>
+                </div>
+
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <label className="text-slate-600">
+                    Yaw(°)
+                    <input
+                      type="number"
+                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                      value={v.yaw_deg}
+                      onChange={(e) =>
+                        setViews((old) =>
+                          old.map((x) => (x.id === v.id ? { ...x, yaw_deg: Number(e.target.value) } : x)),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="text-slate-600">
+                    Pitch(°)
+                    <input
+                      type="number"
+                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                      value={v.pitch_deg}
+                      onChange={(e) =>
+                        setViews((old) =>
+                          old.map((x) => (x.id === v.id ? { ...x, pitch_deg: Number(e.target.value) } : x)),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="text-slate-600">
+                    FOV(°)
+                    <input
+                      type="number"
+                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                      value={v.fov_deg}
+                      onChange={(e) =>
+                        setViews((old) =>
+                          old.map((x) => (x.id === v.id ? { ...x, fov_deg: Number(e.target.value) } : x)),
+                        )
+                      }
+                    />
+                  </label>
+                  <label className="text-slate-600">
+                    输出(w×h)
+                    <div className="mt-0.5 flex gap-1">
+                      <input
+                        type="number"
+                        className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                        value={v.out_w}
+                        onChange={(e) =>
+                          setViews((old) =>
+                            old.map((x) => (x.id === v.id ? { ...x, out_w: Number(e.target.value) } : x)),
+                          )
+                        }
+                      />
+                      <input
+                        type="number"
+                        className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                        value={v.out_h}
+                        onChange={(e) =>
+                          setViews((old) =>
+                            old.map((x) => (x.id === v.id ? { ...x, out_h: Number(e.target.value) } : x)),
+                          )
+                        }
+                      />
+                    </div>
+                  </label>
+                </div>
+
+                <div className="mt-2 flex gap-2">
+                  <button
+                    className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
+                    onClick={() => updateView(v)}
+                  >
+                    保存参数
+                  </button>
+                </div>
+
+                <div className="mt-3 overflow-hidden rounded border border-slate-200 bg-slate-100">
+                  {previewUrlWithNonce ? (
+                    <img
+                      key={`${v.id}-${nonce}`}
+                      src={previewUrlWithNonce}
+                      alt={`virtual-view-${v.id}`}
+                      className="h-max w-full object-contain"
+                    />
+                  ) : (
+                    <div className="flex h-max items-center justify-center text-xs text-slate-500">无预览</div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

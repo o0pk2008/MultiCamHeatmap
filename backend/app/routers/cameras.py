@@ -1,6 +1,13 @@
-from typing import List
+from typing import Dict, List, Tuple
+
+import math
+import time
+
+import cv2
+import numpy as np
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -11,6 +18,91 @@ from ..db import get_db
 # - 不直接关心平面图映射，映射由 mappings 路由负责。
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+
+_remap_cache: Dict[Tuple[int, int, float, float, float, int, int], Tuple[np.ndarray, np.ndarray]] = {}
+
+
+def _build_equirect_to_perspective_map(
+    in_w: int,
+    in_h: int,
+    yaw_deg: float,
+    pitch_deg: float,
+    fov_deg: float,
+    out_w: int,
+    out_h: int,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    基于等距柱状投影（equirectangular，经度x纬度）构造到透视平面的 remap。
+    约定：输入图像横轴为 yaw（-pi..pi），纵轴为 pitch/纬度（-pi/2..pi/2）。
+    """
+    key = (in_w, in_h, float(yaw_deg), float(pitch_deg), float(fov_deg), out_w, out_h)
+    cached = _remap_cache.get(key)
+    if cached is not None:
+        return cached
+
+    fov = math.radians(fov_deg)
+    yaw = math.radians(yaw_deg)
+    pitch = math.radians(pitch_deg)
+
+    # 透视相机在归一化平面上的坐标
+    x = (np.linspace(0, out_w - 1, out_w) - (out_w - 1) / 2.0) / ((out_w - 1) / 2.0)
+    y = (np.linspace(0, out_h - 1, out_h) - (out_h - 1) / 2.0) / ((out_h - 1) / 2.0)
+    xx, yy = np.meshgrid(x, y)
+
+    # 按 fov 将归一化平面映射到视锥
+    # 注意：这里用 tan(fov/2) 控制视场
+    zz = np.ones_like(xx)
+    xx = xx * math.tan(fov / 2.0)
+    yy = -yy * math.tan(fov / 2.0)  # y 轴向下为正，反转为右手系
+
+    # 归一化方向向量
+    norm = np.sqrt(xx * xx + yy * yy + zz * zz)
+    vx = xx / norm
+    vy = yy / norm
+    vz = zz / norm
+
+    # 先绕 x 轴 pitch，再绕 y 轴 yaw（可按需要调整约定）
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+
+    # pitch: rotate around x
+    vy2 = vy * cp - vz * sp
+    vz2 = vy * sp + vz * cp
+    vx2 = vx
+
+    # yaw: rotate around y
+    vx3 = vx2 * cy + vz2 * sy
+    vz3 = -vx2 * sy + vz2 * cy
+    vy3 = vy2
+
+    # 转为经纬度
+    lon = np.arctan2(vx3, vz3)  # [-pi, pi]
+    lat = np.arcsin(np.clip(vy3, -1.0, 1.0))  # [-pi/2, pi/2]
+
+    # 映射到像素坐标
+    map_x = (lon / (2 * math.pi) + 0.5) * (in_w - 1)
+    map_y = (0.5 - lat / math.pi) * (in_h - 1)
+
+    map_x = map_x.astype(np.float32)
+    map_y = map_y.astype(np.float32)
+    _remap_cache[key] = (map_x, map_y)
+    return map_x, map_y
+
+
+def _equirect_to_perspective(
+    frame_bgr: np.ndarray,
+    yaw_deg: float,
+    pitch_deg: float,
+    fov_deg: float,
+    out_w: int,
+    out_h: int,
+) -> np.ndarray:
+    in_h, in_w = frame_bgr.shape[:2]
+    map_x, map_y = _build_equirect_to_perspective_map(
+        in_w, in_h, yaw_deg, pitch_deg, fov_deg, out_w, out_h
+    )
+    return cv2.remap(frame_bgr, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
 
 
 @router.get("/", response_model=List[schemas.CameraOut])
@@ -33,6 +125,34 @@ def create_camera(payload: schemas.CameraCreate, db: Session = Depends(get_db)) 
     db.commit()
     db.refresh(cam)
     return cam
+
+
+@router.get("/virtual-views/all", response_model=List[schemas.CameraVirtualViewWithCameraOut])
+def list_all_virtual_views(db: Session = Depends(get_db)) -> List[dict]:
+    rows = (
+        db.query(models.CameraVirtualView, models.Camera.name)
+        .join(models.Camera, models.Camera.id == models.CameraVirtualView.camera_id)
+        .order_by(models.CameraVirtualView.id)
+        .all()
+    )
+    # 返回 view 字段 + camera_name
+    out: List[dict] = []
+    for view, camera_name in rows:
+        out.append(
+            {
+                "id": view.id,
+                "camera_id": view.camera_id,
+                "camera_name": camera_name,
+                "name": view.name,
+                "enabled": view.enabled,
+                "yaw_deg": view.yaw_deg,
+                "pitch_deg": view.pitch_deg,
+                "fov_deg": view.fov_deg,
+                "out_w": view.out_w,
+                "out_h": view.out_h,
+            }
+        )
+    return out
 
 
 @router.put("/{camera_id}", response_model=schemas.CameraOut)
@@ -61,4 +181,126 @@ def delete_camera(camera_id: int, db: Session = Depends(get_db)) -> None:
         raise HTTPException(status_code=404, detail="Camera not found")
     db.delete(cam)
     db.commit()
+
+
+@router.get("/{camera_id}/virtual-views", response_model=List[schemas.CameraVirtualViewOut])
+def list_virtual_views(camera_id: int, db: Session = Depends(get_db)) -> List[models.CameraVirtualView]:
+    if not db.query(models.Camera).filter(models.Camera.id == camera_id).first():
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.camera_id == camera_id)
+        .order_by(models.CameraVirtualView.id)
+        .all()
+    )
+
+
+@router.post("/{camera_id}/virtual-views", response_model=schemas.CameraVirtualViewOut)
+def create_virtual_view(
+    camera_id: int, payload: schemas.CameraVirtualViewCreate, db: Session = Depends(get_db)
+) -> models.CameraVirtualView:
+    if payload.camera_id != camera_id:
+        raise HTTPException(status_code=400, detail="camera_id mismatch in payload")
+    if not db.query(models.Camera).filter(models.Camera.id == camera_id).first():
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = models.CameraVirtualView(**payload.dict())
+    db.add(view)
+    db.commit()
+    db.refresh(view)
+    return view
+
+
+@router.put("/{camera_id}/virtual-views/{view_id}", response_model=schemas.CameraVirtualViewOut)
+def update_virtual_view(
+    camera_id: int,
+    view_id: int,
+    payload: schemas.CameraVirtualViewUpdate,
+    db: Session = Depends(get_db),
+) -> models.CameraVirtualView:
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    data = payload.dict(exclude_unset=True)
+    for k, v in data.items():
+        setattr(view, k, v)
+    db.commit()
+    db.refresh(view)
+    return view
+
+
+@router.delete("/{camera_id}/virtual-views/{view_id}")
+def delete_virtual_view(camera_id: int, view_id: int, db: Session = Depends(get_db)) -> None:
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    db.delete(view)
+    db.commit()
+
+
+@router.get("/{camera_id}/virtual-views/{view_id}/preview.mjpeg")
+def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depends(get_db)):
+    cam = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+
+    def gen():
+        cap = cv2.VideoCapture(cam.rtsp_url)
+        # 尝试降低缓冲延迟
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+        boundary = b"--frame"
+        last_ok = time.time()
+        try:
+            while True:
+                ok, frame = cap.read()
+                if not ok or frame is None:
+                    # RTSP 抖动时短暂等待重试
+                    if time.time() - last_ok > 5:
+                        break
+                    time.sleep(0.05)
+                    continue
+                last_ok = time.time()
+
+                if not view.enabled:
+                    persp = frame
+                else:
+                    persp = _equirect_to_perspective(
+                        frame,
+                        yaw_deg=view.yaw_deg,
+                        pitch_deg=view.pitch_deg,
+                        fov_deg=view.fov_deg,
+                        out_w=view.out_w,
+                        out_h=view.out_h,
+                    )
+
+                ok2, jpg = cv2.imencode(".jpg", persp, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                if not ok2:
+                    continue
+                data = jpg.tobytes()
+                yield boundary + b"\r\n"
+                yield b"Content-Type: image/jpeg\r\n"
+                yield f"Content-Length: {len(data)}\r\n\r\n".encode("utf-8")
+                yield data + b"\r\n"
+        finally:
+            cap.release()
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
