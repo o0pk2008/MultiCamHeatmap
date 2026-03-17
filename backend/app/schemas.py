@@ -44,6 +44,15 @@ class FloorPlanCreate(FloorPlanBase):
     pass
 
 
+class FloorPlanUpdate(BaseModel):
+    name: Optional[str] = None
+    image_path: Optional[str] = None
+    width_px: Optional[int] = None
+    height_px: Optional[int] = None
+    grid_rows: Optional[int] = None
+    grid_cols: Optional[int] = None
+
+
 class FloorPlanOut(FloorPlanBase):
     id: int
 

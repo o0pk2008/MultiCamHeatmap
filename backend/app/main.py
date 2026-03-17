@@ -1,6 +1,9 @@
+import os
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from .db import Base, engine
 from .routers.cameras import router as cameras_router
@@ -19,6 +22,11 @@ app.add_middleware(
 
 # 创建数据库表
 Base.metadata.create_all(bind=engine)
+
+# 静态目录挂载：用于访问上传的平面图图片（/maps/xxx.png）
+maps_dir = "/data/maps"
+os.makedirs(maps_dir, exist_ok=True)
+app.mount("/maps", StaticFiles(directory=maps_dir), name="maps")
 
 app.include_router(cameras_router)
 app.include_router(mappings_router)

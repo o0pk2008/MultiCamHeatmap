@@ -1,6 +1,8 @@
 from typing import List
+import os
+import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -26,6 +28,23 @@ def create_floor_plan(
 ) -> models.FloorPlan:
     fp = models.FloorPlan(**payload.dict())
     db.add(fp)
+    db.commit()
+    db.refresh(fp)
+    return fp
+
+
+@router.put("/floor-plans/{floor_plan_id}", response_model=schemas.FloorPlanOut)
+def update_floor_plan(
+    floor_plan_id: int,
+    payload: schemas.FloorPlanUpdate,
+    db: Session = Depends(get_db),
+) -> models.FloorPlan:
+    fp = db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first()
+    if not fp:
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+    data = payload.dict(exclude_unset=True)
+    for k, v in data.items():
+        setattr(fp, k, v)
     db.commit()
     db.refresh(fp)
     return fp
@@ -89,6 +108,31 @@ def create_camera_mapping(
     db.commit()
     db.refresh(mapping)
     return mapping
+
+
+@router.post("/floor-plans/upload-image")
+async def upload_floor_plan_image(file: UploadFile = File(...)) -> dict:
+    """
+    上传平面图底图图片（JPG/PNG），保存到 /data/maps 目录。
+    返回后端可访问的 image_path 以及通过 /maps 前缀访问的 url。
+    """
+    if file.content_type not in ("image/png", "image/jpeg"):
+        raise HTTPException(status_code=400, detail="Only PNG and JPG images are supported")
+
+    ext = ".png" if file.content_type == "image/png" else ".jpg"
+    maps_dir = "/data/maps"
+    os.makedirs(maps_dir, exist_ok=True)
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    full_path = os.path.join(maps_dir, filename)
+
+    content = await file.read()
+    with open(full_path, "wb") as f:
+        f.write(content)
+
+    image_path = f"/data/maps/{filename}"
+    url = f"/maps/{filename}"
+    return {"image_path": image_path, "url": url}
 
 
 @router.get(

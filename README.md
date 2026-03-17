@@ -24,6 +24,9 @@
 在项目根目录：
 
 ```bash
+docker compose build backend
+docker compose build frontend
+docker compose down
 docker compose build
 docker compose up
 ```
