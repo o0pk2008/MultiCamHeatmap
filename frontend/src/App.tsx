@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type TabKey = "realtime" | "heatmap" | "mapping";
 
@@ -37,8 +37,26 @@ const App: React.FC = () => {
         {/* 左侧侧边栏 */}
         <aside className="w-60 shrink-0 border-r border-slate-200 bg-white px-3 py-4 shadow-sm">
           <div className="mb-4 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-emerald-400 via-yellow-300 to-red-500 shadow-inner">
-              <div className="h-5 w-5 rounded-full bg-white/70 mix-blend-screen" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900/5 shadow-inner">
+              <svg
+                viewBox="0 0 1024 1024"
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-8 w-8"
+                aria-hidden="true"
+              >
+                <path d="M34.816 148.48h240.128v240.64H34.816z" fill="#694FF9"></path>
+                <path d="M274.432 148.48h240.128v240.64H274.432z" fill="#8A75FA"></path>
+                <path d="M514.56 148.48h240.128v240.64h-240.128z" fill="#694FF9"></path>
+                <path d="M34.816 389.12h240.128v240.64H34.816z" fill="#8A75FA"></path>
+                <path d="M274.432 389.12h240.128v240.64H274.432z" fill="#A08FFB"></path>
+                <path d="M514.56 389.12h240.128v240.64h-240.128z" fill="#D6CFFE"></path>
+                <path d="M754.688 148.48h240.128v240.64h-240.128z" fill="#AA9CFC"></path>
+                <path d="M754.688 389.12h240.128v240.64h-240.128z" fill="#8A75FA"></path>
+                <path d="M34.816 629.76h240.128v240.64H34.816z" fill="#D6CFFE"></path>
+                <path d="M274.432 629.76h240.128v240.64H274.432z" fill="#8A75FA"></path>
+                <path d="M514.56 629.76h240.128v240.64h-240.128z" fill="#AA9CFC"></path>
+                <path d="M754.688 629.76h240.128v240.64h-240.128z" fill="#A08FFB"></path>
+              </svg>
             </div>
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-slate-900">
@@ -93,7 +111,7 @@ const SidebarTabButton: React.FC<{
     onClick={() => onChange(tab)}
     className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-sm font-medium transition ${
       activeTab === tab
-        ? "bg-emerald-600 text-white shadow-sm"
+        ? "bg-[#694FF9] text-white shadow-sm"
         : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
     }`}
   >
@@ -169,6 +187,17 @@ const HeatmapView: React.FC = () => {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [floorPlans, setFloorPlans] = useState<FloorPlan[]>([]);
   const [selectedFloorPlanId, setSelectedFloorPlanId] = useState<number | null>(null);
+  const [heatmapSources, setHeatmapSources] = useState<
+    {
+      kind: "camera" | "virtual";
+      camera_id: number;
+      camera_name: string;
+      webrtc_url?: string | null;
+      virtual_view_id?: number | null;
+      virtual_view_name?: string | null;
+    }[]
+  >([]);
+  const [showHeatmapGrid, setShowHeatmapGrid] = useState(false);
 
   useEffect(() => {
     const load = async () => {
@@ -187,7 +216,26 @@ const HeatmapView: React.FC = () => {
     load();
   }, [selectedFloorPlanId]);
 
-  const mappedCameras = cameras.filter((c) => c.enabled && c.webrtc_url);
+  useEffect(() => {
+    if (selectedFloorPlanId == null) {
+      setHeatmapSources([]);
+      return;
+    }
+    fetch(`${API_BASE}/api/floor-plans/${selectedFloorPlanId}/heatmap-sources`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((items) => setHeatmapSources(items))
+      .catch((e) => console.error(e));
+  }, [selectedFloorPlanId]);
+
+  const mappedCameras = useMemo(() => {
+    // 只显示后端给出的 sources（保持顺序），并过滤掉 disabled 的 camera
+    const camMap = new Map<number, Camera>();
+    cameras.forEach((c) => camMap.set(c.id, c));
+    return heatmapSources.filter((s) => {
+      const c = camMap.get(s.camera_id);
+      return !!c && c.enabled;
+    });
+  }, [cameras, heatmapSources]);
 
   const selectedFloorPlan = floorPlans.find((fp) => fp.id === selectedFloorPlanId) || null;
   const floorPlanImageUrl =
@@ -209,6 +257,14 @@ const HeatmapView: React.FC = () => {
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-800">热力图预览</span>
             <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showHeatmapGrid}
+                  onChange={(e) => setShowHeatmapGrid(e.target.checked)}
+                />
+                显示网格
+              </label>
               <span className="text-[11px] text-slate-500">选择平面图：</span>
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
@@ -229,11 +285,13 @@ const HeatmapView: React.FC = () => {
             </div>
           </div>
           <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-            {floorPlanImageUrl ? (
-              <img
-                src={floorPlanImageUrl}
-                alt={selectedFloorPlan?.name}
-                className="h-full w-full object-contain"
+            {floorPlanImageUrl && selectedFloorPlan ? (
+              <FloorPlanCanvas
+                imageUrl={floorPlanImageUrl}
+                gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
+                gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
+                showGrid={showHeatmapGrid}
+                className="w-full h-full"
               />
             ) : (
               <span className="text-xs text-slate-400">
@@ -257,26 +315,41 @@ const HeatmapView: React.FC = () => {
             </p>
           ) : (
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {mappedCameras.slice(0, 6).map((cam) => (
+              {mappedCameras.slice(0, 6).map((src) => (
                 <div
-                  key={cam.id}
+                  key={`${src.kind}-${src.kind === "virtual" ? src.virtual_view_id : src.camera_id}`}
                   className="overflow-hidden rounded-lg border border-slate-200 bg-black"
                 >
                   <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
-                    <span className="truncate">{cam.name}</span>
-                    <span className="text-slate-400">ID: {cam.id}</span>
+                    <span className="truncate">
+                      {src.kind === "virtual"
+                        ? `${src.camera_name} / ${src.virtual_view_name}`
+                        : src.camera_name}
+                    </span>
+                    <span className="text-slate-400">
+                      {src.kind === "virtual"
+                        ? `VV:${src.virtual_view_id}`
+                        : `ID:${src.camera_id}`}
+                    </span>
                   </div>
                   <div className="aspect-video w-full bg-black">
-                    {cam.webrtc_url ? (
+                    {src.kind === "virtual" && src.virtual_view_id ? (
+                      <img
+                        src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/preview.mjpeg?t=${Date.now()}`}
+                        className="h-full w-full object-contain"
+                        alt={`heatmap-virtual-${src.virtual_view_id}`}
+                        draggable={false}
+                      />
+                    ) : src.webrtc_url ? (
                       <iframe
-                        src={cam.webrtc_url}
+                        src={src.webrtc_url}
                         className="h-full w-full border-none"
                         allow="autoplay; fullscreen"
-                        title={`heatmap-camera-${cam.id}`}
+                        title={`heatmap-camera-${src.camera_id}`}
                       />
                     ) : (
                       <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">
-                        未配置 WebRTC 地址
+                        未配置播放地址
                       </div>
                     )}
                   </div>
@@ -312,6 +385,135 @@ interface CameraVirtualView {
   out_h: number;
 }
 
+interface VirtualViewCellMapping {
+  id: number;
+  virtual_view_id: number;
+  floor_plan_id: number;
+  camera_row: number;
+  camera_col: number;
+  floor_row: number;
+  floor_col: number;
+}
+
+type Pt = { x: number; y: number };
+
+function orderQuad(points: Pt[]): Pt[] {
+  // 期望输入 4 个点；按几何中心排序为顺时针，并尽量以左上作为起点
+  if (points.length !== 4) return points;
+  const cx = points.reduce((s, p) => s + p.x, 0) / 4;
+  const cy = points.reduce((s, p) => s + p.y, 0) / 4;
+  const sorted = [...points].sort((a, b) => Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx));
+  // 旋转到“最像左上角”的点作为第一个（最小 x+y）
+  let best = 0;
+  let bestScore = Infinity;
+  for (let i = 0; i < 4; i++) {
+    const s = sorted[i].x + sorted[i].y;
+    if (s < bestScore) {
+      bestScore = s;
+      best = i;
+    }
+  }
+  return [...sorted.slice(best), ...sorted.slice(0, best)];
+}
+
+function bilinear(quad: Pt[], u: number, v: number): Pt {
+  // quad order: [p00, p10, p11, p01] (clockwise starting near top-left)
+  const p00 = quad[0];
+  const p10 = quad[1];
+  const p11 = quad[2];
+  const p01 = quad[3];
+  const a = (1 - u) * (1 - v);
+  const b = u * (1 - v);
+  const c = u * v;
+  const d = (1 - u) * v;
+  return {
+    x: a * p00.x + b * p10.x + c * p11.x + d * p01.x,
+    y: a * p00.y + b * p10.y + c * p11.y + d * p01.y,
+  };
+}
+
+function computeHomography(src: Pt[], dst: Pt[]): number[] | null {
+  // Solve for H (3x3) mapping src(u,v) -> dst(x,y), with h33 = 1
+  // Returns row-major 9 elements.
+  if (src.length !== 4 || dst.length !== 4) return null;
+  const A: number[][] = [];
+  const b: number[] = [];
+  for (let i = 0; i < 4; i++) {
+    const u = src[i].x;
+    const v = src[i].y;
+    const x = dst[i].x;
+    const y = dst[i].y;
+    A.push([u, v, 1, 0, 0, 0, -u * x, -v * x]);
+    b.push(x);
+    A.push([0, 0, 0, u, v, 1, -u * y, -v * y]);
+    b.push(y);
+  }
+  // Gaussian elimination on 8x8
+  const M = A.map((row, i) => [...row, b[i]]);
+  const n = 8;
+  for (let col = 0; col < n; col++) {
+    // pivot
+    let pivot = col;
+    for (let r = col + 1; r < n; r++) {
+      if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) pivot = r;
+    }
+    if (Math.abs(M[pivot][col]) < 1e-9) return null;
+    if (pivot !== col) {
+      const tmp = M[col];
+      M[col] = M[pivot];
+      M[pivot] = tmp;
+    }
+    // normalize
+    const div = M[col][col];
+    for (let c = col; c <= n; c++) M[col][c] /= div;
+    // eliminate
+    for (let r = 0; r < n; r++) {
+      if (r === col) continue;
+      const factor = M[r][col];
+      if (Math.abs(factor) < 1e-12) continue;
+      for (let c = col; c <= n; c++) M[r][c] -= factor * M[col][c];
+    }
+  }
+  const h = M.map((row) => row[n]); // 8 unknowns
+  return [h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], 1];
+}
+
+function applyHomography(H: number[], p: Pt): Pt {
+  const u = p.x;
+  const v = p.y;
+  const x = H[0] * u + H[1] * v + H[2];
+  const y = H[3] * u + H[4] * v + H[5];
+  const w = H[6] * u + H[7] * v + H[8];
+  const iw = Math.abs(w) < 1e-9 ? 1e-9 : w;
+  return { x: x / iw, y: y / iw };
+}
+
+function pointInPoly(pt: Pt, poly: Pt[]): boolean {
+  // ray casting
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersect = ((yi > pt.y) !== (yj > pt.y)) && (pt.x < ((xj - xi) * (pt.y - yi)) / (yj - yi + 1e-9) + xi);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+function worldToImagePoint(world: Pt, viewport: { w: number; h: number; aspectW: number; aspectH: number }): Pt | null {
+  const { w, h, aspectW, aspectH } = viewport;
+  if (!w || !h || !aspectW || !aspectH) return null;
+  const scale = Math.min(w / aspectW, h / aspectH);
+  const imgW = aspectW * scale;
+  const imgH = aspectH * scale;
+  const imgX = (w - imgW) / 2;
+  const imgY = (h - imgH) / 2;
+  const x = world.x - imgX;
+  const y = world.y - imgY;
+  if (x < 0 || y < 0 || x > imgW || y > imgH) return null;
+  return { x: (x / imgW) * aspectW, y: (y / imgH) * aspectH };
+}
+
 function floorPlanImageUrl(fp: FloorPlan): string {
   return fp.image_path.startsWith("/data/maps/")
     ? `${API_BASE}/maps/${fp.image_path.split("/").pop()}`
@@ -319,15 +521,36 @@ function floorPlanImageUrl(fp: FloorPlan): string {
 }
 
 /** 平面图 Canvas：支持拖拽、缩放、网格叠加与 hover 显示网格编号 */
-const FloorPlanCanvas: React.FC<{
+type FloorPlanCanvasProps = {
   imageUrl: string;
   gridRows: number;
   gridCols: number;
   className?: string;
-}> = ({ imageUrl, gridRows, gridCols, className = "" }) => {
+  showGrid?: boolean;
+  selectedCell?: { row: number; col: number } | null;
+  onCellClick?: (cell: { row: number; col: number } | null) => void;
+  onCellHover?: (cell: { row: number; col: number } | null) => void;
+  linkedHoverCell?: { row: number; col: number } | null;
+  mappedCells?: Set<string>;
+};
+
+const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
+  const {
+    imageUrl,
+    gridRows,
+    gridCols,
+    className = "",
+    showGrid = true,
+    selectedCell = null,
+    onCellClick,
+    onCellHover,
+    linkedHoverCell = null,
+    mappedCells,
+  } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
+  const sel: { row: number; col: number } | null = selectedCell ?? null;
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [zoom, setZoom] = useState(1);
   const [hoverCell, setHoverCell] = useState<{ row: number; col: number } | null>(null);
@@ -386,25 +609,79 @@ const FloorPlanCanvas: React.FC<{
     ctx.translate(offsetX, offsetY);
     ctx.scale(fitScale, fitScale);
     ctx.drawImage(img, 0, 0);
-    // 网格线
     const rows = Math.max(1, gridRows);
     const cols = Math.max(1, gridCols);
-    ctx.strokeStyle = "rgba(0,0,0,0.4)";
-    ctx.lineWidth = 1 / fitScale;
-    for (let r = 0; r <= rows; r++) {
-      const y = (ih * r) / rows;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(iw, y);
-      ctx.stroke();
+    // 网格线（可显示/隐藏）
+    if (showGrid) {
+      ctx.strokeStyle = "rgba(14,165,233,0.55)";
+      ctx.lineWidth = 1 / fitScale;
+      for (let r = 0; r <= rows; r++) {
+        const y = (ih * r) / rows;
+        ctx.beginPath();
+        ctx.moveTo(0, y);
+        ctx.lineTo(iw, y);
+        ctx.stroke();
+      }
+      for (let c = 0; c <= cols; c++) {
+        const x = (iw * c) / cols;
+        ctx.beginPath();
+        ctx.moveTo(x, 0);
+        ctx.lineTo(x, ih);
+        ctx.stroke();
+      }
     }
-    for (let c = 0; c <= cols; c++) {
-      const x = (iw * c) / cols;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, ih);
-      ctx.stroke();
+    // 已绑定格子（绿色，且不可选）
+    if (mappedCells && mappedCells.size > 0) {
+      const cellW = iw / cols;
+      const cellH = ih / rows;
+      ctx.fillStyle = "rgba(34,197,94,0.18)";
+      ctx.strokeStyle = "rgba(34,197,94,0.85)";
+      ctx.lineWidth = 1.5 / fitScale;
+      mappedCells.forEach((key) => {
+        const [rs, cs] = key.split(",");
+        const r = Number(rs);
+        const c = Number(cs);
+        if (Number.isNaN(r) || Number.isNaN(c)) return;
+        if (r < 0 || r >= rows || c < 0 || c >= cols) return;
+        const x = c * cellW;
+        const y = r * cellH;
+        ctx.fillRect(x, y, cellW, cellH);
+        ctx.strokeRect(x, y, cellW, cellH);
+      });
     }
+
+    // selected 高亮（用于“定位”）
+    if (sel != null && sel.row >= 0 && sel.row < rows && sel.col >= 0 && sel.col < cols) {
+      const cellW = iw / cols;
+      const cellH = ih / rows;
+      const x = sel.col * cellW;
+      const y = sel.row * cellH;
+      ctx.fillStyle = "rgba(59,130,246,0.22)";
+      ctx.fillRect(x, y, cellW, cellH);
+      ctx.strokeStyle = "rgba(59,130,246,0.95)";
+      ctx.lineWidth = 2 / fitScale;
+      ctx.strokeRect(x, y, cellW, cellH);
+    }
+
+    // linked hover（对侧面板联动的 hover，高亮但不覆盖当前 hover）
+    if (
+      linkedHoverCell != null &&
+      linkedHoverCell.row >= 0 &&
+      linkedHoverCell.row < rows &&
+      linkedHoverCell.col >= 0 &&
+      linkedHoverCell.col < cols
+    ) {
+      const cellW = iw / cols;
+      const cellH = ih / rows;
+      const x = linkedHoverCell.col * cellW;
+      const y = linkedHoverCell.row * cellH;
+      ctx.fillStyle = "rgba(34,197,94,0.16)";
+      ctx.fillRect(x, y, cellW, cellH);
+      ctx.strokeStyle = "rgba(34,197,94,0.9)";
+      ctx.lineWidth = 2 / fitScale;
+      ctx.strokeRect(x, y, cellW, cellH);
+    }
+
     // hover 高亮与编号
     if (hoverCell != null && hoverCell.row >= 0 && hoverCell.row < rows && hoverCell.col >= 0 && hoverCell.col < cols) {
       const cellW = iw / cols;
@@ -435,7 +712,7 @@ const FloorPlanCanvas: React.FC<{
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, gridRows, gridCols, imgSize, canvasSize]);
+  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize]);
 
   useEffect(() => {
     draw();
@@ -537,6 +814,20 @@ const FloorPlanCanvas: React.FC<{
   const onMouseUp = () => setDragging(false);
   const onMouseLeave = () => setHoverCell(null);
 
+  useEffect(() => {
+    onCellHover?.(hoverCell);
+  }, [hoverCell, onCellHover]);
+  const onClick = (e: React.MouseEvent) => {
+    if (!onCellClick) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const cell = getCellAt(cx, cy);
+    if (cell && mappedCells?.has(`${cell.row},${cell.col}`)) return;
+    onCellClick(cell);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -547,6 +838,7 @@ const FloorPlanCanvas: React.FC<{
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
       onMouseLeave={onMouseLeave}
+      onClick={onClick}
     >
       <canvas
         ref={canvasRef}
@@ -568,7 +860,24 @@ const FloorPlanCanvas: React.FC<{
 const PanZoomViewport: React.FC<{
   className?: string;
   children: React.ReactNode;
-}> = ({ className = "", children }) => {
+  mode?: "panzoom" | "draw";
+  onClickWorld?: (p: { x: number; y: number }) => void;
+  onMoveWorld?: (p: { x: number; y: number }) => void;
+  onPointerDownWorld?: (p: { x: number; y: number }) => boolean | void;
+  onPointerUpWorld?: (p: { x: number; y: number }) => void;
+  renderOverlay?: (ctx: CanvasRenderingContext2D, info: { w: number; h: number; pan: { x: number; y: number }; zoom: number }) => void;
+  topLeftOverlay?: React.ReactNode;
+}> = ({
+  className = "",
+  children,
+  mode = "panzoom",
+  onClickWorld,
+  onMoveWorld,
+  onPointerDownWorld,
+  onPointerUpWorld,
+  renderOverlay,
+  topLeftOverlay,
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const [size, setSize] = useState({ w: 600, h: 400 });
@@ -600,6 +909,37 @@ const PanZoomViewport: React.FC<{
     ctx.clearRect(0, 0, c.width, c.height);
   }, [size]);
 
+  const redrawOverlay = useCallback(() => {
+    const c = overlayCanvasRef.current;
+    if (!c) return;
+    const ctx = c.getContext("2d");
+    if (!ctx) return;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (renderOverlay) {
+      renderOverlay(ctx, { w: c.width, h: c.height, pan, zoom });
+    }
+  }, [renderOverlay, pan, zoom]);
+
+  useEffect(() => {
+    redrawOverlay();
+  }, [redrawOverlay, size]);
+
+  const cssToWorld = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = containerRef.current;
+      if (!el) return { x: 0, y: 0 };
+      const rect = el.getBoundingClientRect();
+      const cssX = clientX - rect.left;
+      const cssY = clientY - rect.top;
+      return {
+        x: (cssX - pan.x) / zoom,
+        y: (cssY - pan.y) / zoom,
+      };
+    },
+    [pan, zoom],
+  );
+
   const onWheel = (e: React.WheelEvent) => {
     const el = containerRef.current;
     if (!el) return;
@@ -620,17 +960,43 @@ const PanZoomViewport: React.FC<{
   };
 
   const onPointerDown = (e: React.PointerEvent) => {
+    // 如果点在工具栏/控件上，不要触发画布拖拽/绘制（否则按钮点击会“没反应”）
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('[data-viewport-ui="1"]')) {
+      return;
+    }
+
+    const p = cssToWorld(e.clientX, e.clientY);
+    const handled = onPointerDownWorld?.(p);
+
     // 避免 <img> 默认拖拽、以及浏览器选择行为
     e.preventDefault();
     (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    if (mode === "draw") {
+      // 如果 pointerDown 已经被工具逻辑处理（比如命中顶点拖拽），不要再触发“点4次建四边形”
+      if (handled) return;
+      onClickWorld?.(p);
+      return;
+    }
+    // 如果 pointerDown 被工具逻辑处理（例如命中顶点拖拽），不要触发画布平移拖拽
+    if (handled) return;
     setDragging(true);
     setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
   };
   const onPointerMove = (e: React.PointerEvent) => {
+    const target = e.target as HTMLElement | null;
+    if (target?.closest?.('[data-viewport-ui="1"]')) {
+      return;
+    }
+    const p = cssToWorld(e.clientX, e.clientY);
+    onMoveWorld?.(p);
     if (!dragging) return;
+    if (mode !== "panzoom") return;
     setPan({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
   };
   const endDrag = (e: React.PointerEvent) => {
+    const p = cssToWorld(e.clientX, e.clientY);
+    onPointerUpWorld?.(p);
     try {
       (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -663,12 +1029,18 @@ const PanZoomViewport: React.FC<{
         {children}
       </div>
 
-      {/* overlay canvas：后续用于画点/框/多边形；默认不拦截鼠标事件 */}
+      {/* overlay canvas：用于画点/框/多边形；默认不拦截鼠标事件 */}
       <canvas
         ref={overlayCanvasRef}
         className="absolute inset-0"
         style={{ width: "100%", height: "100%", pointerEvents: "none" }}
       />
+
+      {topLeftOverlay && (
+        <div className="absolute left-2 top-2" data-viewport-ui="1">
+          {topLeftOverlay}
+        </div>
+      )}
 
       {/* 角落显示当前缩放倍数（可删） */}
       <div className="pointer-events-none absolute bottom-2 right-2 rounded bg-white/80 px-2 py-0.5 text-[11px] text-slate-700">
@@ -711,6 +1083,85 @@ const MappingView: React.FC = () => {
   const [bindGridCols, setBindGridCols] = useState("");
   const [savingGrid, setSavingGrid] = useState(false);
 
+  // virtual PTZ 画面网格标定（四边形 + 行列）
+  const [vpTool, setVpTool] = useState<"none" | "quad">("none");
+  const [vpQuadPoints, setVpQuadPoints] = useState<Pt[]>([]);
+  const [vpQuad, setVpQuad] = useState<Pt[] | null>(null);
+  const [vpRows, setVpRows] = useState("10");
+  const [vpCols, setVpCols] = useState("10");
+  const [vpHover, setVpHover] = useState<{ row: number; col: number } | null>(null);
+  const [vpSaving, setVpSaving] = useState(false);
+  const [vpEditEnabled, setVpEditEnabled] = useState(false);
+  const [vpDraggingVertex, setVpDraggingVertex] = useState<number | null>(null);
+  const [vpSelectedCell, setVpSelectedCell] = useState<{ row: number; col: number } | null>(null);
+  const vpViewportSizeRef = useRef<{ w: number; h: number; aspectW: number; aspectH: number }>({
+    w: 0,
+    h: 0,
+    aspectW: 960,
+    aspectH: 540,
+  });
+
+  const [fpSelectedCell, setFpSelectedCell] = useState<{ row: number; col: number } | null>(null);
+  const [fpHoverCell, setFpHoverCell] = useState<{ row: number; col: number } | null>(null);
+  const [linkedFpHoverCell, setLinkedFpHoverCell] = useState<{ row: number; col: number } | null>(null);
+  const [linkedVpHoverCell, setLinkedVpHoverCell] = useState<{ row: number; col: number } | null>(null);
+
+  const [cellMappings, setCellMappings] = useState<VirtualViewCellMapping[]>([]);
+  const [mappingsLoading, setMappingsLoading] = useState(false);
+  const [mappingsSaving, setMappingsSaving] = useState(false);
+  const [replaceMappingId, setReplaceMappingId] = useState<number | null>(null);
+
+  const mappedCamCells = useMemo(() => {
+    const s = new Set<string>();
+    cellMappings.forEach((m) => s.add(`${m.camera_row},${m.camera_col}`));
+    return s;
+  }, [cellMappings]);
+  const mappedFloorCells = useMemo(() => {
+    const s = new Set<string>();
+    cellMappings.forEach((m) => s.add(`${m.floor_row},${m.floor_col}`));
+    return s;
+  }, [cellMappings]);
+
+  const camToFloor = useMemo(() => {
+    const m = new Map<string, { row: number; col: number }>();
+    cellMappings.forEach((x) => m.set(`${x.camera_row},${x.camera_col}`, { row: x.floor_row, col: x.floor_col }));
+    return m;
+  }, [cellMappings]);
+  const floorToCam = useMemo(() => {
+    const m = new Map<string, { row: number; col: number }>();
+    cellMappings.forEach((x) => m.set(`${x.floor_row},${x.floor_col}`, { row: x.camera_row, col: x.camera_col }));
+    return m;
+  }, [cellMappings]);
+
+  const loadVirtualGridConfig = useCallback(async (viewId: number) => {
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/cameras/virtual-views/${viewId}/grid-config`,
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const poly: Pt[] = (() => {
+        try {
+          return JSON.parse(data.polygon_json || "[]");
+        } catch {
+          return [];
+        }
+      })();
+      if (Array.isArray(poly) && poly.length === 4) {
+        setVpQuad(orderQuad(poly));
+        setVpQuadPoints([]);
+      } else {
+        setVpQuad(null);
+        setVpQuadPoints([]);
+      }
+      setVpRows(String(data.grid_rows ?? 10));
+      setVpCols(String(data.grid_cols ?? 10));
+      setVpHover(null);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
+
   const loadFloorPlans = async () => {
     const res = await fetch(`${API_BASE}/api/floor-plans`);
     const data: FloorPlan[] = await res.json();
@@ -752,6 +1203,67 @@ const MappingView: React.FC = () => {
     loadFloorPlans();
     loadBindCameras();
   }, []);
+
+  // 切换摄像头（含 virtual PTZ）时重置 hover 等状态
+  useEffect(() => {
+    setVpHover(null);
+    setVpDraggingVertex(null);
+    setVpSelectedCell(null);
+    setReplaceMappingId(null);
+    setLinkedFpHoverCell(null);
+    setLinkedVpHoverCell(null);
+  }, [bindCameraId]);
+
+  // hover 联动：右侧摄像头格子 hover -> 左侧平面图格子 hover
+  useEffect(() => {
+    if (!vpHover) {
+      setLinkedFpHoverCell(null);
+      return;
+    }
+    const floor = camToFloor.get(`${vpHover.row},${vpHover.col}`) || null;
+    setLinkedFpHoverCell(floor);
+  }, [vpHover, camToFloor]);
+
+  // hover 联动：左侧平面图格子 hover -> 右侧摄像头格子 hover
+  useEffect(() => {
+    if (!fpHoverCell) {
+      setLinkedVpHoverCell(null);
+      return;
+    }
+    const cam = floorToCam.get(`${fpHoverCell.row},${fpHoverCell.col}`) || null;
+    setLinkedVpHoverCell(cam);
+  }, [fpHoverCell, floorToCam]);
+
+  // 选择 virtual PTZ 摄像头时，自动加载已保存的四边形网格配置并显示
+  useEffect(() => {
+    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    if (!opt || opt.kind !== "virtual") return;
+    loadVirtualGridConfig(opt.view.id);
+    // 默认不进入编辑模式（仅展示）；需要修改时再点工具按钮进入编辑
+    setVpTool("none");
+    setVpEditEnabled(false);
+  }, [bindCameraId, bindCameraOptions, loadVirtualGridConfig]);
+
+  // 选择 virtual PTZ + 平面图时加载映射关系列表
+  useEffect(() => {
+    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    // 切换摄像头时先清空，避免看见上一个摄像头的数据残留
+    setCellMappings([]);
+    if (!opt || opt.kind !== "virtual") {
+      return;
+    }
+    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") {
+      return;
+    }
+    const viewId = opt.view.id;
+    const floorPlanId = bindFloorPlanId;
+    setMappingsLoading(true);
+    fetch(`${API_BASE}/api/cameras/virtual-views/${viewId}/cell-mappings?floor_plan_id=${floorPlanId}`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((data: VirtualViewCellMapping[]) => setCellMappings(data))
+      .catch((e) => console.error(e))
+      .finally(() => setMappingsLoading(false));
+  }, [bindCameraId, bindCameraOptions, bindFloorPlanId]);
 
   // 切换平面图时同步网格数为该平面图的配置
   useEffect(() => {
@@ -836,6 +1348,37 @@ const MappingView: React.FC = () => {
     }
   };
 
+  const saveVirtualGridConfig = async (viewId: number) => {
+    if (!vpQuad) return;
+    setVpSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/cameras/virtual-views/${viewId}/grid-config`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          polygon_json: JSON.stringify(vpQuad),
+          grid_rows: Math.max(1, Number(vpRows) || 1),
+          grid_cols: Math.max(1, Number(vpCols) || 1),
+        }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        console.error(text);
+        alert("保存失败");
+        return;
+      }
+      await loadVirtualGridConfig(viewId);
+      // 保存后关闭编辑（隐藏可拖拽顶点）
+      setVpEditEnabled(false);
+      setVpTool("none");
+    } catch (e) {
+      console.error(e);
+      alert("保存失败");
+    } finally {
+      setVpSaving(false);
+    }
+  };
+
   const saveEditFloorPlan = async () => {
     if (editingFloorPlanId == null) return;
     const payload: Record<string, unknown> = {
@@ -867,7 +1410,7 @@ const MappingView: React.FC = () => {
   const subTabClass = (key: MappingTabKey) =>
     "rounded-full px-3 py-1 text-xs font-medium transition " +
     (mappingTab === key
-      ? "bg-slate-900 text-white"
+      ? "bg-[#694FF9] text-white"
       : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-100");
 
   return (
@@ -907,9 +1450,9 @@ const MappingView: React.FC = () => {
 
       {/* 1. 映射绑定：左侧平面图，右侧单路摄像头预览 */}
       {mappingTab === "bind" && (
-        <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr,3fr,1fr]">
+        <div className="grid h-[calc(100vh-180px)] min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,3fr,1fr]">
           {/* 左侧：选择平面图、网格设置、Canvas 预览（拖拽/缩放/网格/hover） */}
-          <div className="flex flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm font-semibold text-slate-800">平面图选择</span>
               <select
@@ -961,7 +1504,7 @@ const MappingView: React.FC = () => {
                 </button>
               </div>
             )}
-            <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
               {bindFloorPlanId !== "" ? (
                 (() => {
                   const fp = floorPlans.find((f) => f.id === bindFloorPlanId) || null;
@@ -980,6 +1523,11 @@ const MappingView: React.FC = () => {
                       imageUrl={url}
                       gridRows={rows}
                       gridCols={cols}
+                      selectedCell={fpSelectedCell}
+                      onCellClick={(cell) => setFpSelectedCell(cell)}
+                      onCellHover={(cell) => setFpHoverCell(cell)}
+                      linkedHoverCell={linkedFpHoverCell}
+                      mappedCells={mappedFloorCells}
                       className="w-full h-full"
                     />
                   );
@@ -993,7 +1541,7 @@ const MappingView: React.FC = () => {
           </div>
 
           {/* 右侧：选择摄像头并预览 */}
-          <div className="flex flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
               <span className="text-sm font-semibold text-slate-800">摄像头选择</span>
               <select
@@ -1009,7 +1557,7 @@ const MappingView: React.FC = () => {
                 ))}
               </select>
             </div>
-            <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100 min-h-64 max-h-[calc(100vh-220px)]">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
                 {bindCameraId !== "" ? (
                   (() => {
                     const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
@@ -1043,16 +1591,495 @@ const MappingView: React.FC = () => {
                     // virtual PTZ：用 MJPEG 预览
                     const view = opt.view;
                     const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview.mjpeg?t=${Date.now()}`;
+                    const aspectW = view.out_w || 960;
+                    const aspectH = view.out_h || 540;
+
+                    const toolbar = (
+                      <div className="flex items-center gap-1 rounded-md border border-slate-200 bg-white/90 p-1 shadow-sm">
+                        <button
+                          type="button"
+                          className={`inline-flex h-8 w-8 items-center justify-center rounded hover:bg-slate-100 ${
+                            (vpTool === "quad" || vpEditEnabled) ? "bg-emerald-100 text-emerald-700" : "text-slate-700"
+                          }`}
+                          onClick={() => {
+                            // 有四边形：进入/退出“编辑顶点”模式（不允许新建）
+                            if (vpQuad) {
+                              setVpEditEnabled((v) => !v);
+                              setVpTool("none");
+                              return;
+                            }
+                            // 没有四边形：进入创建模式（点击4次）
+                            setVpEditEnabled(true);
+                            setVpTool((t) => (t === "quad" ? "none" : "quad"));
+                            setVpQuadPoints([]);
+                            setVpHover(null);
+                            loadVirtualGridConfig(view.id);
+                          }}
+                          title="绘制四边形网格区域"
+                        >
+                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                            <path
+                              d="M6 7.5L18 5l1.5 12L7 19.5 6 7.5Z"
+                              stroke="currentColor"
+                              strokeWidth="2"
+                              strokeLinejoin="round"
+                            />
+                            <circle cx="6" cy="7.5" r="1.5" fill="currentColor" />
+                            <circle cx="18" cy="5" r="1.5" fill="currentColor" />
+                            <circle cx="19.5" cy="17" r="1.5" fill="currentColor" />
+                            <circle cx="7" cy="19.5" r="1.5" fill="currentColor" />
+                          </svg>
+                        </button>
+                      </div>
+                    );
+
+                    const renderOverlay = (
+                      ctx: CanvasRenderingContext2D,
+                      info: { w: number; h: number; pan: { x: number; y: number }; zoom: number },
+                    ) => {
+                      // 记录 viewport 尺寸，供 click/hover 使用
+                      vpViewportSizeRef.current = { w: info.w, h: info.h, aspectW, aspectH };
+
+                      const { w, h, pan, zoom } = info;
+                      const scale = Math.min(w / aspectW, h / aspectH);
+                      const imgW = aspectW * scale;
+                      const imgH = aspectH * scale;
+                      const imgX = (w - imgW) / 2;
+                      const imgY = (h - imgH) / 2;
+
+                      const toWorld = (pt: Pt): Pt => ({
+                        x: imgX + (pt.x / aspectW) * imgW,
+                        y: imgY + (pt.y / aspectH) * imgH,
+                      });
+
+                      ctx.save();
+                      ctx.translate(pan.x, pan.y);
+                      ctx.scale(zoom, zoom);
+
+                      const pts = vpQuad ? vpQuad : vpQuadPoints;
+                      if (pts.length > 0) {
+                        ctx.strokeStyle = "rgba(14,165,233,1.0)";
+                        ctx.fillStyle = "rgba(14,165,233,0.12)";
+                        ctx.lineWidth = 2;
+                        ctx.beginPath();
+                        const p0 = toWorld(pts[0]);
+                        ctx.moveTo(p0.x, p0.y);
+                        for (let i = 1; i < pts.length; i++) {
+                          const pi = toWorld(pts[i]);
+                          ctx.lineTo(pi.x, pi.y);
+                        }
+                        if (vpQuad && pts.length === 4) ctx.closePath();
+                        ctx.stroke();
+                        if (vpQuad && pts.length === 4) ctx.fill();
+
+                        // 顶点仅在编辑模式显示（保存后隐藏）
+                        if (vpEditEnabled) {
+                          for (let i = 0; i < pts.length; i++) {
+                            const p = toWorld(pts[i]);
+                            ctx.beginPath();
+                            ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
+                            ctx.fillStyle = "rgba(14,165,233,1.0)";
+                            ctx.fill();
+                            ctx.strokeStyle = "white";
+                            ctx.lineWidth = 2;
+                            ctx.stroke();
+                          }
+                        }
+                      }
+
+                      if (vpQuad) {
+                        const rows = Math.max(1, Number(vpRows) || 1);
+                        const cols = Math.max(1, Number(vpCols) || 1);
+                        const q = vpQuad;
+                        // 使用 homography 做“透视网格”分布：在 unit square 上均分，再投影到四边形
+                        const H = computeHomography(
+                          [
+                            { x: 0, y: 0 },
+                            { x: 1, y: 0 },
+                            { x: 1, y: 1 },
+                            { x: 0, y: 1 },
+                          ],
+                          q,
+                        );
+
+                        const camColsForId = Math.max(1, Number(vpCols) || 1);
+
+                        // selected 高亮（用于“定位”）
+                        if (vpSelectedCell && H) {
+                          const r = vpSelectedCell.row;
+                          const c = vpSelectedCell.col;
+                          const u0 = c / cols, u1 = (c + 1) / cols;
+                          const v0 = r / rows, v1 = (r + 1) / rows;
+                          const cellImg: Pt[] = [
+                            applyHomography(H, { x: u0, y: v0 }),
+                            applyHomography(H, { x: u1, y: v0 }),
+                            applyHomography(H, { x: u1, y: v1 }),
+                            applyHomography(H, { x: u0, y: v1 }),
+                          ];
+                          const cellWorld = cellImg.map(toWorld);
+                          ctx.beginPath();
+                          ctx.moveTo(cellWorld[0].x, cellWorld[0].y);
+                          for (let i = 1; i < 4; i++) ctx.lineTo(cellWorld[i].x, cellWorld[i].y);
+                          ctx.closePath();
+                          ctx.fillStyle = "rgba(59,130,246,0.18)";
+                          ctx.fill();
+                          ctx.strokeStyle = "rgba(59,130,246,0.95)";
+                          ctx.lineWidth = 2;
+                          ctx.stroke();
+
+                          const center = applyHomography(H, { x: (u0 + u1) / 2, y: (v0 + v1) / 2 });
+                          const cw = toWorld(center);
+                          ctx.fillStyle = "rgba(15,23,42,0.85)";
+                          ctx.font = "bold 12px sans-serif";
+                          ctx.textAlign = "center";
+                          ctx.textBaseline = "middle";
+                          const id = r * camColsForId + c;
+                          ctx.fillText(`${id} (${r}-${c})`, cw.x, cw.y);
+                        }
+
+                        // linked hover（来自左侧平面图 hover 的联动）
+                        if (linkedVpHoverCell && H) {
+                          const r = linkedVpHoverCell.row;
+                          const c = linkedVpHoverCell.col;
+                          const u0 = c / cols, u1 = (c + 1) / cols;
+                          const v0 = r / rows, v1 = (r + 1) / rows;
+                          const cellImg: Pt[] = [
+                            applyHomography(H, { x: u0, y: v0 }),
+                            applyHomography(H, { x: u1, y: v0 }),
+                            applyHomography(H, { x: u1, y: v1 }),
+                            applyHomography(H, { x: u0, y: v1 }),
+                          ];
+                          const cellWorld = cellImg.map(toWorld);
+                          ctx.beginPath();
+                          ctx.moveTo(cellWorld[0].x, cellWorld[0].y);
+                          for (let i = 1; i < 4; i++) ctx.lineTo(cellWorld[i].x, cellWorld[i].y);
+                          ctx.closePath();
+                          // 左侧平面图 hover 联动：右侧高亮用不透明颜色（更易观察）
+                          ctx.fillStyle = "rgba(34,197,94,1.0)";
+                          ctx.fill();
+                          ctx.strokeStyle = "rgba(34,197,94,1.0)";
+                          ctx.lineWidth = 2;
+                          ctx.stroke();
+                        }
+
+                        // hover 高亮（行列）
+                        if (vpHover && H) {
+                          const r = vpHover.row;
+                          const c = vpHover.col;
+                          const u0 = c / cols, u1 = (c + 1) / cols;
+                          const v0 = r / rows, v1 = (r + 1) / rows;
+                          const cellImg: Pt[] = [
+                            applyHomography(H, { x: u0, y: v0 }),
+                            applyHomography(H, { x: u1, y: v0 }),
+                            applyHomography(H, { x: u1, y: v1 }),
+                            applyHomography(H, { x: u0, y: v1 }),
+                          ];
+                          const cellWorld = cellImg.map(toWorld);
+                          ctx.beginPath();
+                          ctx.moveTo(cellWorld[0].x, cellWorld[0].y);
+                          for (let i = 1; i < 4; i++) ctx.lineTo(cellWorld[i].x, cellWorld[i].y);
+                          ctx.closePath();
+                          // hover 选中格子：不透明红色
+                          ctx.fillStyle = "rgba(239,68,68,1.0)";
+                          ctx.fill();
+                          ctx.strokeStyle = "rgba(239,68,68,1.0)";
+                          ctx.lineWidth = 2;
+                          ctx.stroke();
+
+                          const center = applyHomography(H, { x: (u0 + u1) / 2, y: (v0 + v1) / 2 });
+                          const cw = toWorld(center);
+                          ctx.fillStyle = "rgba(15,23,42,0.85)";
+                          ctx.font = "bold 12px sans-serif";
+                          ctx.textAlign = "center";
+                          ctx.textBaseline = "middle";
+                          const id = r * camColsForId + c;
+                          ctx.fillText(`${id} (${r}-${c})`, cw.x, cw.y);
+                        }
+
+                        // 网格线（透视效果：四边形内双线性插值）
+                        ctx.strokeStyle = "rgba(14,165,233,0.55)";
+                        ctx.lineWidth = 1;
+                        if (H) {
+                          // 已绑定格子：绿色填充+描边（用于提示不可再选）
+                          if (mappedCamCells.size > 0) {
+                            ctx.fillStyle = "rgba(34,197,94,0.18)";
+                            ctx.strokeStyle = "rgba(34,197,94,0.85)";
+                            ctx.lineWidth = 1.5;
+                            mappedCamCells.forEach((key) => {
+                              const [rs, cs] = key.split(",");
+                              const r = Number(rs);
+                              const c = Number(cs);
+                              if (Number.isNaN(r) || Number.isNaN(c)) return;
+                              if (r < 0 || r >= rows || c < 0 || c >= cols) return;
+                              const u0 = c / cols, u1 = (c + 1) / cols;
+                              const v0 = r / rows, v1 = (r + 1) / rows;
+                              const poly = [
+                                toWorld(applyHomography(H, { x: u0, y: v0 })),
+                                toWorld(applyHomography(H, { x: u1, y: v0 })),
+                                toWorld(applyHomography(H, { x: u1, y: v1 })),
+                                toWorld(applyHomography(H, { x: u0, y: v1 })),
+                              ];
+                              ctx.beginPath();
+                              ctx.moveTo(poly[0].x, poly[0].y);
+                              for (let i = 1; i < 4; i++) ctx.lineTo(poly[i].x, poly[i].y);
+                              ctx.closePath();
+                              ctx.fill();
+                              ctx.stroke();
+                            });
+                          }
+
+                          for (let r = 0; r <= rows; r++) {
+                            const v = r / rows;
+                            const pA = toWorld(applyHomography(H, { x: 0, y: v }));
+                            const pB = toWorld(applyHomography(H, { x: 1, y: v }));
+                            ctx.beginPath();
+                            ctx.moveTo(pA.x, pA.y);
+                            ctx.lineTo(pB.x, pB.y);
+                            ctx.stroke();
+                          }
+                          for (let c = 0; c <= cols; c++) {
+                            const u = c / cols;
+                            const pA = toWorld(applyHomography(H, { x: u, y: 0 }));
+                            const pB = toWorld(applyHomography(H, { x: u, y: 1 }));
+                            ctx.beginPath();
+                            ctx.moveTo(pA.x, pA.y);
+                            ctx.lineTo(pB.x, pB.y);
+                            ctx.stroke();
+                          }
+                        }
+                      }
+
+                      ctx.restore();
+                    };
+
+                    const onClickWorld = (world: Pt) => {
+                      if (vpTool !== "quad") return;
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      if (!imgPt) return;
+                      setVpQuadPoints((old) => {
+                        const next = [...old, imgPt];
+                        if (next.length === 4) {
+                          const ordered = orderQuad(next);
+                          setVpQuad(ordered);
+                          // 绘制完成后关闭“创建”，进入可编辑顶点状态
+                          setVpTool("none");
+                          setVpEditEnabled(true);
+                          return [];
+                        }
+                        return next;
+                      });
+                    };
+
+                    const onMoveWorld = (world: Pt) => {
+                      if (!vpQuad) return;
+                      // 拖拽顶点时更新顶点位置
+                      if (vpDraggingVertex != null) {
+                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                        if (!imgPt) return;
+                        setVpQuad((q) => {
+                          if (!q) return q;
+                          const next = [...q];
+                          next[vpDraggingVertex] = imgPt;
+                          return next;
+                        });
+                        return;
+                      }
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      if (!imgPt) {
+                        setVpHover(null);
+                        return;
+                      }
+                      const rows = Math.max(1, Number(vpRows) || 1);
+                      const cols = Math.max(1, Number(vpCols) || 1);
+                      const H = computeHomography(
+                        [
+                          { x: 0, y: 0 },
+                          { x: 1, y: 0 },
+                          { x: 1, y: 1 },
+                          { x: 0, y: 1 },
+                        ],
+                        vpQuad,
+                      );
+                      if (!H) {
+                        setVpHover(null);
+                        return;
+                      }
+                      // 遍历 cell，找到包含该点的 cell（点在四边形内时才有 hover）
+                      let found: { row: number; col: number } | null = null;
+                      for (let r = 0; r < rows && !found; r++) {
+                        const v0 = r / rows, v1 = (r + 1) / rows;
+                        for (let c = 0; c < cols; c++) {
+                          const u0 = c / cols, u1 = (c + 1) / cols;
+                          const cell: Pt[] = [
+                            applyHomography(H, { x: u0, y: v0 }),
+                            applyHomography(H, { x: u1, y: v0 }),
+                            applyHomography(H, { x: u1, y: v1 }),
+                            applyHomography(H, { x: u0, y: v1 }),
+                          ];
+                          if (pointInPoly(imgPt, cell)) {
+                            found = { row: r, col: c };
+                            break;
+                          }
+                        }
+                      }
+                      setVpHover(found);
+                    };
+
+                    const onPointerDownWorld = (world: Pt) => {
+                      // 非编辑/非创建时：点击选择一个摄像头格子（用于绑定）
+                      if (vpTool === "none" && !vpEditEnabled && vpQuad) {
+                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                        if (imgPt) {
+                          const rows = Math.max(1, Number(vpRows) || 1);
+                          const cols = Math.max(1, Number(vpCols) || 1);
+                          const H = computeHomography(
+                            [
+                              { x: 0, y: 0 },
+                              { x: 1, y: 0 },
+                              { x: 1, y: 1 },
+                              { x: 0, y: 1 },
+                            ],
+                            vpQuad,
+                          );
+                          if (H) {
+                            let found: { row: number; col: number } | null = null;
+                            for (let r = 0; r < rows && !found; r++) {
+                              const v0 = r / rows, v1 = (r + 1) / rows;
+                              for (let c = 0; c < cols; c++) {
+                                const u0 = c / cols, u1 = (c + 1) / cols;
+                                const cell: Pt[] = [
+                                  applyHomography(H, { x: u0, y: v0 }),
+                                  applyHomography(H, { x: u1, y: v0 }),
+                                  applyHomography(H, { x: u1, y: v1 }),
+                                  applyHomography(H, { x: u0, y: v1 }),
+                                ];
+                                if (pointInPoly(imgPt, cell)) {
+                                  found = { row: r, col: c };
+                                  break;
+                                }
+                              }
+                            }
+                            if (found && mappedCamCells.has(`${found.row},${found.col}`)) {
+                              // 已绑定的格子不可再次选择
+                              return;
+                            }
+                            setVpSelectedCell(found);
+                          }
+                        }
+                      }
+                      if (!vpQuad || !vpEditEnabled) return;
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      if (!imgPt) return;
+                      // 命中某个顶点则开始拖拽
+                      const hitR = 12; // px in image space
+                      for (let i = 0; i < 4; i++) {
+                        const dx = imgPt.x - vpQuad[i].x;
+                        const dy = imgPt.y - vpQuad[i].y;
+                        if (dx * dx + dy * dy <= hitR * hitR) {
+                          setVpDraggingVertex(i);
+                          return true;
+                        }
+                      }
+                    };
+
+                    const onPointerUpWorld = () => {
+                      setVpDraggingVertex(null);
+                    };
+
                     return (
-                      <PanZoomViewport className="h-full w-full">
-                        <img
-                          src={url}
-                          alt={`virtual-view-${view.id}`}
-                          draggable={false}
-                          onDragStart={(e) => e.preventDefault()}
-                          className="h-full w-full object-contain"
-                        />
-                      </PanZoomViewport>
+                      <div className="flex h-full w-full flex-col">
+                        <div className="flex-1">
+                          <PanZoomViewport
+                            className="h-full w-full"
+                            mode={vpTool === "quad" ? "draw" : "panzoom"}
+                            topLeftOverlay={toolbar}
+                            renderOverlay={renderOverlay}
+                            onClickWorld={onClickWorld}
+                            onMoveWorld={onMoveWorld}
+                            onPointerDownWorld={onPointerDownWorld}
+                            onPointerUpWorld={onPointerUpWorld}
+                          >
+                            <img
+                              src={url}
+                              alt={`virtual-view-${view.id}`}
+                              draggable={false}
+                              onDragStart={(e) => e.preventDefault()}
+                              className="h-full w-full object-contain"
+                            />
+                          </PanZoomViewport>
+                        </div>
+
+                        {vpTool === "quad" && !vpQuad && (
+                          <div className="mt-2 text-[11px] text-slate-500">
+                            点击画面 4 次确定四边形四个点（用于生成透视网格）。
+                          </div>
+                        )}
+
+                        {vpQuad && (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <label className="text-xs text-slate-600">
+                              行数
+                              <input
+                                type="number"
+                                min={1}
+                                className="ml-1 w-16 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                                value={vpRows}
+                                onChange={(e) => setVpRows(e.target.value)}
+                              />
+                            </label>
+                            <label className="text-xs text-slate-600">
+                              列数
+                              <input
+                                type="number"
+                                min={1}
+                                className="ml-1 w-16 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                                value={vpCols}
+                                onChange={(e) => setVpCols(e.target.value)}
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
+                              disabled={vpSaving}
+                              onClick={() => saveVirtualGridConfig(view.id)}
+                            >
+                              {vpSaving ? "保存中…" : "保存"}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded border border-rose-300 bg-white px-3 py-1 text-xs text-rose-700 hover:bg-rose-50"
+                              onClick={async () => {
+                                try {
+                                  await fetch(
+                                    `${API_BASE}/api/cameras/virtual-views/${view.id}/grid-config`,
+                                    { method: "DELETE" },
+                                  );
+                                } catch (e) {
+                                  console.error(e);
+                                }
+                                setVpQuad(null);
+                                setVpQuadPoints([]);
+                                setVpHover(null);
+                                setVpTool("none");
+                                setVpEditEnabled(false);
+                                setVpDraggingVertex(null);
+                              }}
+                            >
+                              删除
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100"
+                              onClick={() => {
+                                // 重置回已保存配置（若无保存配置则清空）
+                                loadVirtualGridConfig(view.id);
+                              }}
+                            >
+                              重置
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     );
                   })()
                 ) : (
@@ -1064,17 +2091,218 @@ const MappingView: React.FC = () => {
           </div>
 
           {/* 摄像头预览右侧：映射数据列表（独立面板） */}
-          <div className="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white p-0 shadow-sm">
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white p-0 shadow-sm">
             <div className="border-b border-slate-200 bg-slate-50 px-3 py-3">
               <div className="text-sm font-semibold text-slate-800">映射数据列表</div>
               <div className="mt-0.5 text-[11px] text-slate-500">
                 未来显示：平面图网格ID ↔ 摄像头画面网格ID
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-3">
-              <div className="rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
-                暂无数据。后续你绑定网格后，会在这里展示对应关系列表。
+            <div className="border-b border-slate-200 p-3">
+              <div className="text-[11px] text-slate-600">
+                <div>
+                  摄像头格子：
+                  <span className="ml-1 font-mono text-slate-800">
+                    {vpSelectedCell
+                      ? `${vpSelectedCell.row * Math.max(1, Number(vpCols) || 1) + vpSelectedCell.col} (${vpSelectedCell.row}-${vpSelectedCell.col})`
+                      : "-"}
+                  </span>
+                </div>
+                <div className="mt-1">
+                  平面图格子：
+                  <span className="ml-1 font-mono text-slate-800">
+                    {fpSelectedCell && bindFloorPlanId !== "" && typeof bindFloorPlanId === "number"
+                      ? `${fpSelectedCell.row * (Math.max(1, Number(bindGridCols) || 1)) + fpSelectedCell.col} (${fpSelectedCell.row}-${fpSelectedCell.col})`
+                      : "-"}
+                  </span>
+                </div>
               </div>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
+                  disabled={
+                    mappingsSaving ||
+                    !vpSelectedCell ||
+                    !fpSelectedCell ||
+                    bindFloorPlanId === "" ||
+                    typeof bindFloorPlanId !== "number"
+                  }
+                  onClick={async () => {
+                    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                    if (!opt || opt.kind !== "virtual") return;
+                    if (!vpSelectedCell || !fpSelectedCell) return;
+                    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+                    setMappingsSaving(true);
+                    try {
+                      const res = await fetch(
+                        `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings`,
+                        {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            floor_plan_id: bindFloorPlanId,
+                            camera_row: vpSelectedCell.row,
+                            camera_col: vpSelectedCell.col,
+                            floor_row: fpSelectedCell.row,
+                            floor_col: fpSelectedCell.col,
+                          }),
+                        },
+                      );
+                      if (!res.ok) throw new Error("save failed");
+                      // reload list
+                      const res2 = await fetch(
+                        `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
+                      );
+                      if (res2.ok) setCellMappings(await res2.json());
+                      setReplaceMappingId(null);
+                    } catch (e) {
+                      console.error(e);
+                      alert("绑定保存失败");
+                    } finally {
+                      setMappingsSaving(false);
+                    }
+                  }}
+                >
+                  {replaceMappingId ? "替换绑定" : "绑定"}
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-slate-300 bg-white px-3 py-1 text-xs text-slate-700 hover:bg-slate-100"
+                  onClick={() => {
+                    setVpSelectedCell(null);
+                    setFpSelectedCell(null);
+                    setReplaceMappingId(null);
+                  }}
+                >
+                  清除选择
+                </button>
+                <button
+                  type="button"
+                  className="rounded border border-rose-300 bg-white px-3 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
+                  disabled={
+                    mappingsSaving ||
+                    bindFloorPlanId === "" ||
+                    typeof bindFloorPlanId !== "number" ||
+                    !(bindCameraOptions.find((o) => o.key === bindCameraId) || null) ||
+                    (bindCameraOptions.find((o) => o.key === bindCameraId) || null)?.kind !== "virtual"
+                  }
+                  onClick={async () => {
+                    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                    if (!opt || opt.kind !== "virtual") return;
+                    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+                    if (!confirm("确定清除当前摄像头的所有绑定关系吗？")) return;
+                    setMappingsSaving(true);
+                    try {
+                      const res = await fetch(
+                        `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
+                        { method: "DELETE" },
+                      );
+                      if (!res.ok) throw new Error("delete all failed");
+                      setCellMappings([]);
+                      setVpSelectedCell(null);
+                      setFpSelectedCell(null);
+                      setReplaceMappingId(null);
+                    } catch (e) {
+                      console.error(e);
+                      alert("清除失败");
+                    } finally {
+                      setMappingsSaving(false);
+                    }
+                  }}
+                >
+                  清除所有绑定
+                </button>
+              </div>
+              {replaceMappingId && (
+                <div className="mt-2 text-[11px] text-rose-600">
+                  正在替换：请重新选择平面图格子后点击“替换绑定”。
+                </div>
+              )}
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3">
+              {mappingsLoading ? (
+                <div className="text-xs text-slate-500">加载中…</div>
+              ) : cellMappings.length === 0 ? (
+                <div className="rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
+                  暂无映射关系。先在右侧画面点选一个摄像头格子，再在左侧点选一个平面图格子，点击“绑定”。
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {cellMappings.map((m) => {
+                    const camCols = Math.max(1, Number(vpCols) || 1);
+                    const floorCols = Math.max(1, Number(bindGridCols) || 1);
+                    const camId = m.camera_row * camCols + m.camera_col;
+                    const floorId = m.floor_row * floorCols + m.floor_col;
+                    return (
+                      <div
+                        key={m.id}
+                        className={`rounded border px-2 py-2 text-[11px] ${
+                          replaceMappingId === m.id
+                            ? "border-rose-300 bg-rose-50"
+                            : "border-slate-200 bg-white"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="font-mono text-slate-800">
+                              C: {camId} ({m.camera_row}-{m.camera_col})
+                            </div>
+                            <div className="font-mono text-slate-800">
+                              F: {floorId} ({m.floor_row}-{m.floor_col})
+                            </div>
+                          </div>
+                          <div className="flex shrink-0 gap-1">
+                            <button
+                              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
+                              onClick={() => {
+                                setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
+                                setFpSelectedCell({ row: m.floor_row, col: m.floor_col });
+                              }}
+                              title="定位高亮"
+                            >
+                              定位
+                            </button>
+                            <button
+                              className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
+                              onClick={() => {
+                                setReplaceMappingId(m.id);
+                                setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
+                              }}
+                              title="替换平面图格子"
+                            >
+                              替换
+                            </button>
+                            <button
+                              className="rounded border border-rose-300 bg-white px-2 py-0.5 text-[11px] text-rose-700 hover:bg-rose-50"
+                              onClick={async () => {
+                                const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                                if (!opt || opt.kind !== "virtual") return;
+                                try {
+                                  const res = await fetch(
+                                    `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings/${m.id}`,
+                                    { method: "DELETE" },
+                                  );
+                                  if (!res.ok) throw new Error("delete failed");
+                                  setCellMappings((old) => old.filter((x) => x.id !== m.id));
+                                  if (replaceMappingId === m.id) setReplaceMappingId(null);
+                                } catch (e) {
+                                  console.error(e);
+                                  alert("删除失败");
+                                }
+                              }}
+                              title="删除"
+                            >
+                              删
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -1122,7 +2350,7 @@ const MappingView: React.FC = () => {
                   <input
                     type="file"
                     accept="image/png,image/jpeg"
-                    className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:rounded file:border-0 file:bg-emerald-600 file:px-3 file:py-1 file:text-xs file:font-medium file:text-white hover:file:bg-emerald-700"
+                    className="mt-1 block w-full text-xs text-slate-600 file:mr-3 file:rounded file:border-0 file:bg-[#694FF9] file:px-3 file:py-1 file:text-xs file:font-medium file:text-white hover:file:bg-[#5b3ff6]"
                     onChange={async (e) => {
                       const file = e.target.files?.[0];
                       if (!file) return;
@@ -1188,7 +2416,7 @@ const MappingView: React.FC = () => {
               </div>
               <button
                 onClick={handleCreate}
-                className="mt-1 inline-flex items-center rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+                className="mt-1 inline-flex items-center rounded bg-[#694FF9] px-4 py-1.5 text-sm font-medium text-white hover:bg-[#5b3ff6]"
               >
                 保存平面图
               </button>
@@ -1234,7 +2462,7 @@ const MappingView: React.FC = () => {
                           <input
                             type="file"
                             accept="image/png,image/jpeg"
-                            className="mt-0.5 block w-full text-xs file:rounded file:border-0 file:bg-emerald-600 file:px-2 file:py-0.5 file:text-white"
+                            className="mt-0.5 block w-full text-xs file:rounded file:border-0 file:bg-[#694FF9] file:px-2 file:py-0.5 file:text-white hover:file:bg-[#5b3ff6]"
                             onChange={async (e) => {
                               const file = e.target.files?.[0];
                               if (!file) return;
@@ -1285,7 +2513,7 @@ const MappingView: React.FC = () => {
                         <div className="flex gap-2 pt-1">
                           <button
                             onClick={saveEditFloorPlan}
-                            className="rounded bg-emerald-600 px-3 py-1 text-white hover:bg-emerald-700"
+                            className="rounded bg-[#694FF9] px-3 py-1 text-white hover:bg-[#5b3ff6]"
                           >
                             保存
                           </button>
@@ -1476,7 +2704,7 @@ const PanoramaViewsView: React.FC = () => {
           </select>
         </div>
         <button
-          className="rounded bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
           disabled={cameraId === "" || creating}
           onClick={createView}
         >
@@ -1608,7 +2836,7 @@ const PanoramaViewsView: React.FC = () => {
 
                 <div className="mt-2 flex gap-2">
                   <button
-                    className="rounded bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800"
+                    className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6]"
                     onClick={() => updateView(v)}
                   >
                     保存参数
@@ -1794,7 +3022,7 @@ const CameraManageView: React.FC = () => {
             <button
               onClick={handleScan}
               disabled={scanning}
-              className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-blue-300"
+              className="rounded bg-[#694FF9] px-3 py-1 text-sm font-medium text-white hover:bg-[#5b3ff6] disabled:cursor-not-allowed disabled:bg-slate-300"
             >
               {scanning ? "扫描中..." : "开始扫描"}
             </button>
@@ -1820,7 +3048,7 @@ const CameraManageView: React.FC = () => {
                   </div>
                   {!exists && (
                     <button
-                      className="rounded border border-blue-500 px-2 py-0.5 text-[11px] text-blue-600 hover:bg-blue-50"
+                      className="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-50"
                       onClick={() => handleQuickFill(d.ip, d.port)}
                     >
                       填入表单
@@ -1891,7 +3119,7 @@ const CameraManageView: React.FC = () => {
             </div>
             <button
               onClick={handleAdd}
-              className="mt-1 inline-flex items-center rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-700"
+              className="mt-1 inline-flex items-center rounded bg-[#694FF9] px-4 py-1.5 text-sm font-medium text-white hover:bg-[#5b3ff6]"
             >
               保存
             </button>

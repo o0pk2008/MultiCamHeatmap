@@ -6,6 +6,12 @@ body {
   @apply bg-slate-50 text-slate-900;
 }
 
+:root {
+  --theme-primary: #694FF9;
+  /* 稍深一点用于 hover */
+  --theme-primary-hover: #5b3ff6;
+}
+
 #root {
   @apply min-h-screen;
 }

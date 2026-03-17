@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Column, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from .db import Base
@@ -53,6 +53,62 @@ class CameraVirtualView(Base):
     out_h = Column(Integer, nullable=False, default=540)
 
     camera = relationship("Camera", back_populates="virtual_views")
+    grid_config = relationship(
+        "CameraVirtualViewGridConfig",
+        back_populates="virtual_view",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+class CameraVirtualViewGridConfig(Base):
+    """
+    virtual PTZ 视窗中的“地面四边形区域”与网格划分配置（用于后续映射绑定）。
+    polygon_json: [{"x":..,"y":..}, ...] 4 points in image pixel coords (out_w/out_h space)
+    """
+
+    __tablename__ = "camera_virtual_view_grid_configs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, unique=True, index=True
+    )
+    polygon_json = Column(Text, nullable=False, default="[]")
+    grid_rows = Column(Integer, nullable=False, default=10)
+    grid_cols = Column(Integer, nullable=False, default=10)
+
+    virtual_view = relationship("CameraVirtualView", back_populates="grid_config")
+
+
+class VirtualViewCellMapping(Base):
+    """
+    virtual PTZ 网格 cell -> 平面图网格 cell 的绑定关系。
+    以 (virtual_view_id, camera_row, camera_col) 唯一，便于替换。
+    """
+
+    __tablename__ = "virtual_view_cell_mappings"
+    __table_args__ = (
+        UniqueConstraint("virtual_view_id", "camera_row", "camera_col", name="uq_vv_cam_cell"),
+        UniqueConstraint(
+            "virtual_view_id",
+            "floor_plan_id",
+            "floor_row",
+            "floor_col",
+            name="uq_vv_floor_cell",
+        ),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    virtual_view_id = Column(Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True)
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+
+    camera_row = Column(Integer, nullable=False)
+    camera_col = Column(Integer, nullable=False)
+    floor_row = Column(Integer, nullable=False)
+    floor_col = Column(Integer, nullable=False)
+
+    virtual_view = relationship("CameraVirtualView")
+    floor_plan = relationship("FloorPlan")
 
 
 class FloorPlan(Base):

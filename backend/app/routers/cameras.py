@@ -304,3 +304,162 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
+
+@router.get("/virtual-views/{view_id}/grid-config", response_model=schemas.CameraVirtualViewGridConfigOut)
+def get_virtual_view_grid_config(view_id: int, db: Session = Depends(get_db)):
+    view = db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first()
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    cfg = (
+        db.query(models.CameraVirtualViewGridConfig)
+        .filter(models.CameraVirtualViewGridConfig.virtual_view_id == view_id)
+        .first()
+    )
+    if not cfg:
+        # 返回默认配置（但不落库），前端可在保存时 upsert
+        return {
+            "virtual_view_id": view_id,
+            "polygon_json": "[]",
+            "grid_rows": 10,
+            "grid_cols": 10,
+        }
+    return cfg
+
+
+@router.put("/virtual-views/{view_id}/grid-config", response_model=schemas.CameraVirtualViewGridConfigOut)
+def upsert_virtual_view_grid_config(
+    view_id: int, payload: schemas.CameraVirtualViewGridConfigUpsert, db: Session = Depends(get_db)
+):
+    view = db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first()
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    cfg = (
+        db.query(models.CameraVirtualViewGridConfig)
+        .filter(models.CameraVirtualViewGridConfig.virtual_view_id == view_id)
+        .first()
+    )
+    if not cfg:
+        cfg = models.CameraVirtualViewGridConfig(virtual_view_id=view_id)
+        db.add(cfg)
+    cfg.polygon_json = payload.polygon_json
+    cfg.grid_rows = payload.grid_rows
+    cfg.grid_cols = payload.grid_cols
+    db.commit()
+    db.refresh(cfg)
+    return cfg
+
+
+@router.delete("/virtual-views/{view_id}/grid-config")
+def delete_virtual_view_grid_config(view_id: int, db: Session = Depends(get_db)) -> None:
+    view = db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first()
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    cfg = (
+        db.query(models.CameraVirtualViewGridConfig)
+        .filter(models.CameraVirtualViewGridConfig.virtual_view_id == view_id)
+        .first()
+    )
+    if cfg:
+        db.delete(cfg)
+        db.commit()
+
+
+@router.get(
+    "/virtual-views/{view_id}/cell-mappings",
+    response_model=List[schemas.VirtualViewCellMappingOut],
+)
+def list_virtual_view_cell_mappings(
+    view_id: int,
+    floor_plan_id: int,
+    db: Session = Depends(get_db),
+) -> List[models.VirtualViewCellMapping]:
+    if not db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first():
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    return (
+        db.query(models.VirtualViewCellMapping)
+        .filter(
+            models.VirtualViewCellMapping.virtual_view_id == view_id,
+            models.VirtualViewCellMapping.floor_plan_id == floor_plan_id,
+        )
+        .order_by(models.VirtualViewCellMapping.camera_row, models.VirtualViewCellMapping.camera_col)
+        .all()
+    )
+
+
+@router.put(
+    "/virtual-views/{view_id}/cell-mappings",
+    response_model=schemas.VirtualViewCellMappingOut,
+)
+def upsert_virtual_view_cell_mapping(
+    view_id: int,
+    payload: schemas.VirtualViewCellMappingUpsert,
+    db: Session = Depends(get_db),
+):
+    if not db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first():
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == payload.floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    existing = (
+        db.query(models.VirtualViewCellMapping)
+        .filter(
+            models.VirtualViewCellMapping.virtual_view_id == view_id,
+            models.VirtualViewCellMapping.camera_row == payload.camera_row,
+            models.VirtualViewCellMapping.camera_col == payload.camera_col,
+        )
+        .first()
+    )
+    if not existing:
+        existing = models.VirtualViewCellMapping(
+            virtual_view_id=view_id,
+            floor_plan_id=payload.floor_plan_id,
+            camera_row=payload.camera_row,
+            camera_col=payload.camera_col,
+            floor_row=payload.floor_row,
+            floor_col=payload.floor_col,
+        )
+        db.add(existing)
+    else:
+        existing.floor_plan_id = payload.floor_plan_id
+        existing.floor_row = payload.floor_row
+        existing.floor_col = payload.floor_col
+
+    db.commit()
+    db.refresh(existing)
+    return existing
+
+
+@router.delete("/virtual-views/{view_id}/cell-mappings/{mapping_id}")
+def delete_virtual_view_cell_mapping(view_id: int, mapping_id: int, db: Session = Depends(get_db)) -> None:
+    m = (
+        db.query(models.VirtualViewCellMapping)
+        .filter(
+            models.VirtualViewCellMapping.id == mapping_id,
+            models.VirtualViewCellMapping.virtual_view_id == view_id,
+        )
+        .first()
+    )
+    if not m:
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    db.delete(m)
+    db.commit()
+
+
+@router.delete("/virtual-views/{view_id}/cell-mappings")
+def delete_all_virtual_view_cell_mappings(
+    view_id: int,
+    floor_plan_id: int,
+    db: Session = Depends(get_db),
+) -> None:
+    if not db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first():
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    (
+        db.query(models.VirtualViewCellMapping)
+        .filter(
+            models.VirtualViewCellMapping.virtual_view_id == view_id,
+            models.VirtualViewCellMapping.floor_plan_id == floor_plan_id,
+        )
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+

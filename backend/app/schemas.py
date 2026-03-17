@@ -67,6 +67,47 @@ class CameraVirtualViewWithCameraOut(CameraVirtualViewOut):
     camera_name: str
 
 
+class CameraVirtualViewGridConfigBase(BaseModel):
+    polygon_json: str  # JSON: [{"x":..,"y":..}, ...] 4 points
+    grid_rows: int
+    grid_cols: int
+
+
+class CameraVirtualViewGridConfigUpsert(CameraVirtualViewGridConfigBase):
+    pass
+
+
+class CameraVirtualViewGridConfigOut(CameraVirtualViewGridConfigBase):
+    virtual_view_id: int
+
+    class Config:
+        orm_mode = True
+
+
+class VirtualViewCellMappingBase(BaseModel):
+    virtual_view_id: int
+    floor_plan_id: int
+    camera_row: int
+    camera_col: int
+    floor_row: int
+    floor_col: int
+
+
+class VirtualViewCellMappingUpsert(BaseModel):
+    floor_plan_id: int
+    camera_row: int
+    camera_col: int
+    floor_row: int
+    floor_col: int
+
+
+class VirtualViewCellMappingOut(VirtualViewCellMappingBase):
+    id: int
+
+    class Config:
+        orm_mode = True
+
+
 class FloorPlanBase(BaseModel):
     name: str
     image_path: str
@@ -148,4 +189,13 @@ class CameraGroundCellOut(CameraGroundCellBase):
 
     class Config:
         orm_mode = True
+
+
+class HeatmapSourceOut(BaseModel):
+    kind: str  # "camera" | "virtual"
+    camera_id: int
+    camera_name: str
+    webrtc_url: Optional[str] = None
+    virtual_view_id: Optional[int] = None
+    virtual_view_name: Optional[str] = None
 

@@ -93,6 +93,99 @@ def list_camera_mappings(db: Session = Depends(get_db)) -> List[models.CameraMap
     return db.query(models.CameraMapping).order_by(models.CameraMapping.id).all()
 
 
+@router.get("/floor-plans/{floor_plan_id}/mapped-camera-ids", response_model=List[int])
+def list_mapped_camera_ids(floor_plan_id: int, db: Session = Depends(get_db)) -> List[int]:
+    """
+    返回与该平面图存在“映射关系”的 camera_id 列表。
+    映射关系来源包含：
+    - camera_mappings（传统 camera->floor_plan 映射）
+    - virtual PTZ 的 cell-mappings（virtual_view_cell_mappings，通过 virtual_view -> camera 关联）
+    """
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    cam_ids = set(
+        r[0]
+        for r in db.query(models.CameraMapping.camera_id)
+        .filter(models.CameraMapping.floor_plan_id == floor_plan_id)
+        .all()
+    )
+
+    vv_cam_ids = (
+        db.query(models.CameraVirtualView.camera_id)
+        .join(
+            models.VirtualViewCellMapping,
+            models.VirtualViewCellMapping.virtual_view_id == models.CameraVirtualView.id,
+        )
+        .filter(models.VirtualViewCellMapping.floor_plan_id == floor_plan_id)
+        .distinct()
+        .all()
+    )
+    for (cid,) in vv_cam_ids:
+        cam_ids.add(cid)
+
+    return sorted(list(cam_ids))
+
+
+@router.get("/floor-plans/{floor_plan_id}/heatmap-sources", response_model=List[schemas.HeatmapSourceOut])
+def list_heatmap_sources(floor_plan_id: int, db: Session = Depends(get_db)) -> List[dict]:
+    """
+    热力图页右侧要展示的“参与映射的画面源”列表。
+    - kind=camera: 来自 camera_mappings
+    - kind=virtual: 来自 virtual_view_cell_mappings（展示 virtual PTZ 的画面）
+    """
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    out: List[dict] = []
+
+    # camera_mappings -> camera
+    cams = (
+        db.query(models.Camera)
+        .join(models.CameraMapping, models.CameraMapping.camera_id == models.Camera.id)
+        .filter(models.CameraMapping.floor_plan_id == floor_plan_id)
+        .distinct()
+        .all()
+    )
+    for c in cams:
+        out.append(
+            {
+                "kind": "camera",
+                "camera_id": c.id,
+                "camera_name": c.name,
+                "webrtc_url": c.webrtc_url,
+                "virtual_view_id": None,
+                "virtual_view_name": None,
+            }
+        )
+
+    # virtual_view_cell_mappings -> virtual_view -> camera
+    vvs = (
+        db.query(models.CameraVirtualView, models.Camera)
+        .join(models.Camera, models.Camera.id == models.CameraVirtualView.camera_id)
+        .join(
+            models.VirtualViewCellMapping,
+            models.VirtualViewCellMapping.virtual_view_id == models.CameraVirtualView.id,
+        )
+        .filter(models.VirtualViewCellMapping.floor_plan_id == floor_plan_id)
+        .distinct()
+        .all()
+    )
+    for vv, cam in vvs:
+        out.append(
+            {
+                "kind": "virtual",
+                "camera_id": cam.id,
+                "camera_name": cam.name,
+                "webrtc_url": None,
+                "virtual_view_id": vv.id,
+                "virtual_view_name": vv.name,
+            }
+        )
+
+    return out
+
+
 @router.post("/camera-mappings", response_model=schemas.CameraMappingOut)
 def create_camera_mapping(
     payload: schemas.CameraMappingCreate, db: Session = Depends(get_db)
