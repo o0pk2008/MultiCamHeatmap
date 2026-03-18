@@ -1,9 +1,12 @@
 import asyncio
 import random
 from typing import Dict, Tuple, List
+import json
 
 from . import models
 from .db import SessionLocal
+import numpy as np
+import cv2
 
 try:
     from ultralytics import YOLO  # type: ignore
@@ -102,7 +105,7 @@ class HeatmapAnalyzer:
                     vv_ids = {vv.id for _, vv, _ in vv_rows}
                     vv_cfg: Dict[
                         int,
-                        Tuple[str, int, int, int, int],
+                        Tuple[str, int, int, int, int, List[Tuple[float, float]]],
                     ] = {}
                     if vv_ids:
                         cfg_rows = (
@@ -126,12 +129,25 @@ class HeatmapAnalyzer:
                         for vv, cam, cfg in cfg_rows:
                             if cfg is None:
                                 continue
+                            quad: List[Tuple[float, float]] = []
+                            try:
+                                raw = json.loads(cfg.polygon_json or "[]")
+                                if isinstance(raw, list) and len(raw) == 4:
+                                    quad = [
+                                        (float(raw[0]["x"]), float(raw[0]["y"])),
+                                        (float(raw[1]["x"]), float(raw[1]["y"])),
+                                        (float(raw[2]["x"]), float(raw[2]["y"])),
+                                        (float(raw[3]["x"]), float(raw[3]["y"])),
+                                    ]
+                            except Exception:
+                                quad = []
                             vv_cfg[vv.id] = (
                                 cam.rtsp_url,
                                 vv.out_w,
                                 vv.out_h,
                                 cfg.grid_rows,
                                 cfg.grid_cols,
+                                quad,
                             )
 
                 # 如果没有任何 virtual PTZ 映射，则退化为整张平面图上的随机格子
@@ -154,7 +170,7 @@ class HeatmapAnalyzer:
                     continue
 
                 # 依次读取每个 virtual PTZ 的“最近一次检测结果”，映射并发送事件
-                for vv_id, (_rtsp_url, out_w, out_h, g_rows, g_cols) in vv_cfg.items():
+                for vv_id, (_rtsp_url, out_w, out_h, g_rows, g_cols, quad) in vv_cfg.items():
                     # 确保该 view 的后台推理线程在跑（analyzed.mjpeg 不一定被打开）
                     try:
                         manager.ensure_running(vv_id)
@@ -170,9 +186,25 @@ class HeatmapAnalyzer:
                     if xyxy is None or cls_ids is None:
                         continue
 
-                    # 将每个“person”框的脚底点映射到 camera grid cell，再查到对应 floor cell
-                    cell_h = out_h / max(1, g_rows)
-                    cell_w = out_w / max(1, g_cols)
+                    # 将脚底点映射到“透视网格”的 cell：
+                    # 先用 quad 的 homography 把像素坐标反变换到 unit square (u,v)，再算 row/col。
+                    if len(quad) != 4:
+                        continue
+                    try:
+                        src = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], dtype=np.float32)
+                        dst = np.array(
+                            [
+                                [quad[0][0], quad[0][1]],
+                                [quad[1][0], quad[1][1]],
+                                [quad[2][0], quad[2][1]],
+                                [quad[3][0], quad[3][1]],
+                            ],
+                            dtype=np.float32,
+                        )
+                        Hm = cv2.getPerspectiveTransform(src, dst)
+                        Hinv = np.linalg.inv(Hm)
+                    except Exception:
+                        continue
 
                     for (x1, y1, x2, y2), cid in zip(xyxy, cls_ids):
                         if int(cid) != 0:
@@ -180,9 +212,23 @@ class HeatmapAnalyzer:
                         h = y2 - y1
                         foot_x = (x1 + x2) * 0.5
                         foot_y = y2 - 0.02 * h
-
-                        cam_col = int(foot_x / cell_w)
-                        cam_row = int(foot_y / cell_h)
+                        # 逆变换到 unit square
+                        try:
+                            p = np.array([foot_x, foot_y, 1.0], dtype=np.float32)
+                            uvw = Hinv @ p
+                            w = float(uvw[2]) if abs(float(uvw[2])) > 1e-6 else 1e-6
+                            u = float(uvw[0]) / w
+                            v = float(uvw[1]) / w
+                        except Exception:
+                            continue
+                        if u < 0.0 or u > 1.0 or v < 0.0 or v > 1.0:
+                            continue
+                        cam_col = int(u * g_cols)
+                        cam_row = int(v * g_rows)
+                        if cam_row == g_rows:
+                            cam_row = g_rows - 1
+                        if cam_col == g_cols:
+                            cam_col = g_cols - 1
                         if cam_row < 0 or cam_row >= g_rows or cam_col < 0 or cam_col >= g_cols:
                             continue
 
@@ -197,6 +243,8 @@ class HeatmapAnalyzer:
                             "floor_col": floor_col,
                             "camera_id": cam_id,
                             "virtual_view_id": vv_real_id,
+                            "camera_row": cam_row,
+                            "camera_col": cam_col,
                             "ts": asyncio.get_event_loop().time(),
                         }
                         try:

@@ -201,6 +201,15 @@ const HeatmapView: React.FC = () => {
   const [analyzing, setAnalyzing] = useState(false);
   const [heatmapCells, setHeatmapCells] = useState<Map<string, number>>(new Map());
   const [recordHistory, setRecordHistory] = useState(false);
+  const [showMappedCamGrid, setShowMappedCamGrid] = useState(false);
+  const [showFootfallOnCamGrid, setShowFootfallOnCamGrid] = useState(false);
+  const [allVirtualViews, setAllVirtualViews] = useState<
+    (CameraVirtualView & { camera_name?: string })[]
+  >([]);
+  const [vvGridConfigs, setVvGridConfigs] = useState<
+    Record<number, { polygon: Pt[]; grid_rows: number; grid_cols: number }>
+  >({});
+  const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -219,6 +228,14 @@ const HeatmapView: React.FC = () => {
     };
     load();
   }, [selectedFloorPlanId]);
+
+  useEffect(() => {
+    // 虚拟视窗元信息（用于获取 out_w/out_h 等）
+    fetch(`${API_BASE}/api/cameras/virtual-views/all`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((items) => setAllVirtualViews(items))
+      .catch((e) => console.error(e));
+  }, []);
 
   useEffect(() => {
     if (selectedFloorPlanId == null) {
@@ -240,6 +257,49 @@ const HeatmapView: React.FC = () => {
       return !!c && c.enabled;
     });
   }, [cameras, heatmapSources]);
+
+  const vvMetaById = useMemo(() => {
+    const m = new Map<number, CameraVirtualView>();
+    allVirtualViews.forEach((v) => m.set(v.id, v));
+    return m;
+  }, [allVirtualViews]);
+
+  useEffect(() => {
+    if (!showMappedCamGrid) return;
+    const ids = mappedCameras
+      .filter((s) => s.kind === "virtual" && !!s.virtual_view_id)
+      .map((s) => s.virtual_view_id as number);
+    ids.forEach((viewId) => {
+      if (vvGridConfigs[viewId]) return;
+      fetch(`${API_BASE}/api/cameras/virtual-views/${viewId}/grid-config`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((cfg) => {
+          if (!cfg) return;
+          let pts: Pt[] = [];
+          try {
+            const raw = JSON.parse(cfg.polygon_json || "[]");
+            if (Array.isArray(raw)) {
+              pts = raw
+                .map((p) => ({ x: Number(p.x), y: Number(p.y) }))
+                .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+            }
+          } catch {
+            pts = [];
+          }
+          if (pts.length !== 4) return;
+          const ordered = orderQuad(pts);
+          setVvGridConfigs((old) => ({
+            ...old,
+            [viewId]: {
+              polygon: ordered,
+              grid_rows: Math.max(1, Number(cfg.grid_rows) || 1),
+              grid_cols: Math.max(1, Number(cfg.grid_cols) || 1),
+            },
+          }));
+        })
+        .catch(() => {});
+    });
+  }, [showMappedCamGrid, mappedCameras, vvGridConfigs]);
 
   const selectedFloorPlan = floorPlans.find((fp) => fp.id === selectedFloorPlanId) || null;
   const floorPlanImageUrl =
@@ -298,6 +358,23 @@ const HeatmapView: React.FC = () => {
                       m.set(key, (m.get(key) || 0) + 1);
                       return m;
                     });
+                    // 记录每个 virtual view 最近一次“落脚点命中”的 camera grid cell（用于调试叠加）
+                    if (
+                      evt.virtual_view_id != null &&
+                      Number.isFinite(Number(evt.virtual_view_id)) &&
+                      evt.camera_row != null &&
+                      evt.camera_col != null
+                    ) {
+                      const vvId = Number(evt.virtual_view_id);
+                      const r = Number(evt.camera_row);
+                      const c = Number(evt.camera_col);
+                      if (Number.isFinite(r) && Number.isFinite(c)) {
+                        setVvFootfalls((old) => ({
+                          ...old,
+                          [vvId]: { row: r, col: c, ts: Date.now() },
+                        }));
+                      }
+                    }
                   } catch (e) {
                     console.error(e);
                   }
@@ -316,6 +393,7 @@ const HeatmapView: React.FC = () => {
                   wsRef.current?.close();
                   wsRef.current = null;
                   setAnalyzing(false);
+                  setVvFootfalls({});
                   // 视情况决定是否清空热力
                   // setHeatmapCells(new Map());
                 }
@@ -330,9 +408,10 @@ const HeatmapView: React.FC = () => {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-[2fr,3fr]">
+      {/* 参考“映射管理/映射绑定”的高度自适应方案：用固定视口高度 + 内部 min-h-0 */}
+      <div className="grid h-[calc(100vh-220px)] min-h-0 gap-4 md:grid-cols-[2fr,3fr]">
         {/* 左侧：热力图区域 */}
-        <div className="flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-800">热力图预览</span>
             <div className="flex items-center gap-2">
@@ -382,23 +461,40 @@ const HeatmapView: React.FC = () => {
         </div>
 
         {/* 右侧：摄像头宫格 */}
-        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-800">映射摄像头画面</span>
-            <span className="text-[11px] text-slate-400">
-              后续将按映射配置筛选参与当前热力图的摄像头
-            </span>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showMappedCamGrid}
+                  onChange={(e) => setShowMappedCamGrid(e.target.checked)}
+                />
+                显示映射网格
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showFootfallOnCamGrid}
+                  onChange={(e) => setShowFootfallOnCamGrid(e.target.checked)}
+                  disabled={!analyzing}
+                />
+                显示落脚点
+              </label>
+              <span className="text-[11px] text-slate-400">用于检查映射坐标</span>
+            </div>
           </div>
           {mappedCameras.length === 0 ? (
             <p className="text-xs text-slate-500">
               暂无可用摄像头，请先在“摄像头管理”中添加并启用，后续在“映射管理”中关联到平面图。
             </p>
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 items-start gap-3 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
               {mappedCameras.slice(0, 6).map((src) => (
                 <div
                   key={`${src.kind}-${src.kind === "virtual" ? src.virtual_view_id : src.camera_id}`}
-                  className="overflow-hidden rounded-lg border border-slate-200 bg-black"
+                  className="overflow-hidden rounded-lg border border-slate-200 bg-black self-start"
                 >
                   <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
                     <span className="truncate">
@@ -412,14 +508,26 @@ const HeatmapView: React.FC = () => {
                         : `ID:${src.camera_id}`}
                     </span>
                   </div>
-                  <div className="aspect-video w-full bg-black">
+                  {/* 卡片画面区域比例：宽 4 / 高 3 */}
+                  <div className="aspect-[4/3] w-full bg-black">
                     {src.kind === "virtual" && src.virtual_view_id ? (
-                      <img
-                        src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview"}.mjpeg`}
-                        className="h-full w-full object-contain"
-                        alt={`heatmap-virtual-${src.virtual_view_id}`}
-                        draggable={false}
-                      />
+                      <div className="relative h-full w-full">
+                        <img
+                          src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview"}.mjpeg`}
+                          className="h-full w-full object-contain"
+                          alt={`heatmap-virtual-${src.virtual_view_id}`}
+                          draggable={false}
+                        />
+                        {showMappedCamGrid && vvGridConfigs[src.virtual_view_id] && vvMetaById.get(src.virtual_view_id) ? (
+                          <VirtualViewGridOverlay
+                            view={vvMetaById.get(src.virtual_view_id)!}
+                            cfg={vvGridConfigs[src.virtual_view_id]}
+                            highlightCell={
+                              showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null
+                            }
+                          />
+                        ) : null}
+                      </div>
                     ) : src.webrtc_url ? (
                       <iframe
                         src={src.webrtc_url}
@@ -439,6 +547,139 @@ const HeatmapView: React.FC = () => {
           )}
         </div>
       </div>
+    </div>
+  );
+};
+
+const VirtualViewGridOverlay: React.FC<{
+  view: CameraVirtualView;
+  cfg: { polygon: Pt[]; grid_rows: number; grid_cols: number };
+  highlightCell?: { row: number; col: number } | null;
+}> = ({ view, cfg, highlightCell = null }) => {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  // NOTE: 本项目当前的 TS 诊断环境对局部类型收窄有时会误报 never，
+  // 这里用显式 any 来避免阻塞编译（运行时仍做严格数值校验）。
+  const hcAny = (highlightCell ?? null) as any;
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const { width, height } = entries[0]?.contentRect ?? { width: 0, height: 0 };
+      setSize({ w: width, h: height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const cw = Math.max(1, Math.floor(size.w));
+    const ch = Math.max(1, Math.floor(size.h));
+    if (cw <= 1 || ch <= 1) return;
+    canvas.width = cw;
+    canvas.height = ch;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+
+    const outW = Math.max(1, view.out_w || 1);
+    const outH = Math.max(1, view.out_h || 1);
+    const scale = Math.min(cw / outW, ch / outH);
+    const offX = cw / 2 - (outW * scale) / 2;
+    const offY = ch / 2 - (outH * scale) / 2;
+
+    const quadScreen = cfg.polygon.map((p) => ({
+      x: offX + p.x * scale,
+      y: offY + p.y * scale,
+    }));
+    const H = computeHomography(
+      [
+        { x: 0, y: 0 },
+        { x: 1, y: 0 },
+        { x: 1, y: 1 },
+        { x: 0, y: 1 },
+      ],
+      quadScreen,
+    );
+    if (!H) return;
+
+    const rows = Math.max(1, cfg.grid_rows);
+    const cols = Math.max(1, cfg.grid_cols);
+
+    // 落脚点高亮（不透明红色）
+    const hr = hcAny?.row;
+    const hc = hcAny?.col;
+    if (
+      Number.isFinite(hr) &&
+      Number.isFinite(hc) &&
+      hr >= 0 &&
+      hr < rows &&
+      hc >= 0 &&
+      hc < cols
+    ) {
+      const r = hr as number;
+      const c = hc as number;
+      const u0 = c / cols;
+      const u1 = (c + 1) / cols;
+      const v0 = r / rows;
+      const v1 = (r + 1) / rows;
+      const p00 = applyHomography(H, { x: u0, y: v0 });
+      const p10 = applyHomography(H, { x: u1, y: v0 });
+      const p11 = applyHomography(H, { x: u1, y: v1 });
+      const p01 = applyHomography(H, { x: u0, y: v1 });
+      ctx.fillStyle = "rgba(239,68,68,1.0)";
+      ctx.beginPath();
+      ctx.moveTo(p00.x, p00.y);
+      ctx.lineTo(p10.x, p10.y);
+      ctx.lineTo(p11.x, p11.y);
+      ctx.lineTo(p01.x, p01.y);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // 外框
+    ctx.strokeStyle = "rgba(14,165,233,1.0)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(quadScreen[0].x, quadScreen[0].y);
+    ctx.lineTo(quadScreen[1].x, quadScreen[1].y);
+    ctx.lineTo(quadScreen[2].x, quadScreen[2].y);
+    ctx.lineTo(quadScreen[3].x, quadScreen[3].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // 内部网格线
+    ctx.strokeStyle = "rgba(14,165,233,0.55)";
+    ctx.lineWidth = 1;
+    for (let r = 1; r < rows; r++) {
+      const v = r / rows;
+      const p0 = applyHomography(H, { x: 0, y: v });
+      const p1 = applyHomography(H, { x: 1, y: v });
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+    for (let c = 1; c < cols; c++) {
+      const u = c / cols;
+      const p0 = applyHomography(H, { x: u, y: 0 });
+      const p1 = applyHomography(H, { x: u, y: 1 });
+      ctx.beginPath();
+      ctx.moveTo(p0.x, p0.y);
+      ctx.lineTo(p1.x, p1.y);
+      ctx.stroke();
+    }
+  }, [size, view, cfg, highlightCell]);
+
+  return (
+    <div ref={containerRef} className="pointer-events-none absolute inset-0">
+      <canvas ref={canvasRef} className="h-full w-full" />
     </div>
   );
 };
@@ -2732,6 +2973,7 @@ const PanoramaViewsView: React.FC = () => {
   const [previewNonce, setPreviewNonce] = useState<Record<number, number>>({});
   // 为了避免频繁保存导致浏览器保留旧 MJPEG 连接，这里在重连时先短暂卸载 <img>
   const [previewDisabled, setPreviewDisabled] = useState<Record<number, boolean>>({});
+  const previewRefreshTimersRef = useRef<Record<number, number>>({});
 
   const loadCameras = useCallback(async () => {
     const res = await fetch(`${API_BASE}/api/cameras/`);
@@ -2776,6 +3018,29 @@ const PanoramaViewsView: React.FC = () => {
 
   const bumpPreview = (viewId: number) => {
     setPreviewNonce((m) => ({ ...m, [viewId]: Date.now() }));
+  };
+
+  const forceRefreshPreview = (viewId: number) => {
+    // 连续点击时，取消上一次的定时器，避免永远卡在“无画面/重连中”
+    const oldTimer = previewRefreshTimersRef.current[viewId];
+    if (oldTimer) {
+      window.clearTimeout(oldTimer);
+      delete previewRefreshTimersRef.current[viewId];
+    }
+    // 先卸载 img，确保连接断开
+    setPreviewDisabled((m) => ({ ...m, [viewId]: true }));
+    // 清除 nonce，保证重新挂载时一定是新 URL
+    setPreviewNonce((m) => {
+      const next = { ...m };
+      delete next[viewId];
+      return next;
+    });
+    const t = window.setTimeout(() => {
+      bumpPreview(viewId);
+      setPreviewDisabled((m) => ({ ...m, [viewId]: false }));
+      delete previewRefreshTimersRef.current[viewId];
+    }, 800);
+    previewRefreshTimersRef.current[viewId] = t;
   };
 
   const createView = async () => {
@@ -2952,6 +3217,14 @@ const PanoramaViewsView: React.FC = () => {
                         编辑
                       </button>
                     )}
+                    <button
+                      className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                      onClick={() => {
+                        forceRefreshPreview(v.id);
+                      }}
+                    >
+                      刷新
+                    </button>
                     <button
                       className="rounded border border-rose-300 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
                       onClick={() => deleteView(v.id)}
