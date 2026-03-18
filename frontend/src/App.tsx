@@ -854,6 +854,7 @@ type FloorPlanCanvasProps = {
   linkedHoverCell?: { row: number; col: number } | null;
   mappedCells?: Set<string>;
   heatmapCells?: Map<string, number>;
+  cellFillColors?: Map<string, string>;
 };
 
 const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
@@ -869,6 +870,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     linkedHoverCell = null,
     mappedCells,
     heatmapCells,
+    cellFillColors,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -953,14 +955,21 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
         ctx.stroke();
       }
     }
-    // 已绑定格子（绿色，且不可选）
-    if (mappedCells && mappedCells.size > 0) {
+    // 已绑定格子（按来源分色；若未提供分色则使用绿色）
+    if (
+      (cellFillColors && cellFillColors.size > 0) ||
+      (mappedCells && mappedCells.size > 0)
+    ) {
       const cellW = iw / cols;
       const cellH = ih / rows;
-      ctx.fillStyle = "rgba(34,197,94,0.18)";
-      ctx.strokeStyle = "rgba(34,197,94,0.85)";
       ctx.lineWidth = 1.5 / fitScale;
-      mappedCells.forEach((key) => {
+      const keys =
+        cellFillColors && cellFillColors.size > 0
+          ? Array.from(cellFillColors.keys())
+          : mappedCells
+            ? Array.from(mappedCells)
+            : [];
+      keys.forEach((key) => {
         const [rs, cs] = key.split(",");
         const r = Number(rs);
         const c = Number(cs);
@@ -968,6 +977,12 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
         if (r < 0 || r >= rows || c < 0 || c >= cols) return;
         const x = c * cellW;
         const y = r * cellH;
+        const fill = cellFillColors?.get(key) || "rgba(34,197,94,0.18)";
+        const stroke = cellFillColors?.get(key)
+          ? (cellFillColors.get(key) as string).replace(/rgba\(([^,]+),([^,]+),([^,]+),[^)]+\)/, "rgba($1,$2,$3,0.85)")
+          : "rgba(34,197,94,0.85)";
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = stroke;
         ctx.fillRect(x, y, cellW, cellH);
         ctx.strokeRect(x, y, cellW, cellH);
       });
@@ -1106,7 +1121,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, heatmapCells]);
+  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, heatmapCells, cellFillColors]);
 
   useEffect(() => {
     draw();
@@ -1516,6 +1531,110 @@ const MappingView: React.FC = () => {
     return s;
   }, [cellMappings]);
 
+  // === 平面图“按绑定源分色” ===
+  type BindSourceItem = { key: string; label: string; color: string };
+  const [bindSourceList, setBindSourceList] = useState<BindSourceItem[]>([]);
+  const [floorCellToSourceKey, setFloorCellToSourceKey] = useState<Map<string, string>>(new Map());
+  const [floorCellFillColors, setFloorCellFillColors] = useState<Map<string, string>>(new Map());
+
+  const palette = [
+    "#694FF9",
+    "#0EA5E9",
+    "#22C55E",
+    "#F97316",
+    "#EF4444",
+    "#A855F7",
+    "#14B8A6",
+    "#F59E0B",
+    "#84CC16",
+    "#06B6D4",
+    "#F43F5E",
+    "#8B5CF6",
+  ];
+  const colorForKey = (k: string) => {
+    let h = 0;
+    for (let i = 0; i < k.length; i++) h = (h * 131 + k.charCodeAt(i)) >>> 0;
+    return palette[h % palette.length];
+  };
+  const withAlpha = (hex: string, a: number) => {
+    const m = hex.replace("#", "");
+    const r = parseInt(m.slice(0, 2), 16);
+    const g = parseInt(m.slice(2, 4), 16);
+    const b = parseInt(m.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${a})`;
+  };
+
+  useEffect(() => {
+    // 当平面图切换时，加载“与该平面图存在绑定关系的 sources”，并汇总每个 floor cell 属于哪个 source
+    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") {
+      setBindSourceList([]);
+      setFloorCellToSourceKey(new Map());
+      setFloorCellFillColors(new Map());
+      return;
+    }
+    const floorPlanId = bindFloorPlanId;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/floor-plans/${floorPlanId}/heatmap-sources`);
+        const sources: {
+          kind: "camera" | "virtual";
+          camera_id: number;
+          camera_name: string;
+          virtual_view_id?: number | null;
+          virtual_view_name?: string | null;
+        }[] = res.ok ? await res.json() : [];
+
+        const items: BindSourceItem[] = [];
+        const cellToKey = new Map<string, string>();
+
+        // 仅对 virtual PTZ 有 cell-mappings，可实现网格分色；camera 类型先展示在列表但不参与格子分色
+        for (const s of sources) {
+          if (s.kind === "virtual" && s.virtual_view_id) {
+            const key = `vv:${s.virtual_view_id}`;
+            const colorHex = colorForKey(key);
+            items.push({
+              key,
+              label: `${s.camera_name} / ${s.virtual_view_name || `VV#${s.virtual_view_id}`} (virtual)`,
+              color: colorHex,
+            });
+            const mRes = await fetch(
+              `${API_BASE}/api/cameras/virtual-views/${s.virtual_view_id}/cell-mappings?floor_plan_id=${floorPlanId}`,
+            );
+            const mappings: VirtualViewCellMapping[] = mRes.ok ? await mRes.json() : [];
+            mappings.forEach((m) => {
+              const fk = `${m.floor_row},${m.floor_col}`;
+              cellToKey.set(fk, key);
+            });
+          } else if (s.kind === "camera") {
+            const key = `cam:${s.camera_id}`;
+            const colorHex = colorForKey(key);
+            items.push({
+              key,
+              label: `${s.camera_name} (camera)`,
+              color: colorHex,
+            });
+          }
+        }
+
+        // floor cell -> rgba fill
+        const fillMap = new Map<string, string>();
+        cellToKey.forEach((k, cellKey) => {
+          const hex = colorForKey(k);
+          fillMap.set(cellKey, withAlpha(hex, 0.22));
+        });
+
+        setBindSourceList(items);
+        setFloorCellToSourceKey(cellToKey);
+        setFloorCellFillColors(fillMap);
+      } catch (e) {
+        console.error(e);
+        setBindSourceList([]);
+        setFloorCellToSourceKey(new Map());
+        setFloorCellFillColors(new Map());
+      }
+    })();
+  }, [bindFloorPlanId]);
+
   const camToFloor = useMemo(() => {
     const m = new Map<string, { row: number; col: number }>();
     cellMappings.forEach((x) => m.set(`${x.camera_row},${x.camera_col}`, { row: x.floor_row, col: x.floor_col }));
@@ -1867,37 +1986,60 @@ const MappingView: React.FC = () => {
               </select>
             </div>
             {bindFloorPlanId !== "" && (
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <label className="text-xs text-slate-600">
-                  网格行数
-                  <input
-                    type="number"
-                    min={1}
-                    className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
-                    value={bindGridRows}
-                    onChange={(e) => setBindGridRows(e.target.value)}
-                  />
-                </label>
-                <label className="text-xs text-slate-600">
-                  网格列数
-                  <input
-                    type="number"
-                    min={1}
-                    className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
-                    value={bindGridCols}
-                    onChange={(e) => setBindGridCols(e.target.value)}
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={saveBindGrid}
-                  disabled={savingGrid}
-                  className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50"
-                >
-                  {savingGrid ? "保存中…" : "保存网格设置"}
-                </button>
+              <div className="mb-2 space-y-2">
+                <div className="text-[11px] font-semibold text-slate-700">网格设置</div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="text-xs text-slate-600">
+                    网格行数
+                    <input
+                      type="number"
+                      min={1}
+                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                      value={bindGridRows}
+                      onChange={(e) => setBindGridRows(e.target.value)}
+                    />
+                  </label>
+                  <label className="text-xs text-slate-600">
+                    网格列数
+                    <input
+                      type="number"
+                      min={1}
+                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                      value={bindGridCols}
+                      onChange={(e) => setBindGridCols(e.target.value)}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    onClick={saveBindGrid}
+                    disabled={savingGrid}
+                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                  >
+                    {savingGrid ? "保存中…" : "保存网格设置"}
+                  </button>
+                </div>
+
+                <div className="text-[11px] font-semibold text-slate-700">摄像头绑定列表</div>
+                <div className="max-h-28 overflow-y-auto rounded border border-slate-200 bg-slate-50 p-2">
+                  {bindSourceList.length === 0 ? (
+                    <div className="text-[11px] text-slate-400">暂无绑定关系</div>
+                  ) : (
+                    <div className="grid grid-cols-3 gap-x-3 gap-y-1">
+                      {bindSourceList.map((it) => (
+                        <div key={it.key} className="flex min-w-0 items-center gap-2 text-[11px] text-slate-700">
+                          <span
+                            className="h-2.5 w-2.5 shrink-0 rounded-full border border-white shadow-sm"
+                            style={{ background: it.color }}
+                          />
+                          <span className="min-w-0 truncate">{it.label}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             )}
+            <div className="mb-2 text-[11px] font-semibold text-slate-700">平面图预览</div>
             <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
               {bindFloorPlanId !== "" ? (
                 (() => {
@@ -1918,10 +2060,20 @@ const MappingView: React.FC = () => {
                       gridRows={rows}
                       gridCols={cols}
                       selectedCell={fpSelectedCell}
-                      onCellClick={(cell) => setFpSelectedCell(cell)}
+                      onCellClick={(cell) => {
+                        setFpSelectedCell(cell);
+                        if (!cell) return;
+                        const key = `${cell.row},${cell.col}`;
+                        const srcKey = floorCellToSourceKey.get(key);
+                        if (srcKey) {
+                          // 自动切换右侧摄像头选择到该绑定源
+                          setBindCameraId(srcKey);
+                        }
+                      }}
                       onCellHover={(cell) => setFpHoverCell(cell)}
                       linkedHoverCell={linkedFpHoverCell}
                       mappedCells={mappedFloorCells}
+                      cellFillColors={floorCellFillColors}
                       className="w-full h-full"
                     />
                   );
@@ -3075,8 +3227,7 @@ const PanoramaViewsView: React.FC = () => {
   };
 
   const updateView = async (v: CameraVirtualView) => {
-    // 先卸载预览，确保旧 MJPEG 连接断开，避免多次保存后出现“无画面”
-    setPreviewDisabled((m) => ({ ...m, [v.id]: true }));
+    // 后端已支持热加载参数：保存后无需强制重连 MJPEG，否则容易出现短时间断流导致空白
     const res = await fetch(`${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -3092,16 +3243,10 @@ const PanoramaViewsView: React.FC = () => {
     });
     if (!res.ok) {
       alert("保存失败");
-      setPreviewDisabled((m) => ({ ...m, [v.id]: false }));
       return;
     }
     await loadViews();
-    // 强制 <img> 重新建立 MJPEG 连接，才能看到新参数的画面
-    window.setTimeout(() => {
-      bumpPreview(v.id);
-      setPreviewDisabled((m) => ({ ...m, [v.id]: false }));
-      setEditMode((old) => ({ ...old, [v.id]: false }));
-    }, 120);
+    setEditMode((old) => ({ ...old, [v.id]: false }));
   };
 
   const deleteView = async (viewId: number) => {
@@ -3183,8 +3328,8 @@ const PanoramaViewsView: React.FC = () => {
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             {views.map((v, idx) => {
               const previewUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/preview.mjpeg`;
-              const nonce = previewNonce[v.id] ?? 0;
-              const previewUrlWithNonce = previewUrl ? `${previewUrl}?t=${nonce}` : "";
+              const nonce = previewNonce[v.id];
+              const previewUrlWithNonce = previewUrl ? (nonce ? `${previewUrl}?t=${nonce}` : previewUrl) : "";
               const canEdit = !!editMode[v.id];
               return (
                 <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">

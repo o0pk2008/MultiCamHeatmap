@@ -8,7 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..db import get_db
+from ..db import get_db, SessionLocal
 from ..panorama import equirect_to_perspective
 from ..virtual_view_inference import manager
 
@@ -188,8 +188,38 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
 
         boundary = b"--frame"
         last_ok = time.time()
+        # 定期热加载最新参数（避免前端必须强制重连才能看到保存后的画面）
+        last_reload = 0.0
+        enabled = view.enabled
+        yaw_deg = view.yaw_deg
+        pitch_deg = view.pitch_deg
+        fov_deg = view.fov_deg
+        out_w = view.out_w
+        out_h = view.out_h
         try:
             while True:
+                now = time.time()
+                if now - last_reload >= 1.0:
+                    last_reload = now
+                    try:
+                        with SessionLocal() as db2:
+                            v2 = (
+                                db2.query(models.CameraVirtualView)
+                                .filter(
+                                    models.CameraVirtualView.id == view_id,
+                                    models.CameraVirtualView.camera_id == camera_id,
+                                )
+                                .first()
+                            )
+                            if v2 is not None:
+                                enabled = bool(v2.enabled)
+                                yaw_deg = float(v2.yaw_deg)
+                                pitch_deg = float(v2.pitch_deg)
+                                fov_deg = float(v2.fov_deg)
+                                out_w = int(v2.out_w)
+                                out_h = int(v2.out_h)
+                    except Exception:
+                        pass
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     # RTSP 抖动时短暂等待重试
@@ -199,16 +229,16 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                     continue
                 last_ok = time.time()
 
-                if not view.enabled:
+                if not enabled:
                     persp = frame
                 else:
                     persp = equirect_to_perspective(
                         frame,
-                        yaw_deg=view.yaw_deg,
-                        pitch_deg=view.pitch_deg,
-                        fov_deg=view.fov_deg,
-                        out_w=view.out_w,
-                        out_h=view.out_h,
+                        yaw_deg=yaw_deg,
+                        pitch_deg=pitch_deg,
+                        fov_deg=fov_deg,
+                        out_w=out_w,
+                        out_h=out_h,
                     )
 
                 ok2, jpg = cv2.imencode(".jpg", persp, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
