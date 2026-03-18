@@ -1,12 +1,19 @@
 from typing import List
 import os
 import uuid
+import asyncio
+import random
 
 from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from .. import models, schemas
 from ..db import get_db
+from ..heatmap_analysis import analyzer
+from ..heatmap_store import set_recording
+
+heatmap_running_floor_plans = set()  # floor_plan_id 集合
 
 # 映射相关路由：
 # - 平面图及其网格（FloorPlan / FloorCell）
@@ -267,3 +274,65 @@ def create_camera_ground_cell(
     db.refresh(cell)
     return cell
 
+@router.post("/heatmap/start")
+async def start_heatmap_analysis(
+    floor_plan_id: int,
+    record_history: bool = False,
+    db: Session = Depends(get_db),
+):
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+    heatmap_running_floor_plans.add(floor_plan_id)
+    set_recording(floor_plan_id, record_history)
+    # 通过 HeatmapAnalyzer 启动/管理后台分析任务
+    analyzer.start_for_floor_plan(floor_plan_id)
+
+    return {
+        "status": "started",
+        "floor_plan_id": floor_plan_id,
+        "record_history": record_history,
+    }
+
+
+@router.post("/heatmap/stop")
+async def stop_heatmap_analysis(floor_plan_id: int):
+    heatmap_running_floor_plans.discard(floor_plan_id)
+    analyzer.stop_for_floor_plan(floor_plan_id)
+    set_recording(floor_plan_id, False)
+    return {"status": "stopped", "floor_plan_id": floor_plan_id}
+
+
+@router.get(
+    "/heatmap/history",
+    response_model=List[schemas.HeatmapHistoryCellOut],
+)
+def get_heatmap_history(
+    floor_plan_id: int,
+    start_ts: float,
+    end_ts: float,
+    db: Session = Depends(get_db),
+):
+    """
+    按时间段查询热力图历史统计（按 floor cell 聚合计数）。
+    - start_ts / end_ts: Unix 时间戳（秒）
+    """
+    if start_ts >= end_ts:
+        raise HTTPException(status_code=400, detail="start_ts must be < end_ts")
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    rows = (
+        db.query(
+            models.HeatmapEvent.floor_row,
+            models.HeatmapEvent.floor_col,
+            func.count(models.HeatmapEvent.id).label("count"),
+        )
+        .filter(
+            models.HeatmapEvent.floor_plan_id == floor_plan_id,
+            models.HeatmapEvent.ts >= start_ts,
+            models.HeatmapEvent.ts < end_ts,
+        )
+        .group_by(models.HeatmapEvent.floor_row, models.HeatmapEvent.floor_col)
+        .all()
+    )
+    return [{"floor_row": r, "floor_col": c, "count": int(cnt)} for (r, c, cnt) in rows]

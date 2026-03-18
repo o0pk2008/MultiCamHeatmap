@@ -14,8 +14,14 @@ services:
       - TZ=Asia/Shanghai
       - BACKEND_ENV=dev
       - DB_URL=sqlite:////data/app.db
+      # NVIDIA GPU (需要宿主机与 Docker 支持 NVIDIA Container Toolkit)
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
     ports:
       - "18080:8000"
+    # 兼容旧版 docker-compose：使用 nvidia runtime
+    # 若你的环境已是 Docker Compose v2，可改用 `gpus: all`
+    runtime: nvidia
 
   frontend:
     build:

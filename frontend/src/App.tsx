@@ -198,6 +198,10 @@ const HeatmapView: React.FC = () => {
     }[]
   >([]);
   const [showHeatmapGrid, setShowHeatmapGrid] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [heatmapCells, setHeatmapCells] = useState<Map<string, number>>(new Map());
+  const [recordHistory, setRecordHistory] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     const load = async () => {
@@ -251,6 +255,81 @@ const HeatmapView: React.FC = () => {
         映射关系和底图上传将在“映射管理”模块中配置。
       </p>
 
+      <div className="mb-2 flex items-center justify-between">
+        <div />
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1 text-[11px] text-slate-600">
+            <input
+              type="checkbox"
+              checked={recordHistory}
+              onChange={(e) => setRecordHistory(e.target.checked)}
+              disabled={analyzing}
+            />
+            录制历史
+          </label>
+          <button
+            className={`rounded px-3 py-1 text-xs font-medium text-white ${
+              analyzing ? "bg-rose-500 hover:bg-rose-600" : "bg-[#694FF9] hover:bg-[#5b3ff6]"
+            }`}
+            onClick={async () => {
+              if (!selectedFloorPlanId) return;
+              try {
+                if (!analyzing) {
+                  await fetch(
+                    `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${
+                      recordHistory ? "true" : "false"
+                    }`,
+                    { method: "POST" },
+                  );
+                // 连接 WebSocket
+                const ws = new WebSocket(
+                  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
+                    /:\d+$/,
+                    ":18080",
+                  )}/ws/heatmap-events`,
+                );
+                ws.onmessage = (ev) => {
+                  try {
+                    const evt = JSON.parse(ev.data);
+                    if (evt.floor_plan_id !== selectedFloorPlanId) return;
+                    const key = `${evt.floor_row},${evt.floor_col}`;
+                    setHeatmapCells((old) => {
+                      const m = new Map(old);
+                      m.set(key, (m.get(key) || 0) + 1);
+                      return m;
+                    });
+                  } catch (e) {
+                    console.error(e);
+                  }
+                };
+                ws.onclose = () => {
+                  wsRef.current = null;
+                  setAnalyzing(false);
+                };
+                wsRef.current = ws;
+                setAnalyzing(true);
+                } else {
+                  await fetch(
+                    `${API_BASE}/api/heatmap/stop?floor_plan_id=${selectedFloorPlanId}`,
+                    { method: "POST" },
+                  );
+                  wsRef.current?.close();
+                  wsRef.current = null;
+                  setAnalyzing(false);
+                  // 视情况决定是否清空热力
+                  // setHeatmapCells(new Map());
+                }
+              } catch (e) {
+                console.error(e);
+                alert("热力图分析启动/停止失败");
+              }
+            }}
+          >
+            {analyzing ? "停止热力图分析" : "启动热力图分析"}
+          </button>
+        </div>
+      </div>
+
       <div className="grid gap-4 md:grid-cols-[2fr,3fr]">
         {/* 左侧：热力图区域 */}
         <div className="flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
@@ -291,6 +370,7 @@ const HeatmapView: React.FC = () => {
                 gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showHeatmapGrid}
+                heatmapCells={heatmapCells}
                 className="w-full h-full"
               />
             ) : (
@@ -335,7 +415,7 @@ const HeatmapView: React.FC = () => {
                   <div className="aspect-video w-full bg-black">
                     {src.kind === "virtual" && src.virtual_view_id ? (
                       <img
-                        src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/preview.mjpeg?t=${Date.now()}`}
+                        src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview"}.mjpeg`}
                         className="h-full w-full object-contain"
                         alt={`heatmap-virtual-${src.virtual_view_id}`}
                         draggable={false}
@@ -532,6 +612,7 @@ type FloorPlanCanvasProps = {
   onCellHover?: (cell: { row: number; col: number } | null) => void;
   linkedHoverCell?: { row: number; col: number } | null;
   mappedCells?: Set<string>;
+  heatmapCells?: Map<string, number>;
 };
 
 const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
@@ -546,6 +627,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     onCellHover,
     linkedHoverCell = null,
     mappedCells,
+    heatmapCells,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -663,6 +745,77 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       ctx.strokeRect(x, y, cellW, cellH);
     }
 
+    // 热力格子（从浅绿 -> 绿 -> 橙黄 -> 红，自适应最小/最大值）
+    if (heatmapCells && heatmapCells.size > 0) {
+      const cellW = iw / cols;
+      const cellH = ih / rows;
+
+      let minVal = Infinity;
+      let maxVal = -Infinity;
+      heatmapCells.forEach((v) => {
+        if (v < minVal) minVal = v;
+        if (v > maxVal) maxVal = v;
+      });
+      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+        // 数据异常时直接跳过绘制
+      } else {
+        // 为了避免“1 和 2 就是从浅绿跳到红”，
+        // 给一个基础动态范围；当真实范围更大时，再按真实范围拉高到红色。
+        const rawSpan = maxVal - minVal;
+        const baseSpan = 10; // 基础跨度，可根据效果再微调
+        const span = rawSpan < baseSpan ? baseSpan : rawSpan;
+
+        const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+        const lerpColor = (
+          c1: [number, number, number],
+          c2: [number, number, number],
+          t: number,
+        ): [number, number, number] => [
+          Math.round(lerp(c1[0], c2[0], t)),
+          Math.round(lerp(c1[1], c2[1], t)),
+          Math.round(lerp(c1[2], c2[2], t)),
+        ];
+
+        // 颜色锚点：
+        // 浅绿色 -> 绿色 -> 橙黄色 -> 红色
+        const cLightGreen: [number, number, number] = [187, 247, 208]; // #bbf7d0
+        const cGreen: [number, number, number] = [34, 197, 94]; // #22c55e
+        const cOrange: [number, number, number] = [249, 115, 22]; // #f97316
+        const cRed: [number, number, number] = [239, 68, 68]; // #ef4444
+
+        const colorForValue = (v: number): [number, number, number] => {
+          const tRaw = (v - minVal) / span;
+          const t = Math.min(1, Math.max(0, tRaw));
+          if (t < 1 / 3) {
+            // 0 - 1/3: 浅绿 -> 绿
+            const tt = t / (1 / 3);
+            return lerpColor(cLightGreen, cGreen, tt);
+          }
+          if (t < 2 / 3) {
+            // 1/3 - 2/3: 绿 -> 橙
+            const tt = (t - 1 / 3) / (1 / 3);
+            return lerpColor(cGreen, cOrange, tt);
+          }
+          // 2/3 - 1: 橙 -> 红
+          const tt = (t - 2 / 3) / (1 / 3);
+          return lerpColor(cOrange, cRed, tt);
+        };
+
+        heatmapCells.forEach((value, key) => {
+          const [rs, cs] = key.split(",");
+          const r = Number(rs);
+          const c = Number(cs);
+          if (Number.isNaN(r) || Number.isNaN(c)) return;
+          if (r < 0 || r >= rows || c < 0 || c >= cols) return;
+          const x = c * cellW;
+          const y = r * cellH;
+          const [rr, gg, bb] = colorForValue(value);
+          ctx.fillStyle = `rgba(${rr},${gg},${bb},0.9)`; // 固定透明度，主要用颜色表达强度
+          ctx.fillRect(x, y, cellW, cellH);
+        });
+      }
+    }
+
     // linked hover（对侧面板联动的 hover，高亮但不覆盖当前 hover）
     if (
       linkedHoverCell != null &&
@@ -712,7 +865,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize]);
+  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, heatmapCells]);
 
   useEffect(() => {
     draw();
@@ -1590,7 +1743,7 @@ const MappingView: React.FC = () => {
                     }
                     // virtual PTZ：用 MJPEG 预览
                     const view = opt.view;
-                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview.mjpeg?t=${Date.now()}`;
+                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview.mjpeg`;
                     const aspectW = view.out_w || 960;
                     const aspectH = view.out_h || 540;
 
@@ -2095,7 +2248,7 @@ const MappingView: React.FC = () => {
             <div className="border-b border-slate-200 bg-slate-50 px-3 py-3">
               <div className="text-sm font-semibold text-slate-800">映射数据列表</div>
               <div className="mt-0.5 text-[11px] text-slate-500">
-                未来显示：平面图网格ID ↔ 摄像头画面网格ID
+                平面图网格ID ↔ 摄像头画面网格ID
               </div>
             </div>
             <div className="border-b border-slate-200 p-3">
@@ -2571,11 +2724,14 @@ const MappingView: React.FC = () => {
 const PanoramaViewsView: React.FC = () => {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [cameraId, setCameraId] = useState<number | "">("");
-  const [views, setViews] = useState<CameraVirtualView[]>([]);
+  const [views, setViews] = useState<(CameraVirtualView & { camera_name?: string })[]>([]);
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [editMode, setEditMode] = useState<Record<number, boolean>>({});
   // 用于强制 MJPEG 预览重连（保存参数后刷新画面）
   const [previewNonce, setPreviewNonce] = useState<Record<number, number>>({});
+  // 为了避免频繁保存导致浏览器保留旧 MJPEG 连接，这里在重连时先短暂卸载 <img>
+  const [previewDisabled, setPreviewDisabled] = useState<Record<number, boolean>>({});
 
   const loadCameras = useCallback(async () => {
     const res = await fetch(`${API_BASE}/api/cameras/`);
@@ -2585,16 +2741,30 @@ const PanoramaViewsView: React.FC = () => {
   }, [cameraId]);
 
   const loadViews = useCallback(async () => {
-    if (cameraId === "") return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views`);
-      const data: CameraVirtualView[] = await res.json();
+      const res = await fetch(`${API_BASE}/api/cameras/virtual-views/all`);
+      const data: (CameraVirtualView & { camera_name?: string })[] = await res.json();
       setViews(data);
+      // 默认只读：新加载的视窗默认不可编辑
+      setEditMode((old) => {
+        const next: Record<number, boolean> = { ...old };
+        const existing = new Set(data.map((v) => v.id));
+        // 清理已删除项
+        Object.keys(next).forEach((k) => {
+          const id = Number(k);
+          if (!existing.has(id)) delete next[id];
+        });
+        // 为新项补默认 false
+        data.forEach((v) => {
+          if (next[v.id] === undefined) next[v.id] = false;
+        });
+        return next;
+      });
     } finally {
       setLoading(false);
     }
-  }, [cameraId]);
+  }, []);
 
   useEffect(() => {
     loadCameras();
@@ -2604,11 +2774,6 @@ const PanoramaViewsView: React.FC = () => {
     loadViews();
   }, [loadViews]);
 
-  useEffect(() => {
-    // 切换摄像机时，清空 nonce，避免不同 camera 混用
-    setPreviewNonce({});
-  }, [cameraId]);
-
   const bumpPreview = (viewId: number) => {
     setPreviewNonce((m) => ({ ...m, [viewId]: Date.now() }));
   };
@@ -2617,18 +2782,19 @@ const PanoramaViewsView: React.FC = () => {
     if (cameraId === "") return;
     setCreating(true);
     try {
+      const existingCount = views.filter((x) => x.camera_id === cameraId).length;
       const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           camera_id: cameraId,
-          name: `View ${views.length + 1}`,
+          name: `View ${existingCount + 1}`,
           enabled: true,
           yaw_deg: 0,
           pitch_deg: 0,
           fov_deg: 90,
-          out_w: 960,
-          out_h: 540,
+          out_w: 640,
+          out_h: 640,
         }),
       });
       if (!res.ok) {
@@ -2644,8 +2810,9 @@ const PanoramaViewsView: React.FC = () => {
   };
 
   const updateView = async (v: CameraVirtualView) => {
-    if (cameraId === "") return;
-    const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views/${v.id}`, {
+    // 先卸载预览，确保旧 MJPEG 连接断开，避免多次保存后出现“无画面”
+    setPreviewDisabled((m) => ({ ...m, [v.id]: true }));
+    const res = await fetch(`${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2660,17 +2827,23 @@ const PanoramaViewsView: React.FC = () => {
     });
     if (!res.ok) {
       alert("保存失败");
+      setPreviewDisabled((m) => ({ ...m, [v.id]: false }));
       return;
     }
     await loadViews();
     // 强制 <img> 重新建立 MJPEG 连接，才能看到新参数的画面
-    bumpPreview(v.id);
+    window.setTimeout(() => {
+      bumpPreview(v.id);
+      setPreviewDisabled((m) => ({ ...m, [v.id]: false }));
+      setEditMode((old) => ({ ...old, [v.id]: false }));
+    }, 120);
   };
 
   const deleteView = async (viewId: number) => {
-    if (cameraId === "") return;
+    const v = views.find((x) => x.id === viewId);
+    if (!v) return;
     if (!confirm("确定删除该视窗吗？")) return;
-    const res = await fetch(`${API_BASE}/api/cameras/${cameraId}/virtual-views/${viewId}`, {
+    const res = await fetch(`${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${viewId}`, {
       method: "DELETE",
     });
     if (!res.ok) {
@@ -2683,183 +2856,239 @@ const PanoramaViewsView: React.FC = () => {
       delete next[viewId];
       return next;
     });
+    setPreviewDisabled((m) => {
+      const next = { ...m };
+      delete next[viewId];
+      return next;
+    });
+    setEditMode((m) => {
+      const next = { ...m };
+      delete next[viewId];
+      return next;
+    });
   };
 
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-slate-800">选择摄像机</span>
-          <select
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-            value={cameraId}
-            onChange={(e) => setCameraId(e.target.value ? Number(e.target.value) : "")}
-          >
-            {cameras.length === 0 && <option value="">无摄像机</option>}
-            {cameras.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} #{c.id}
-              </option>
-            ))}
-          </select>
+      {/* C 方案：创建区独立模块 */}
+      <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-slate-800">创建新视窗</span>
+            <span className="text-[11px] text-slate-400">选择摄像机后点击新增</span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+              value={cameraId}
+              onChange={(e) => setCameraId(e.target.value ? Number(e.target.value) : "")}
+            >
+              {cameras.length === 0 && <option value="">无摄像机</option>}
+              {cameras.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} #{c.id}
+                </option>
+              ))}
+            </select>
+            <button
+              className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
+              disabled={cameraId === "" || creating}
+              onClick={createView}
+            >
+              {creating ? "创建中…" : "新增视窗"}
+            </button>
+          </div>
         </div>
-        <button
-          className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
-          disabled={cameraId === "" || creating}
-          onClick={createView}
-        >
-          {creating ? "创建中…" : "新增视窗"}
-        </button>
+        <div className="mt-2 text-[11px] text-slate-500">
+          说明：此页面用于 360 全景相机的 virtual PTZ 透视视窗配置。预览使用 MJPEG 流（后续可替换为 WebRTC）。
+        </div>
       </div>
 
-      <p className="text-[11px] text-slate-500">
-        说明：此页面用于 360 全景相机的 virtual PTZ 透视视窗配置。预览使用 MJPEG 流（首次实现），后续可替换为 WebRTC。
-      </p>
-
-      {loading ? (
-        <div className="text-xs text-slate-500">加载中…</div>
-      ) : views.length === 0 ? (
-        <div className="text-xs text-slate-500">暂无视窗配置，点击“新增视窗”。</div>
-      ) : (
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-          {views.map((v, idx) => {
-            const previewUrl =
-              cameraId === ""
-                ? ""
-                : `${API_BASE}/api/cameras/${cameraId}/virtual-views/${v.id}/preview.mjpeg`;
-            const nonce = previewNonce[v.id] ?? 0;
-            const previewUrlWithNonce = previewUrl ? `${previewUrl}?t=${nonce}` : "";
-            return (
-              <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
+      {/* C 方案：已创建列表独立模块 */}
+      <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-2 flex items-center justify-between">
+          <div className="text-sm font-semibold text-slate-800">已创建视窗</div>
+          <div className="text-[11px] text-slate-500">共 {views.length} 个</div>
+        </div>
+        {loading ? (
+          <div className="text-xs text-slate-500">加载中…</div>
+        ) : views.length === 0 ? (
+          <div className="text-xs text-slate-500">暂无视窗配置，点击上方“新增视窗”。</div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+            {views.map((v, idx) => {
+              const previewUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/preview.mjpeg`;
+              const nonce = previewNonce[v.id] ?? 0;
+              const previewUrlWithNonce = previewUrl ? `${previewUrl}?t=${nonce}` : "";
+              const canEdit = !!editMode[v.id];
+              return (
+                <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
                 <div className="mb-2 flex items-start justify-between gap-2">
                   <div className="min-w-0">
                     <div className="text-sm font-semibold text-slate-800">
                       视窗 {idx + 1}{" "}
                       <span className="text-[11px] font-normal text-slate-400">#{v.id}</span>
                     </div>
+                    {v.camera_name && (
+                      <div className="mt-0.5 text-[11px] text-slate-500 truncate">
+                        摄像机：{v.camera_name} #{v.camera_id}
+                      </div>
+                    )}
                     <input
                       className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-xs"
                       value={v.name}
+                      disabled={!canEdit}
                       onChange={(e) =>
                         setViews((old) => old.map((x) => (x.id === v.id ? { ...x, name: e.target.value } : x)))
                       }
                     />
                   </div>
-                  <button
-                    className="rounded border border-rose-300 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
-                    onClick={() => deleteView(v.id)}
-                  >
-                    删除
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {!canEdit && (
+                      <button
+                        className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                        onClick={() => setEditMode((old) => ({ ...old, [v.id]: true }))}
+                      >
+                        编辑
+                      </button>
+                    )}
+                    <button
+                      className="rounded border border-rose-300 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
+                      onClick={() => deleteView(v.id)}
+                    >
+                      删除
+                    </button>
+                  </div>
                 </div>
 
-                <div className="mb-2 flex items-center gap-2">
-                  <label className="text-xs text-slate-600">
-                    <input
-                      type="checkbox"
-                      className="mr-1 align-middle"
-                      checked={v.enabled}
-                      onChange={(e) =>
-                        setViews((old) => old.map((x) => (x.id === v.id ? { ...x, enabled: e.target.checked } : x)))
-                      }
-                    />
-                    启用
-                  </label>
-                </div>
+                <div className="flex gap-3">
+                  {/* 左侧：预览 */}
+                  <div className="w-64 shrink-0 overflow-hidden rounded border border-slate-200 bg-slate-100">
+                    {previewUrlWithNonce && !previewDisabled[v.id] ? (
+                      <img
+                        key={`${v.id}-${nonce}`}
+                        src={previewUrlWithNonce}
+                        alt={`virtual-view-${v.id}`}
+                        className="h-48 w-full object-contain"
+                        draggable={false}
+                      />
+                    ) : (
+                      <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
+                        {previewDisabled[v.id] ? "重连中…" : "无预览"}
+                      </div>
+                    )}
+                  </div>
 
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <label className="text-slate-600">
-                    Yaw(°)
-                    <input
-                      type="number"
-                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                      value={v.yaw_deg}
-                      onChange={(e) =>
-                        setViews((old) =>
-                          old.map((x) => (x.id === v.id ? { ...x, yaw_deg: Number(e.target.value) } : x)),
-                        )
-                      }
-                    />
-                  </label>
-                  <label className="text-slate-600">
-                    Pitch(°)
-                    <input
-                      type="number"
-                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                      value={v.pitch_deg}
-                      onChange={(e) =>
-                        setViews((old) =>
-                          old.map((x) => (x.id === v.id ? { ...x, pitch_deg: Number(e.target.value) } : x)),
-                        )
-                      }
-                    />
-                  </label>
-                  <label className="text-slate-600">
-                    FOV(°)
-                    <input
-                      type="number"
-                      className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                      value={v.fov_deg}
-                      onChange={(e) =>
-                        setViews((old) =>
-                          old.map((x) => (x.id === v.id ? { ...x, fov_deg: Number(e.target.value) } : x)),
-                        )
-                      }
-                    />
-                  </label>
-                  <label className="text-slate-600">
-                    输出(w×h)
-                    <div className="mt-0.5 flex gap-1">
-                      <input
-                        type="number"
-                        className="w-1/2 rounded border border-slate-300 px-2 py-1"
-                        value={v.out_w}
-                        onChange={(e) =>
-                          setViews((old) =>
-                            old.map((x) => (x.id === v.id ? { ...x, out_w: Number(e.target.value) } : x)),
-                          )
-                        }
-                      />
-                      <input
-                        type="number"
-                        className="w-1/2 rounded border border-slate-300 px-2 py-1"
-                        value={v.out_h}
-                        onChange={(e) =>
-                          setViews((old) =>
-                            old.map((x) => (x.id === v.id ? { ...x, out_h: Number(e.target.value) } : x)),
-                          )
-                        }
-                      />
+                  {/* 右侧：参数 */}
+                  <div className="min-w-0 flex-1">
+                    <div className="mb-2 flex items-center gap-2">
+                      <label className="text-xs text-slate-600">
+                        <input
+                          type="checkbox"
+                          className="mr-1 align-middle"
+                          checked={v.enabled}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setViews((old) =>
+                              old.map((x) => (x.id === v.id ? { ...x, enabled: e.target.checked } : x)),
+                            )
+                          }
+                        />
+                        启用
+                      </label>
                     </div>
-                  </label>
-                </div>
 
-                <div className="mt-2 flex gap-2">
-                  <button
-                    className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6]"
-                    onClick={() => updateView(v)}
-                  >
-                    保存参数
-                  </button>
-                </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <label className="text-slate-600">
+                        Yaw(°)
+                        <input
+                          type="number"
+                          className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                          value={v.yaw_deg}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setViews((old) =>
+                              old.map((x) => (x.id === v.id ? { ...x, yaw_deg: Number(e.target.value) } : x)),
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="text-slate-600">
+                        Pitch(°)
+                        <input
+                          type="number"
+                          className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                          value={v.pitch_deg}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setViews((old) =>
+                              old.map((x) => (x.id === v.id ? { ...x, pitch_deg: Number(e.target.value) } : x)),
+                            )
+                          }
+                        />
+                      </label>
+                      <label className="col-span-2 text-slate-600">
+                        输出(w×h)
+                        <div className="mt-0.5 flex gap-1">
+                          <input
+                            type="number"
+                            className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                            value={v.out_w}
+                            disabled={!canEdit}
+                            onChange={(e) =>
+                              setViews((old) =>
+                                old.map((x) => (x.id === v.id ? { ...x, out_w: Number(e.target.value) } : x)),
+                              )
+                            }
+                          />
+                          <input
+                            type="number"
+                            className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                            value={v.out_h}
+                            disabled={!canEdit}
+                            onChange={(e) =>
+                              setViews((old) =>
+                                old.map((x) => (x.id === v.id ? { ...x, out_h: Number(e.target.value) } : x)),
+                              )
+                            }
+                          />
+                        </div>
+                      </label>
+                      <label className="col-span-2 text-slate-600">
+                        FOV(°)
+                        <input
+                          type="number"
+                          className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                          value={v.fov_deg}
+                          disabled={!canEdit}
+                          onChange={(e) =>
+                            setViews((old) =>
+                              old.map((x) => (x.id === v.id ? { ...x, fov_deg: Number(e.target.value) } : x)),
+                            )
+                          }
+                        />
+                      </label>
+                    </div>
 
-                <div className="mt-3 overflow-hidden rounded border border-slate-200 bg-slate-100">
-                  {previewUrlWithNonce ? (
-                    <img
-                      key={`${v.id}-${nonce}`}
-                      src={previewUrlWithNonce}
-                      alt={`virtual-view-${v.id}`}
-                      className="h-max w-full object-contain"
-                    />
-                  ) : (
-                    <div className="flex h-max items-center justify-center text-xs text-slate-500">无预览</div>
-                  )}
+                    <div className="mt-2 flex gap-2">
+                      {canEdit ? (
+                        <button
+                          className="rounded bg-[#694FF9] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-50"
+                          onClick={() => updateView(v)}
+                          disabled={!!previewDisabled[v.id]}
+                        >
+                          保存参数
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
               </div>
-            );
-          })}
-        </div>
-      )}
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
@@ -2871,6 +3100,12 @@ const CameraManageView: React.FC = () => {
   const [webrtcUrl, setWebrtcUrl] = useState("");
   const [enabled, setEnabled] = useState(true);
   const [description, setDescription] = useState("");
+  const [editing, setEditing] = useState<Camera | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editRtspUrl, setEditRtspUrl] = useState("");
+  const [editWebrtcUrl, setEditWebrtcUrl] = useState("");
+  const [editEnabled, setEditEnabled] = useState(true);
+  const [editDescription, setEditDescription] = useState("");
   const [ipRange, setIpRange] = useState("192.168.4.1-192.168.4.255");
   const [scanPort, setScanPort] = useState("554");
   const [discovered, setDiscovered] = useState<{ ip: string; port: number }[]>([]);
@@ -2885,6 +3120,52 @@ const CameraManageView: React.FC = () => {
   useEffect(() => {
     loadCameras();
   }, []);
+
+  const openEdit = (c: Camera) => {
+    setEditing(c);
+    setEditName(c.name);
+    setEditRtspUrl(c.rtsp_url);
+    setEditWebrtcUrl(c.webrtc_url || "");
+    setEditEnabled(!!c.enabled);
+    setEditDescription(c.description || "");
+  };
+
+  const closeEdit = () => {
+    setEditing(null);
+  };
+
+  const saveEdit = async () => {
+    if (!editing) return;
+    const id = editing.id;
+    const res = await fetch(`${API_BASE}/api/cameras/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: editName,
+        rtsp_url: editRtspUrl,
+        webrtc_url: editWebrtcUrl || null,
+        enabled: editEnabled,
+        description: editDescription || null,
+      }),
+    });
+    if (!res.ok) {
+      alert("保存失败");
+      return;
+    }
+    closeEdit();
+    await loadCameras();
+  };
+
+  const deleteCamera = async (c: Camera) => {
+    const ok = confirm(`确认删除摄像头「${c.name}」吗？\n删除后其 virtual PTZ 配置也会被删除。`);
+    if (!ok) return;
+    const res = await fetch(`${API_BASE}/api/cameras/${c.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      alert("删除失败");
+      return;
+    }
+    await loadCameras();
+  };
 
   const handleAdd = async () => {
     if (!name || !rtspUrl) return;
@@ -3140,6 +3421,7 @@ const CameraManageView: React.FC = () => {
                 <th className="border border-slate-200 px-2 py-1">WebRTC</th>
                 <th className="border border-slate-200 px-2 py-1">启用</th>
                 <th className="border border-slate-200 px-2 py-1">备注</th>
+                <th className="border border-slate-200 px-2 py-1">操作</th>
               </tr>
             </thead>
             <tbody>
@@ -3167,12 +3449,28 @@ const CameraManageView: React.FC = () => {
                   <td className="border border-slate-200 px-2 py-1">
                     {c.description || <span className="text-slate-400">-</span>}
                   </td>
+                  <td className="border border-slate-200 px-2 py-1">
+                    <div className="flex items-center gap-2">
+                      <button
+                        className="rounded border border-slate-300 px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-50"
+                        onClick={() => openEdit(c)}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        className="rounded border border-rose-300 px-2 py-0.5 text-[11px] text-rose-700 hover:bg-rose-50"
+                        onClick={() => deleteCamera(c)}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {cameras.length === 0 && (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="border border-slate-200 px-2 py-4 text-center text-sm text-slate-400"
                   >
                     暂无摄像头，请先添加。
@@ -3183,6 +3481,81 @@ const CameraManageView: React.FC = () => {
           </table>
         </div>
       </div>
+
+      {editing && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-xl rounded-xl bg-white p-4 shadow-lg">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-sm font-semibold text-slate-800">
+                编辑摄像头（ID: {editing.id}）
+              </div>
+              <button
+                className="rounded px-2 py-1 text-sm text-slate-600 hover:bg-slate-100"
+                onClick={closeEdit}
+              >
+                关闭
+              </button>
+            </div>
+            <div className="space-y-2 text-sm">
+              <label className="block text-slate-700">
+                名称
+                <input
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                />
+              </label>
+              <label className="block text-slate-700">
+                RTSP URL
+                <input
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                  value={editRtspUrl}
+                  onChange={(e) => setEditRtspUrl(e.target.value)}
+                />
+              </label>
+              <label className="block text-slate-700">
+                WebRTC 播放地址
+                <input
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                  value={editWebrtcUrl}
+                  onChange={(e) => setEditWebrtcUrl(e.target.value)}
+                />
+              </label>
+              <label className="flex items-center text-slate-700">
+                <input
+                  type="checkbox"
+                  className="mr-2"
+                  checked={editEnabled}
+                  onChange={(e) => setEditEnabled(e.target.checked)}
+                />
+                启用
+              </label>
+              <label className="block text-slate-700">
+                备注
+                <input
+                  className="mt-1 w-full rounded border border-slate-300 px-2 py-1 text-sm focus:border-blue-500 focus:outline-none"
+                  value={editDescription}
+                  onChange={(e) => setEditDescription(e.target.value)}
+                />
+              </label>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+                onClick={closeEdit}
+              >
+                取消
+              </button>
+              <button
+                className="rounded bg-[#694FF9] px-4 py-1.5 text-sm font-medium text-white hover:bg-[#5b3ff6]"
+                onClick={saveEdit}
+              >
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

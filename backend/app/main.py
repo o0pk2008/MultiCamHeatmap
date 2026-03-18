@@ -1,4 +1,6 @@
 import os
+import asyncio
+import json
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +11,13 @@ from .db import Base, engine
 from .routers.cameras import router as cameras_router
 from .routers.mappings import router as mappings_router
 from .routers.discovery import router as discovery_router
+
+from typing import List
+
+from .heatmap_store import record_heatmap_event, is_recording
+
+heatmap_clients: List[WebSocket] = []
+heatmap_lock = asyncio.Lock()
 
 app = FastAPI(title="MultiCam Heatmap Backend", version="0.1.0")
 
@@ -55,3 +64,39 @@ async def websocket_heatmap(ws: WebSocket):
     except WebSocketDisconnect:
         pass
 
+@app.websocket("/ws/heatmap-events")
+async def websocket_heatmap_events(ws: WebSocket):
+  await ws.accept()
+  async with heatmap_lock:
+    heatmap_clients.append(ws)
+  try:
+    while True:
+      # 这里只是保持连接；实际数据由其他协程通过 heatmap_broadcast 发送
+      await asyncio.sleep(10)
+  except WebSocketDisconnect:
+    pass
+  finally:
+    async with heatmap_lock:
+      if ws in heatmap_clients:
+        heatmap_clients.remove(ws)
+
+async def heatmap_broadcast(event: dict):
+  data = json.dumps(event)
+  async with heatmap_lock:
+    for ws in list(heatmap_clients):
+      try:
+        await ws.send_text(data)
+      except Exception:
+        # 出错时移除该客户端
+        try:
+          heatmap_clients.remove(ws)
+        except ValueError:
+          pass
+
+  # 落库（用于历史回放），由开关控制，异步执行避免阻塞推送
+  try:
+    floor_plan_id = event.get("floor_plan_id")
+    if is_recording(int(floor_plan_id) if floor_plan_id is not None else None):
+      asyncio.create_task(record_heatmap_event(event))
+  except Exception:
+    pass

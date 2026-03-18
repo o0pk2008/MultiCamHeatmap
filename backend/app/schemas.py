@@ -199,3 +199,9 @@ class HeatmapSourceOut(BaseModel):
     virtual_view_id: Optional[int] = None
     virtual_view_name: Optional[str] = None
 
+
+class HeatmapHistoryCellOut(BaseModel):
+    floor_row: int
+    floor_col: int
+    count: int
+

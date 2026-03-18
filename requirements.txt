@@ -3,3 +3,5 @@ ultralytics
 numpy
 matplotlib
 
+# torch/torchvision/torchaudio 在 Dockerfile 里按 CUDA 版本安装
+

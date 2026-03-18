@@ -177,3 +177,27 @@ class CameraGroundCell(Base):
     camera_mapping = relationship("CameraMapping", back_populates="ground_cells")
     floor_cell = relationship("FloorCell", back_populates="ground_cells")
 
+
+class HeatmapEvent(Base):
+    """
+    热力事件落库（用于历史回放/按时间段统计）。
+    事件粒度：一次“落脚点”命中某个 floor cell。
+    """
+
+    __tablename__ = "heatmap_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    floor_row = Column(Integer, nullable=False, index=True)
+    floor_col = Column(Integer, nullable=False, index=True)
+
+    camera_id = Column(Integer, ForeignKey("cameras.id"), nullable=True, index=True)
+    virtual_view_id = Column(Integer, ForeignKey("camera_virtual_views.id"), nullable=True, index=True)
+
+    # Unix timestamp（秒，浮点）
+    ts = Column(Float, nullable=False, index=True)
+
+    floor_plan = relationship("FloorPlan")
+    camera = relationship("Camera")
+    virtual_view = relationship("CameraVirtualView")
+

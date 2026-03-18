@@ -1,17 +1,16 @@
-from typing import Dict, List, Tuple
+from typing import List
 
-import math
 import time
 
 import cv2
-import numpy as np
-
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..db import get_db
+from ..panorama import equirect_to_perspective
+from ..virtual_view_inference import manager
 
 # 摄像头基础管理路由：
 # - 负责维护摄像头的元信息（名称 / RTSP URL / 启用状态）。
@@ -20,89 +19,10 @@ from ..db import get_db
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
 
-_remap_cache: Dict[Tuple[int, int, float, float, float, int, int], Tuple[np.ndarray, np.ndarray]] = {}
-
-
-def _build_equirect_to_perspective_map(
-    in_w: int,
-    in_h: int,
-    yaw_deg: float,
-    pitch_deg: float,
-    fov_deg: float,
-    out_w: int,
-    out_h: int,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    基于等距柱状投影（equirectangular，经度x纬度）构造到透视平面的 remap。
-    约定：输入图像横轴为 yaw（-pi..pi），纵轴为 pitch/纬度（-pi/2..pi/2）。
-    """
-    key = (in_w, in_h, float(yaw_deg), float(pitch_deg), float(fov_deg), out_w, out_h)
-    cached = _remap_cache.get(key)
-    if cached is not None:
-        return cached
-
-    fov = math.radians(fov_deg)
-    yaw = math.radians(yaw_deg)
-    pitch = math.radians(pitch_deg)
-
-    # 透视相机在归一化平面上的坐标
-    x = (np.linspace(0, out_w - 1, out_w) - (out_w - 1) / 2.0) / ((out_w - 1) / 2.0)
-    y = (np.linspace(0, out_h - 1, out_h) - (out_h - 1) / 2.0) / ((out_h - 1) / 2.0)
-    xx, yy = np.meshgrid(x, y)
-
-    # 按 fov 将归一化平面映射到视锥
-    # 注意：这里用 tan(fov/2) 控制视场
-    zz = np.ones_like(xx)
-    xx = xx * math.tan(fov / 2.0)
-    yy = -yy * math.tan(fov / 2.0)  # y 轴向下为正，反转为右手系
-
-    # 归一化方向向量
-    norm = np.sqrt(xx * xx + yy * yy + zz * zz)
-    vx = xx / norm
-    vy = yy / norm
-    vz = zz / norm
-
-    # 先绕 x 轴 pitch，再绕 y 轴 yaw（可按需要调整约定）
-    cp, sp = math.cos(pitch), math.sin(pitch)
-    cy, sy = math.cos(yaw), math.sin(yaw)
-
-    # pitch: rotate around x
-    vy2 = vy * cp - vz * sp
-    vz2 = vy * sp + vz * cp
-    vx2 = vx
-
-    # yaw: rotate around y
-    vx3 = vx2 * cy + vz2 * sy
-    vz3 = -vx2 * sy + vz2 * cy
-    vy3 = vy2
-
-    # 转为经纬度
-    lon = np.arctan2(vx3, vz3)  # [-pi, pi]
-    lat = np.arcsin(np.clip(vy3, -1.0, 1.0))  # [-pi/2, pi/2]
-
-    # 映射到像素坐标
-    map_x = (lon / (2 * math.pi) + 0.5) * (in_w - 1)
-    map_y = (0.5 - lat / math.pi) * (in_h - 1)
-
-    map_x = map_x.astype(np.float32)
-    map_y = map_y.astype(np.float32)
-    _remap_cache[key] = (map_x, map_y)
-    return map_x, map_y
-
-
-def _equirect_to_perspective(
-    frame_bgr: np.ndarray,
-    yaw_deg: float,
-    pitch_deg: float,
-    fov_deg: float,
-    out_w: int,
-    out_h: int,
-) -> np.ndarray:
-    in_h, in_w = frame_bgr.shape[:2]
-    map_x, map_y = _build_equirect_to_perspective_map(
-        in_w, in_h, yaw_deg, pitch_deg, fov_deg, out_w, out_h
-    )
-    return cv2.remap(frame_bgr, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_WRAP)
+#
+# NOTE
+# - equirect->perspective 逻辑已提取到 app/panorama.py，便于复用到后台推理任务中。
+#
 
 
 @router.get("/", response_model=List[schemas.CameraOut])
@@ -282,7 +202,7 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                 if not view.enabled:
                     persp = frame
                 else:
-                    persp = _equirect_to_perspective(
+                    persp = equirect_to_perspective(
                         frame,
                         yaw_deg=view.yaw_deg,
                         pitch_deg=view.pitch_deg,
@@ -301,6 +221,56 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                 yield data + b"\r\n"
         finally:
             cap.release()
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/{camera_id}/virtual-views/{view_id}/analyzed.mjpeg")
+def analyzed_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depends(get_db)):
+    """
+    预留给“带检测框”的 virtual PTZ 视图。
+    当前版本先复用 preview.mjpeg 的逻辑，后续会在这里叠加 YOLO 检测框。
+    """
+    cam = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+
+    # 先确保后台任务已启动（线程常驻，不会阻塞当前请求）
+    try:
+        manager.ensure_running(view_id)
+    except Exception:
+        pass
+
+    def gen():
+        boundary = b"--frame"
+        manager.add_subscriber(view_id)
+        last_ts = 0.0
+        try:
+            while True:
+                frame = manager.get_latest(view_id)
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
+                # 如果没有新帧就短睡，避免重复发送造成高延迟感
+                if frame.ts <= last_ts:
+                    time.sleep(0.02)
+                    continue
+                last_ts = frame.ts
+                data = frame.jpeg
+                yield boundary + b"\r\n"
+                yield b"Content-Type: image/jpeg\r\n"
+                yield f"Content-Length: {len(data)}\r\n\r\n".encode("utf-8")
+                yield data + b"\r\n"
+                time.sleep(0.01)
+        finally:
+            manager.remove_subscriber(view_id)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 

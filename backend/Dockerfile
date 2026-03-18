@@ -10,6 +10,9 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 
 COPY requirements.txt /app/requirements.txt
+# 安装 CUDA 版 PyTorch（让 ultralytics 能用 GPU）
+# 注意：需要宿主机 + Docker 已启用 NVIDIA GPU 支持
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . /app
