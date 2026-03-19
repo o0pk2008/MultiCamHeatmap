@@ -6,6 +6,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import Request
 
 from .db import Base, engine
 from .routers.cameras import router as cameras_router
@@ -33,9 +34,22 @@ app.add_middleware(
 Base.metadata.create_all(bind=engine)
 
 # 静态目录挂载：用于访问上传的平面图图片（/maps/xxx.png）
+# 设置较长缓存时间，避免切换页面时反复请求导致排队/等待（尤其在同时存在 MJPEG 长连接时）。
 maps_dir = "/data/maps"
 os.makedirs(maps_dir, exist_ok=True)
-app.mount("/maps", StaticFiles(directory=maps_dir), name="maps")
+app.mount("/maps", StaticFiles(directory=maps_dir, html=False), name="maps")
+
+
+# 为 /maps 图片设置长缓存（避免切换页面时反复下载/解码导致排队）
+@app.middleware("http")
+async def add_maps_cache_control(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        if request.url.path.startswith("/maps/"):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    except Exception:
+        pass
+    return response
 
 app.include_router(cameras_router)
 app.include_router(mappings_router)

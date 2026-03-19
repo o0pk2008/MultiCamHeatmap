@@ -255,6 +255,54 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 
+@router.get("/{camera_id}/virtual-views/{view_id}/preview_shared.mjpeg")
+def preview_shared_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depends(get_db)):
+    """
+    plain preview：复用 VirtualViewInferenceManager 的“最新帧缓存”，不做 YOLO inference。
+    用于避免 virtual PTZ 配置/热力图预览切换时触发 RTSP 冷启动。
+    """
+    cam = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+
+    try:
+        manager.ensure_running_plain(view_id)
+    except Exception:
+        pass
+
+    def gen():
+        boundary = b"--frame"
+        manager.add_plain_subscriber(view_id)
+        last_ts = 0.0
+        try:
+            while True:
+                frame = manager.get_latest(view_id)
+                if frame is None:
+                    time.sleep(0.05)
+                    continue
+                if frame.ts <= last_ts:
+                    time.sleep(0.02)
+                    continue
+                last_ts = frame.ts
+                data = frame.jpeg
+                yield boundary + b"\r\n"
+                yield b"Content-Type: image/jpeg\r\n"
+                yield f"Content-Length: {len(data)}\r\n\r\n".encode("utf-8")
+                yield data + b"\r\n"
+                time.sleep(0.01)
+        finally:
+            manager.remove_plain_subscriber(view_id)
+
+    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
 @router.get("/{camera_id}/virtual-views/{view_id}/analyzed.mjpeg")
 def analyzed_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depends(get_db)):
     """

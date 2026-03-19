@@ -41,8 +41,9 @@ class VirtualViewDetections:
 class VirtualViewInferenceManager:
     """
     目标：
-    - 每个 virtual_view_id 只拉一次 RTSP，只推理一次 YOLO
-    - 多个 analyzed.mjpeg 客户端共享同一份“最新已分析帧”
+    - 每个 virtual_view_id 只拉一次 RTSP，只做透视重投影
+    - plain preview / analyzed preview 共享同一份“最新帧缓存”
+    - analyzed 模式才会加载 YOLO 并产出 detections（plain 模式不做 YOLO）
     """
 
     def __init__(self) -> None:
@@ -50,7 +51,10 @@ class VirtualViewInferenceManager:
         self._stops: Dict[int, threading.Event] = {}
         self._latest: Dict[int, VirtualViewFrame] = {}
         self._detections: Dict[int, VirtualViewDetections] = {}
-        self._subscribers: Dict[int, int] = {}
+        self._plain_subscribers: Dict[int, int] = {}
+        self._analyzed_subscribers: Dict[int, int] = {}
+        # 是否需要在该 virtual_view_id 上进行 YOLO 推理
+        self._inference_enabled: Dict[int, bool] = {}
         self._lock = threading.Lock()
         self._model = None
 
@@ -69,10 +73,17 @@ class VirtualViewInferenceManager:
             pass
 
     def ensure_running(self, virtual_view_id: int) -> None:
+        """
+        analyzed 模式：确保后台推理线程在跑，并允许 YOLO inference。
+        """
         with self._lock:
+            # 一旦进入 analyzed，推理就开启（不自动关闭，避免来回切换导致频繁加载/抖动）
+            self._inference_enabled[virtual_view_id] = True
+
             existing = self._threads.get(virtual_view_id)
             if existing is not None and existing.is_alive():
                 return
+
             # 如果线程已存在但已退出，先清理再重启
             if existing is not None and not existing.is_alive():
                 self._threads.pop(virtual_view_id, None)
@@ -82,11 +93,45 @@ class VirtualViewInferenceManager:
                         ev.set()
                     except Exception:
                         pass
+
             ev = threading.Event()
             t = threading.Thread(
                 target=self._run_view_loop,
                 args=(virtual_view_id, ev),
                 name=f"vv-infer-{virtual_view_id}",
+                daemon=True,
+            )
+            self._stops[virtual_view_id] = ev
+            self._threads[virtual_view_id] = t
+            t.start()
+
+    def ensure_running_plain(self, virtual_view_id: int) -> None:
+        """
+        plain preview 模式：确保后台线程在跑，但不做 YOLO inference（除非之后被 analyzed 打开）。
+        """
+        with self._lock:
+            # 不要覆盖 analyzed 已开启的推理状态
+            cur = bool(self._inference_enabled.get(virtual_view_id, False))
+            self._inference_enabled[virtual_view_id] = cur
+
+            existing = self._threads.get(virtual_view_id)
+            if existing is not None and existing.is_alive():
+                return
+
+            if existing is not None and not existing.is_alive():
+                self._threads.pop(virtual_view_id, None)
+                ev = self._stops.pop(virtual_view_id, None)
+                if ev is not None:
+                    try:
+                        ev.set()
+                    except Exception:
+                        pass
+
+            ev = threading.Event()
+            t = threading.Thread(
+                target=self._run_view_loop,
+                args=(virtual_view_id, ev),
+                name=f"vv-plain-{virtual_view_id}",
                 daemon=True,
             )
             self._stops[virtual_view_id] = ev
@@ -100,24 +145,48 @@ class VirtualViewInferenceManager:
                 ev.set()
             self._threads.pop(virtual_view_id, None)
             self._latest.pop(virtual_view_id, None)
-            self._subscribers.pop(virtual_view_id, None)
+            self._plain_subscribers.pop(virtual_view_id, None)
+            self._analyzed_subscribers.pop(virtual_view_id, None)
+            self._inference_enabled.pop(virtual_view_id, None)
 
     def add_subscriber(self, virtual_view_id: int) -> None:
+        # analyzed client 订阅计数（历史方法名保持不变）
         with self._lock:
-            self._subscribers[virtual_view_id] = self._subscribers.get(virtual_view_id, 0) + 1
+            self._analyzed_subscribers[virtual_view_id] = self._analyzed_subscribers.get(virtual_view_id, 0) + 1
 
     def remove_subscriber(self, virtual_view_id: int) -> None:
         with self._lock:
-            cur = self._subscribers.get(virtual_view_id, 0)
+            cur = self._analyzed_subscribers.get(virtual_view_id, 0)
             cur = cur - 1
             if cur <= 0:
-                self._subscribers.pop(virtual_view_id, None)
+                self._analyzed_subscribers.pop(virtual_view_id, None)
             else:
-                self._subscribers[virtual_view_id] = cur
+                self._analyzed_subscribers[virtual_view_id] = cur
 
     def subscriber_count(self, virtual_view_id: int) -> int:
+        # analyzed 订阅数（历史方法名保持不变）
         with self._lock:
-            return int(self._subscribers.get(virtual_view_id, 0))
+            return int(self._analyzed_subscribers.get(virtual_view_id, 0))
+
+    def add_plain_subscriber(self, virtual_view_id: int) -> None:
+        with self._lock:
+            self._plain_subscribers[virtual_view_id] = self._plain_subscribers.get(virtual_view_id, 0) + 1
+
+    def remove_plain_subscriber(self, virtual_view_id: int) -> None:
+        with self._lock:
+            cur = self._plain_subscribers.get(virtual_view_id, 0) - 1
+            if cur <= 0:
+                self._plain_subscribers.pop(virtual_view_id, None)
+            else:
+                self._plain_subscribers[virtual_view_id] = cur
+
+    def plain_subscriber_count(self, virtual_view_id: int) -> int:
+        with self._lock:
+            return int(self._plain_subscribers.get(virtual_view_id, 0))
+
+    def subscriber_total_count(self, virtual_view_id: int) -> int:
+        with self._lock:
+            return int(self._plain_subscribers.get(virtual_view_id, 0) + self._analyzed_subscribers.get(virtual_view_id, 0))
 
     def get_latest(self, virtual_view_id: int) -> Optional[VirtualViewFrame]:
         return self._latest.get(virtual_view_id)
@@ -176,8 +245,6 @@ class VirtualViewInferenceManager:
         last_emit_ts = 0.0
         last_boxes = None  # (xyxy, cls)
 
-        self._ensure_model()
-
         loaded = self._load_view(virtual_view_id)
         if not loaded:
             return
@@ -189,6 +256,9 @@ class VirtualViewInferenceManager:
         out_w = int(view.out_w)
         out_h = int(view.out_h)
         last_reload = 0.0
+        last_infer_enabled_check = 0.0
+        with self._lock:
+            inference_enabled = bool(self._inference_enabled.get(virtual_view_id, False))
 
         cap = None
         last_ok_ts = time.time()
@@ -218,6 +288,14 @@ class VirtualViewInferenceManager:
                                 cap = None
                     except Exception:
                         pass
+
+                if now - last_infer_enabled_check >= 0.2:
+                    last_infer_enabled_check = now
+                    with self._lock:
+                        inference_enabled = bool(self._inference_enabled.get(virtual_view_id, False))
+                    if not inference_enabled:
+                        # plain 模式下不保留旧框，避免之后切换 analyzed 前“残留画框”
+                        last_boxes = None
 
                 if cap is None or not cap.isOpened():
                     if cap is not None:
@@ -265,35 +343,38 @@ class VirtualViewInferenceManager:
                 now = time.time()
 
                 # 1) YOLO 推理（限帧）
-                if self._model is not None and (now - last_infer_ts) >= (1.0 / analyze_fps):
-                    last_infer_ts = now
-                    try:
-                        results = self._model(persp, verbose=False)
-                        if results and len(results) > 0:
-                            res = results[0]
-                            boxes = res.boxes
-                            if boxes is not None:
-                                cls_ids = boxes.cls.cpu().numpy() if hasattr(boxes, "cls") else None
-                                xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes, "xyxy") else None
-                                if cls_ids is not None and xyxy is not None:
-                                    last_boxes = (xyxy, cls_ids)
-                                    try:
-                                        h_img, w_img = persp.shape[:2]
-                                        self._detections[virtual_view_id] = VirtualViewDetections(
-                                            xyxy=xyxy,
-                                            cls=cls_ids,
-                                            w=int(w_img),
-                                            h=int(h_img),
-                                            ts=float(now),
-                                        )
-                                    except Exception:
-                                        pass
-                    except Exception:
-                        # 推理失败就沿用上一帧的 boxes 或不画
-                        pass
+                if inference_enabled:
+                    # 只有在 analyzed 需要时才懒加载 YOLO
+                    self._ensure_model()
+                    if self._model is not None and (now - last_infer_ts) >= (1.0 / analyze_fps):
+                        last_infer_ts = now
+                        try:
+                            results = self._model(persp, verbose=False)
+                            if results and len(results) > 0:
+                                res = results[0]
+                                boxes = res.boxes
+                                if boxes is not None:
+                                    cls_ids = boxes.cls.cpu().numpy() if hasattr(boxes, "cls") else None
+                                    xyxy = boxes.xyxy.cpu().numpy() if hasattr(boxes, "xyxy") else None
+                                    if cls_ids is not None and xyxy is not None:
+                                        last_boxes = (xyxy, cls_ids)
+                                        try:
+                                            h_img, w_img = persp.shape[:2]
+                                            self._detections[virtual_view_id] = VirtualViewDetections(
+                                                xyxy=xyxy,
+                                                cls=cls_ids,
+                                                w=int(w_img),
+                                                h=int(h_img),
+                                                ts=float(now),
+                                            )
+                                        except Exception:
+                                            pass
+                        except Exception:
+                            # 推理失败就沿用上一轮的 boxes 或不画
+                            pass
 
                 # 2) 叠加检测框（使用 last_boxes，避免每帧都必须推理）
-                if last_boxes is not None:
+                if inference_enabled and last_boxes is not None:
                     xyxy, cls_ids = last_boxes
                     for (x1, y1, x2, y2), cid in zip(xyxy, cls_ids):
                         if int(cid) != 0:  # person
@@ -312,7 +393,7 @@ class VirtualViewInferenceManager:
                         )
 
                 # 3) 编码/发布（限帧）
-                subs = self.subscriber_count(virtual_view_id)
+                subs = self.subscriber_total_count(virtual_view_id)
                 target_fps = stream_fps if subs > 0 else idle_stream_fps
                 if (now - last_emit_ts) >= (1.0 / max(0.1, target_fps)):
                     last_emit_ts = now

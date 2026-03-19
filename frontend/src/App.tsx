@@ -222,6 +222,11 @@ const HeatmapView: React.FC = () => {
       const fpData: FloorPlan[] = await fpRes.json();
       setCameras(camData);
       setFloorPlans(fpData);
+      // 方案 A：预加载所有平面图图片
+      fpData.forEach((fp) => {
+        const url = floorPlanImageUrl(fp);
+        void preloadFloorPlanImage(url);
+      });
       if (fpData.length > 0 && selectedFloorPlanId === null) {
         setSelectedFloorPlanId(fpData[0].id);
       }
@@ -302,7 +307,7 @@ const HeatmapView: React.FC = () => {
   }, [showMappedCamGrid, mappedCameras, vvGridConfigs]);
 
   const selectedFloorPlan = floorPlans.find((fp) => fp.id === selectedFloorPlanId) || null;
-  const floorPlanImageUrl =
+  const floorPlanImageUrlStr =
     selectedFloorPlan && selectedFloorPlan.image_path.startsWith("/data/maps/")
       ? `${API_BASE}/maps/${selectedFloorPlan.image_path.split("/").pop()}`
       : null;
@@ -443,9 +448,9 @@ const HeatmapView: React.FC = () => {
             </div>
           </div>
           <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
-            {floorPlanImageUrl && selectedFloorPlan ? (
+            {floorPlanImageUrlStr && selectedFloorPlan ? (
               <FloorPlanCanvas
-                imageUrl={floorPlanImageUrl}
+                imageUrl={floorPlanImageUrlStr}
                 gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showHeatmapGrid}
@@ -513,7 +518,7 @@ const HeatmapView: React.FC = () => {
                     {src.kind === "virtual" && src.virtual_view_id ? (
                       <div className="relative h-full w-full">
                         <img
-                          src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview"}.mjpeg`}
+                          src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview_shared"}.mjpeg`}
                           className="h-full w-full object-contain"
                           alt={`heatmap-virtual-${src.virtual_view_id}`}
                           draggable={false}
@@ -841,6 +846,34 @@ function floorPlanImageUrl(fp: FloorPlan): string {
     : fp.image_path;
 }
 
+// === FloorPlanCanvas 图片缓存与预加载（用于模块切换时快速显示） ===
+const floorPlanImageCache = new Map<string, HTMLImageElement>();
+const floorPlanImagePromiseCache = new Map<string, Promise<HTMLImageElement>>();
+
+function preloadFloorPlanImage(url: string): Promise<HTMLImageElement> {
+  const cached = floorPlanImageCache.get(url);
+  if (cached) return Promise.resolve(cached);
+  const existing = floorPlanImagePromiseCache.get(url);
+  if (existing) return existing;
+
+  const p = new Promise<HTMLImageElement>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      floorPlanImageCache.set(url, img);
+      floorPlanImagePromiseCache.delete(url);
+      resolve(img);
+    };
+    img.onerror = (e) => {
+      floorPlanImagePromiseCache.delete(url);
+      reject(e);
+    };
+    img.src = url;
+  });
+
+  floorPlanImagePromiseCache.set(url, p);
+  return p;
+}
+
 /** 平面图 Canvas：支持拖拽、缩放、网格叠加与 hover 显示网格编号 */
 type FloorPlanCanvasProps = {
   imageUrl: string;
@@ -884,17 +917,20 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
   const [canvasSize, setCanvasSize] = useState({ w: 600, h: 400 });
 
-  // 加载图片并记录尺寸
+  // 加载图片并记录尺寸（使用缓存避免切换页面时重复 decode）
   useEffect(() => {
-    const img = new Image();
-    img.onload = () => {
-      imageRef.current = img;
-      setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
-    };
-    img.src = imageUrl;
+    let cancelled = false;
+    preloadFloorPlanImage(imageUrl)
+      .then((img) => {
+        if (cancelled) return;
+        imageRef.current = img;
+        setImgSize({ w: img.naturalWidth, h: img.naturalHeight });
+      })
+      .catch(() => {
+        // 加载失败时保持原样，不让 UI 进入异常状态
+      });
     return () => {
-      img.src = "";
-      imageRef.current = null;
+      cancelled = true;
     };
   }, [imageUrl]);
 
@@ -1685,6 +1721,11 @@ const MappingView: React.FC = () => {
     const res = await fetch(`${API_BASE}/api/floor-plans`);
     const data: FloorPlan[] = await res.json();
     setFloorPlans(data);
+    // 方案 A：预加载所有平面图图片，避免切换模块时图片请求排队/延迟
+    data.forEach((fp) => {
+      const url = floorPlanImageUrl(fp);
+      void preloadFloorPlanImage(url);
+    });
     if (data.length > 0 && bindFloorPlanId === "") {
       setBindFloorPlanId(data[0].id);
     }
@@ -2142,7 +2183,7 @@ const MappingView: React.FC = () => {
                     }
                     // virtual PTZ：用 MJPEG 预览
                     const view = opt.view;
-                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview.mjpeg`;
+                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview_shared.mjpeg`;
                     const aspectW = view.out_w || 960;
                     const aspectH = view.out_h || 540;
 
@@ -3336,7 +3377,7 @@ const PanoramaViewsView: React.FC = () => {
         ) : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
             {views.map((v, idx) => {
-              const previewUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/preview.mjpeg`;
+              const previewUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/preview_shared.mjpeg`;
               const nonce = previewNonce[v.id];
               const previewUrlWithNonce = previewUrl ? (nonce ? `${previewUrl}?t=${nonce}` : previewUrl) : "";
               const canEdit = !!editMode[v.id];
