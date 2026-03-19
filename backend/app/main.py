@@ -111,6 +111,8 @@ async def heatmap_broadcast(event: dict):
   try:
     floor_plan_id = event.get("floor_plan_id")
     if is_recording(int(floor_plan_id) if floor_plan_id is not None else None):
-      asyncio.create_task(record_heatmap_event(event))
+      t = asyncio.create_task(record_heatmap_event(event))
+      # 避免未被 await 的 task 抛异常刷屏
+      t.add_done_callback(lambda fut: fut.exception() if fut.cancelled() else fut.exception())
   except Exception:
     pass

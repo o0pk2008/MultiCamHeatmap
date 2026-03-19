@@ -283,7 +283,7 @@ def preview_shared_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session 
         last_ts = 0.0
         try:
             while True:
-                frame = manager.get_latest(view_id)
+                frame = manager.get_latest_plain(view_id)
                 if frame is None:
                     time.sleep(0.05)
                     continue
@@ -328,7 +328,7 @@ def snapshot_virtual_view(camera_id: int, view_id: int, db: Session = Depends(ge
     # 尝试短暂等待首帧，避免刚创建时拿不到缓存导致缩略图空白
     jpg = None
     for _ in range(20):  # up to ~1s
-        fr = manager.get_latest(view_id)
+        fr = manager.get_latest_plain(view_id)
         if fr is not None and fr.jpeg:
             jpg = fr.jpeg
             break
@@ -368,7 +368,7 @@ def analyzed_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depe
         last_ts = 0.0
         try:
             while True:
-                frame = manager.get_latest(view_id)
+                frame = manager.get_latest_annotated(view_id)
                 if frame is None:
                     time.sleep(0.05)
                     continue

@@ -11,7 +11,7 @@ from sqlalchemy import func
 from .. import models, schemas
 from ..db import get_db
 from ..heatmap_analysis import analyzer
-from ..heatmap_store import set_recording
+from ..heatmap_store import set_recording, is_recording
 
 heatmap_running_floor_plans = set()  # floor_plan_id 集合
 
@@ -300,6 +300,17 @@ async def stop_heatmap_analysis(floor_plan_id: int):
     analyzer.stop_for_floor_plan(floor_plan_id)
     set_recording(floor_plan_id, False)
     return {"status": "stopped", "floor_plan_id": floor_plan_id}
+
+
+@router.get("/heatmap/status")
+async def get_heatmap_status(floor_plan_id: int):
+    """用于前端恢复按钮/WS 状态。"""
+    fp_id = int(floor_plan_id)
+    return {
+        "floor_plan_id": fp_id,
+        "running": fp_id in heatmap_running_floor_plans,
+        "record_history": is_recording(fp_id),
+    }
 
 
 @router.get(

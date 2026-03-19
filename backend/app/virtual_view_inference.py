@@ -49,12 +49,17 @@ class VirtualViewInferenceManager:
     def __init__(self) -> None:
         self._threads: Dict[int, threading.Thread] = {}
         self._stops: Dict[int, threading.Event] = {}
-        self._latest: Dict[int, VirtualViewFrame] = {}
+        # plain: 不带检测框（用于 preview_shared / snapshot）
+        self._latest_plain: Dict[int, VirtualViewFrame] = {}
+        # annotated: 带检测框（用于 analyzed）
+        self._latest_annotated: Dict[int, VirtualViewFrame] = {}
         self._detections: Dict[int, VirtualViewDetections] = {}
         self._plain_subscribers: Dict[int, int] = {}
         self._analyzed_subscribers: Dict[int, int] = {}
         # 是否需要在该 virtual_view_id 上进行 YOLO 推理
         self._inference_enabled: Dict[int, bool] = {}
+        # 推理引用计数（例如 heatmap analyzer 运行时需要推理，即使没有 analyzed 订阅者）
+        self._inference_refs: Dict[int, int] = {}
         self._lock = threading.Lock()
         self._model = None
 
@@ -138,16 +143,39 @@ class VirtualViewInferenceManager:
             self._threads[virtual_view_id] = t
             t.start()
 
+    def acquire_inference(self, virtual_view_id: int) -> None:
+        """增加推理引用：用于热力分析等后台逻辑。"""
+        with self._lock:
+            self._inference_refs[virtual_view_id] = self._inference_refs.get(virtual_view_id, 0) + 1
+            self._inference_enabled[virtual_view_id] = True
+        # 确保线程在跑
+        self.ensure_running(virtual_view_id)
+
+    def release_inference(self, virtual_view_id: int) -> None:
+        """释放推理引用：当没有引用且没有 analyzed 订阅者时，关闭推理（plain 预览仍可继续）。"""
+        with self._lock:
+            cur = int(self._inference_refs.get(virtual_view_id, 0)) - 1
+            if cur <= 0:
+                self._inference_refs.pop(virtual_view_id, None)
+            else:
+                self._inference_refs[virtual_view_id] = cur
+            refs = int(self._inference_refs.get(virtual_view_id, 0))
+            analyzed_subs = int(self._analyzed_subscribers.get(virtual_view_id, 0))
+            if refs <= 0 and analyzed_subs <= 0:
+                self._inference_enabled[virtual_view_id] = False
+
     def stop(self, virtual_view_id: int) -> None:
         with self._lock:
             ev = self._stops.pop(virtual_view_id, None)
             if ev is not None:
                 ev.set()
             self._threads.pop(virtual_view_id, None)
-            self._latest.pop(virtual_view_id, None)
+            self._latest_plain.pop(virtual_view_id, None)
+            self._latest_annotated.pop(virtual_view_id, None)
             self._plain_subscribers.pop(virtual_view_id, None)
             self._analyzed_subscribers.pop(virtual_view_id, None)
             self._inference_enabled.pop(virtual_view_id, None)
+            self._inference_refs.pop(virtual_view_id, None)
 
     def add_subscriber(self, virtual_view_id: int) -> None:
         # analyzed client 订阅计数（历史方法名保持不变）
@@ -162,6 +190,10 @@ class VirtualViewInferenceManager:
                 self._analyzed_subscribers.pop(virtual_view_id, None)
             else:
                 self._analyzed_subscribers[virtual_view_id] = cur
+            # 若没有 analyzed 订阅且没有后台引用，则关闭推理（避免停止分析后仍持续画框/推理）
+            refs = int(self._inference_refs.get(virtual_view_id, 0))
+            if int(self._analyzed_subscribers.get(virtual_view_id, 0)) <= 0 and refs <= 0:
+                self._inference_enabled[virtual_view_id] = False
 
     def subscriber_count(self, virtual_view_id: int) -> int:
         # analyzed 订阅数（历史方法名保持不变）
@@ -188,8 +220,11 @@ class VirtualViewInferenceManager:
         with self._lock:
             return int(self._plain_subscribers.get(virtual_view_id, 0) + self._analyzed_subscribers.get(virtual_view_id, 0))
 
-    def get_latest(self, virtual_view_id: int) -> Optional[VirtualViewFrame]:
-        return self._latest.get(virtual_view_id)
+    def get_latest_plain(self, virtual_view_id: int) -> Optional[VirtualViewFrame]:
+        return self._latest_plain.get(virtual_view_id)
+
+    def get_latest_annotated(self, virtual_view_id: int) -> Optional[VirtualViewFrame]:
+        return self._latest_annotated.get(virtual_view_id)
 
     def get_latest_detections(self, virtual_view_id: int) -> Optional[VirtualViewDetections]:
         return self._detections.get(virtual_view_id)
@@ -341,6 +376,8 @@ class VirtualViewInferenceManager:
                     )
 
                 now = time.time()
+                # plain 版本（不带框）
+                plain_img = persp
 
                 # 1) YOLO 推理（限帧）
                 if inference_enabled:
@@ -374,15 +411,21 @@ class VirtualViewInferenceManager:
                             pass
 
                 # 2) 叠加检测框（使用 last_boxes，避免每帧都必须推理）
+                annotated_img = plain_img
                 if inference_enabled and last_boxes is not None:
+                    # 在副本上画框，避免污染 plain 预览
+                    try:
+                        annotated_img = plain_img.copy()
+                    except Exception:
+                        annotated_img = plain_img
                     xyxy, cls_ids = last_boxes
                     for (x1, y1, x2, y2), cid in zip(xyxy, cls_ids):
                         if int(cid) != 0:  # person
                             continue
                         x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
-                        cv2.rectangle(persp, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
+                        cv2.rectangle(annotated_img, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
                         cv2.putText(
-                            persp,
+                            annotated_img,
                             "person",
                             (x1_i, max(y1_i - 5, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX,
@@ -397,9 +440,12 @@ class VirtualViewInferenceManager:
                 target_fps = stream_fps if subs > 0 else idle_stream_fps
                 if (now - last_emit_ts) >= (1.0 / max(0.1, target_fps)):
                     last_emit_ts = now
-                    ok2, jpg = cv2.imencode(".jpg", persp, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-                    if ok2:
-                        self._latest[virtual_view_id] = VirtualViewFrame(jpeg=jpg.tobytes(), ts=now)
+                    ok_p, jpg_p = cv2.imencode(".jpg", plain_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    if ok_p:
+                        self._latest_plain[virtual_view_id] = VirtualViewFrame(jpeg=jpg_p.tobytes(), ts=now)
+                    ok_a, jpg_a = cv2.imencode(".jpg", annotated_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                    if ok_a:
+                        self._latest_annotated[virtual_view_id] = VirtualViewFrame(jpeg=jpg_a.tobytes(), ts=now)
 
                 # 线程里稍微 sleep，避免 CPU 空转
                 time.sleep(0.001)

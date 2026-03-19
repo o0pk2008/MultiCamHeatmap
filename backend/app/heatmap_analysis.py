@@ -29,6 +29,8 @@ class HeatmapAnalyzer:
 
     def __init__(self) -> None:
         self._tasks: Dict[int, asyncio.Task] = {}
+        # floor_plan_id -> 已 acquire 的 vv_id 集合（用于 stop 时释放推理引用）
+        self._vv_refs: Dict[int, set] = {}
 
     def start_for_floor_plan(self, floor_plan_id: int) -> None:
         # 已有任务则忽略
@@ -37,11 +39,19 @@ class HeatmapAnalyzer:
         loop = asyncio.get_event_loop()
         task = loop.create_task(self._run_loop(floor_plan_id))
         self._tasks[floor_plan_id] = task
+        self._vv_refs.setdefault(int(floor_plan_id), set())
 
     def stop_for_floor_plan(self, floor_plan_id: int) -> None:
         task = self._tasks.pop(floor_plan_id, None)
         if task is not None:
             task.cancel()
+        # 主循环会在 finally 释放；这里额外兜底一次
+        vv_ids = self._vv_refs.pop(int(floor_plan_id), set())
+        for vv_id in list(vv_ids):
+            try:
+                manager.release_inference(int(vv_id))
+            except Exception:
+                pass
 
     async def _run_loop(self, floor_plan_id: int) -> None:
         """主循环：对与该平面图存在映射关系的 virtual PTZ 视窗做分析。
@@ -51,6 +61,7 @@ class HeatmapAnalyzer:
         - 复用 VirtualViewInferenceManager（analyzed.mjpeg 使用的后台推理线程）的检测结果。
         - 仅做：检测框 -> 脚底点 -> camera grid -> floor grid -> 事件推送。
         """
+        acquired: set = self._vv_refs.setdefault(int(floor_plan_id), set())
         try:
             while True:
                 # 每一轮查询一次当前 floor_plan 的网格和 virtual PTZ 映射关系
@@ -170,12 +181,27 @@ class HeatmapAnalyzer:
                     continue
 
                 # 依次读取每个 virtual PTZ 的“最近一次检测结果”，映射并发送事件
-                for vv_id, (_rtsp_url, out_w, out_h, g_rows, g_cols, quad) in vv_cfg.items():
-                    # 确保该 view 的后台推理线程在跑（analyzed.mjpeg 不一定被打开）
+                # 让 analyzer 对当前关联的 vv_ids 持有推理引用（保证检测结果持续更新）
+                cur_vv_ids = set(vv_cfg.keys())
+                # acquire 新增的
+                for vv_id in cur_vv_ids - set(acquired):
                     try:
-                        manager.ensure_running(vv_id)
+                        manager.acquire_inference(int(vv_id))
+                        acquired.add(int(vv_id))
                     except Exception:
                         pass
+                # release 不再需要的
+                for vv_id in set(acquired) - set(cur_vv_ids):
+                    try:
+                        manager.release_inference(int(vv_id))
+                    except Exception:
+                        pass
+                    try:
+                        acquired.discard(int(vv_id))
+                    except Exception:
+                        pass
+
+                for vv_id, (_rtsp_url, out_w, out_h, g_rows, g_cols, quad) in vv_cfg.items():
 
                     det = manager.get_latest_detections(vv_id)
                     if det is None:
@@ -257,6 +283,17 @@ class HeatmapAnalyzer:
         except asyncio.CancelledError:
             # 正常停止
             return
+        finally:
+            # 释放本 floor_plan 持有的推理引用
+            for vv_id in list(acquired):
+                try:
+                    manager.release_inference(int(vv_id))
+                except Exception:
+                    pass
+            try:
+                acquired.clear()
+            except Exception:
+                pass
 
 
 analyzer = HeatmapAnalyzer()

@@ -3,11 +3,14 @@ from typing import Any, Dict, Optional
 
 import threading
 
+from sqlalchemy.exc import OperationalError
+
 from .db import SessionLocal
 from . import models
 
 _recording_floor_plans = set()  # floor_plan_id
 _recording_lock = threading.Lock()
+_db_write_lock = threading.Lock()
 
 
 def set_recording(floor_plan_id: int, enabled: bool) -> None:
@@ -63,22 +66,45 @@ def record_heatmap_event_sync(event: Dict[str, Any]) -> None:
     camera_id = _to_int_or_none(event.get("camera_id"))
     virtual_view_id = _to_int_or_none(event.get("virtual_view_id"))
 
-    with SessionLocal() as db:
-        db.add(
-            models.HeatmapEvent(
-                floor_plan_id=floor_plan_id,
-                floor_row=floor_row,
-                floor_col=floor_col,
-                camera_id=camera_id,
-                virtual_view_id=virtual_view_id,
-                ts=float(ts),
-            )
-        )
-        db.commit()
+    # SQLite 并发写会锁表：这里用单写者锁串行化，再加重试
+    payload = models.HeatmapEvent(
+        floor_plan_id=floor_plan_id,
+        floor_row=floor_row,
+        floor_col=floor_col,
+        camera_id=camera_id,
+        virtual_view_id=virtual_view_id,
+        ts=float(ts),
+    )
+    retries = 8
+    backoff = 0.03
+    for i in range(retries):
+        try:
+            with _db_write_lock:
+                with SessionLocal() as db:
+                    db.add(payload)
+                    db.commit()
+            return
+        except OperationalError as e:
+            msg = str(e).lower()
+            if "database is locked" in msg or "database locked" in msg:
+                # 轻量退避，给写锁释放机会
+                try:
+                    import time
+                    time.sleep(backoff * (1.6 ** i))
+                except Exception:
+                    pass
+                continue
+            return
+        except Exception:
+            return
 
 
 async def record_heatmap_event(event: Dict[str, Any]) -> None:
     """异步写库：丢到线程池，避免阻塞主事件循环。"""
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, record_heatmap_event_sync, event)
+    try:
+        await loop.run_in_executor(None, record_heatmap_event_sync, event)
+    except Exception:
+        # 避免 "Task exception was never retrieved"
+        return
 

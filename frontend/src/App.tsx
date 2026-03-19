@@ -256,6 +256,88 @@ const HeatmapView: React.FC = () => {
     load();
   }, [selectedFloorPlanId]);
 
+  // 恢复状态：切换模块回来时，如果后端仍在分析，则自动重连 WS 并恢复按钮状态
+  useEffect(() => {
+    let cancelled = false;
+    const fpId = selectedFloorPlanId;
+    if (fpId == null) return;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/heatmap/status?floor_plan_id=${fpId}`);
+        const st = res.ok ? await res.json() : null;
+        if (cancelled || !st) return;
+        setRecordHistory(!!st.record_history);
+        const shouldRun = !!st.running;
+        // 如果需要运行且 WS 未连接，则连接
+        if (shouldRun) {
+          if (wsRef.current) return;
+          const ws = new WebSocket(
+            `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
+              /:\d+$/,
+              ":18080",
+            )}/ws/heatmap-events`,
+          );
+          ws.onmessage = (ev) => {
+            try {
+              const evt = JSON.parse(ev.data);
+              if (evt.floor_plan_id !== fpId) return;
+              const key = `${evt.floor_row},${evt.floor_col}`;
+              setHeatmapCells((old) => {
+                const m = new Map(old);
+                m.set(key, (m.get(key) || 0) + 1);
+                return m;
+              });
+              if (
+                evt.virtual_view_id != null &&
+                Number.isFinite(Number(evt.virtual_view_id)) &&
+                evt.camera_row != null &&
+                evt.camera_col != null
+              ) {
+                const vvId = Number(evt.virtual_view_id);
+                const r = Number(evt.camera_row);
+                const c = Number(evt.camera_col);
+                if (Number.isFinite(r) && Number.isFinite(c)) {
+                  setVvFootfalls((old) => ({
+                    ...old,
+                    [vvId]: { row: r, col: c, ts: Date.now() },
+                  }));
+                }
+              }
+            } catch (e) {
+              console.error(e);
+            }
+          };
+          ws.onclose = () => {
+            wsRef.current = null;
+            setAnalyzing(false);
+          };
+          wsRef.current = ws;
+          setAnalyzing(true);
+        } else {
+          // 后端不在运行：确保前端状态关闭
+          wsRef.current?.close();
+          wsRef.current = null;
+          setAnalyzing(false);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFloorPlanId]);
+
+  // 卸载时关闭 WS（不自动 stop 后端分析；回到页面会根据 status 恢复）
+  useEffect(() => {
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {}
+      wsRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     // 虚拟视窗元信息（用于获取 out_w/out_h 等）
     fetch(`${API_BASE}/api/cameras/virtual-views/all`)
@@ -1117,7 +1199,11 @@ function pointInPoly(pt: Pt, poly: Pt[]): boolean {
   return inside;
 }
 
-function worldToImagePoint(world: Pt, viewport: { w: number; h: number; aspectW: number; aspectH: number }): Pt | null {
+function worldToImagePoint(
+  world: Pt,
+  viewport: { w: number; h: number; aspectW: number; aspectH: number },
+  opts?: { allowOutside?: boolean },
+): Pt | null {
   const { w, h, aspectW, aspectH } = viewport;
   if (!w || !h || !aspectW || !aspectH) return null;
   const scale = Math.min(w / aspectW, h / aspectH);
@@ -1127,7 +1213,8 @@ function worldToImagePoint(world: Pt, viewport: { w: number; h: number; aspectW:
   const imgY = (h - imgH) / 2;
   const x = world.x - imgX;
   const y = world.y - imgY;
-  if (x < 0 || y < 0 || x > imgW || y > imgH) return null;
+  const allowOutside = !!opts?.allowOutside;
+  if (!allowOutside && (x < 0 || y < 0 || x > imgW || y > imgH)) return null;
   return { x: (x / imgW) * aspectW, y: (y / imgH) * aspectH };
 }
 
@@ -2738,7 +2825,7 @@ const MappingView: React.FC = () => {
 
                     const onClickWorld = (world: Pt) => {
                       if (vpTool !== "quad") return;
-                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current, { allowOutside: true });
                       if (!imgPt) return;
                       setVpQuadPoints((old) => {
                         const next = [...old, imgPt];
@@ -2758,7 +2845,7 @@ const MappingView: React.FC = () => {
                       if (!vpQuad) return;
                       // 拖拽顶点时更新顶点位置
                       if (vpDraggingVertex != null) {
-                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current, { allowOutside: true });
                         if (!imgPt) return;
                         setVpQuad((q) => {
                           if (!q) return q;
@@ -2852,7 +2939,7 @@ const MappingView: React.FC = () => {
                         }
                       }
                       if (!vpQuad || !vpEditEnabled) return;
-                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current, { allowOutside: true });
                       if (!imgPt) return;
                       // 命中某个顶点则开始拖拽
                       const hitR = 12; // px in image space
@@ -3631,8 +3718,8 @@ const PanoramaViewsView: React.FC = () => {
           yaw_deg: 0,
           pitch_deg: 0,
           fov_deg: 90,
-          out_w: 640,
-          out_h: 640,
+          out_w: 512,
+          out_h: 512,
         }),
       });
       if (!res.ok) {
