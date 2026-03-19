@@ -2233,6 +2233,8 @@ const MappingView: React.FC = () => {
   const [bindCameraOptions, setBindCameraOptions] = useState<BindCameraOption[]>([]);
   const [bindFloorPlanId, setBindFloorPlanId] = useState<number | "">("");
   const [bindCameraId, setBindCameraId] = useState<string>("");
+  const [bindMappedCameraIds, setBindMappedCameraIds] = useState<number[]>([]);
+  const [bindMappedCameraIdsLoading, setBindMappedCameraIdsLoading] = useState(false);
   const [bindVvSnapshotRefreshMs, setBindVvSnapshotRefreshMs] = useState<number>(3000);
   const [bindVvSnapshotObjUrl, setBindVvSnapshotObjUrl] = useState<string>("");
   const bindVvSnapshotTimerRef = useRef<number | null>(null);
@@ -2479,6 +2481,27 @@ const MappingView: React.FC = () => {
     loadBindCameras();
   }, []);
 
+  const loadBindMappedCameraIds = useCallback(async (floorPlanId: number) => {
+    setBindMappedCameraIdsLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/floor-plans/${floorPlanId}/mapped-camera-ids`);
+      const ids: number[] = res.ok ? await res.json() : [];
+      setBindMappedCameraIds(Array.isArray(ids) ? ids : []);
+    } catch {
+      setBindMappedCameraIds([]);
+    } finally {
+      setBindMappedCameraIdsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") {
+      setBindMappedCameraIds([]);
+      return;
+    }
+    void loadBindMappedCameraIds(bindFloorPlanId);
+  }, [bindFloorPlanId, loadBindMappedCameraIds]);
+
   const refreshBindVirtualSnapshot = useCallback(async (view: CameraVirtualView) => {
     if (bindVvSnapshotInFlightRef.current) return;
     bindVvSnapshotInFlightRef.current = true;
@@ -2689,6 +2712,10 @@ const MappingView: React.FC = () => {
     if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
     const fp = floorPlans.find((f) => f.id === bindFloorPlanId);
     if (!fp) return;
+    if (bindMappedCameraIds.length > 0) {
+      alert("该平面图已存在映射关联，修改网格会导致绑定坐标失效。请先清空映射后再修改网格。");
+      return;
+    }
     setSavingGrid(true);
     try {
       const res = await fetch(`${API_BASE}/api/floor-plans/${bindFloorPlanId}`, {
@@ -2842,9 +2869,10 @@ const MappingView: React.FC = () => {
                     <input
                       type="number"
                       min={1}
-                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs disabled:bg-slate-100 disabled:opacity-60"
                       value={bindGridRows}
                       onChange={(e) => setBindGridRows(e.target.value)}
+                      disabled={bindMappedCameraIds.length > 0}
                     />
                   </label>
                   <label className="text-xs text-slate-600">
@@ -2852,20 +2880,63 @@ const MappingView: React.FC = () => {
                     <input
                       type="number"
                       min={1}
-                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs"
+                      className="ml-1 w-14 rounded border border-slate-300 px-1.5 py-0.5 text-xs disabled:bg-slate-100 disabled:opacity-60"
                       value={bindGridCols}
                       onChange={(e) => setBindGridCols(e.target.value)}
+                      disabled={bindMappedCameraIds.length > 0}
                     />
                   </label>
                   <button
                     type="button"
                     onClick={saveBindGrid}
-                    disabled={savingGrid}
+                    disabled={savingGrid || bindMappedCameraIds.length > 0}
                     className="rounded border border-slate-300 bg-white px-2 py-0.5 text-xs text-slate-700 hover:bg-slate-100 disabled:opacity-50"
                   >
                     {savingGrid ? "保存中…" : "保存网格设置"}
                   </button>
                 </div>
+                {bindMappedCameraIdsLoading ? (
+                  <div className="text-[11px] text-slate-400">检查映射关联中…</div>
+                ) : bindMappedCameraIds.length > 0 ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1">
+                    <div className="text-[11px] text-amber-900">
+                      该平面图已存在映射关联（摄像头 {bindMappedCameraIds.length} 个），需先清空映射后才能修改网格。
+                    </div>
+                    <button
+                      type="button"
+                      className="rounded border border-amber-300 bg-white px-2 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+                      onClick={async () => {
+                        if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+                        const ok = confirm(
+                          `确认清空该平面图的所有映射关联吗？\n\n- 将删除该平面图下所有 camera 映射与 virtual PTZ cell 映射\n- 操作不可撤销\n\n清空后才可修改网格。`,
+                        );
+                        if (!ok) return;
+                        const code = String(Math.floor(1000 + Math.random() * 9000));
+                        const input = prompt(`为防止误操作，请输入验证码：${code}`);
+                        if (input === null) return;
+                        if ((input || "").trim() !== code) {
+                          alert("验证码错误，已取消清空。");
+                          return;
+                        }
+                        try {
+                          const res = await fetch(`${API_BASE}/api/floor-plans/${bindFloorPlanId}/clear-mappings`, {
+                            method: "POST",
+                          });
+                          if (!res.ok) throw new Error("clear failed");
+                          setCellMappings([]);
+                          setReplaceMappingId(null);
+                          setBindingColorRefreshTick((t) => t + 1);
+                          void loadBindMappedCameraIds(bindFloorPlanId);
+                        } catch (e) {
+                          console.error(e);
+                          alert("清空映射失败，请稍后重试。");
+                        }
+                      }}
+                    >
+                      清空映射
+                    </button>
+                  </div>
+                ) : null}
 
                 <div className="text-[11px] font-semibold text-slate-700">摄像头绑定列表</div>
                 <div className="max-h-28 overflow-y-auto rounded border border-slate-200 bg-slate-50 p-2">
@@ -3728,7 +3799,7 @@ const MappingView: React.FC = () => {
       {mappingTab === "cameras" && <CameraManageView />}
 
       {/* 2.5 全景相机视窗配置：virtual PTZ 视口参数 + MJPEG 预览 */}
-      {mappingTab === "panoramaViews" && <PanoramaViewsView />}
+      {mappingTab === "panoramaViews" && <PanoramaViewsView onViewsChanged={loadBindCameras} />}
 
       {/* 3. 平面图管理：使用你原来的平面图表单 + 列表 */}
       {mappingTab === "floorPlans" && (
@@ -3984,7 +4055,7 @@ const MappingView: React.FC = () => {
   );
 };
 
-const PanoramaViewsView: React.FC = () => {
+const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsChanged }) => {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [cameraId, setCameraId] = useState<number | "">("");
   const [views, setViews] = useState<(CameraVirtualView & { camera_name?: string })[]>([]);
@@ -4170,6 +4241,7 @@ const PanoramaViewsView: React.FC = () => {
       }
       const created: CameraVirtualView = await res.json();
       await loadViews();
+      onViewsChanged?.();
       bumpPreview(created.id);
     } finally {
       setCreating(false);
@@ -4196,6 +4268,7 @@ const PanoramaViewsView: React.FC = () => {
       return;
     }
     await loadViews();
+    onViewsChanged?.();
     setEditMode((old) => ({ ...old, [v.id]: false }));
   };
 
@@ -4211,6 +4284,7 @@ const PanoramaViewsView: React.FC = () => {
       return;
     }
     await loadViews();
+    onViewsChanged?.();
     setPreviewNonce((m) => {
       const next = { ...m };
       delete next[viewId];

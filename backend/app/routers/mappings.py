@@ -193,6 +193,53 @@ def list_heatmap_sources(floor_plan_id: int, db: Session = Depends(get_db)) -> L
     return out
 
 
+@router.post("/floor-plans/{floor_plan_id}/clear-mappings")
+def clear_floor_plan_mappings(floor_plan_id: int, db: Session = Depends(get_db)) -> Dict[str, int]:
+    """
+    清空某平面图的所有“映射关联”，用于在修改网格前解除绑定，避免坐标系变化导致历史映射失效。
+
+    清理范围：
+    - camera_mappings 及其 camera_ground_cells
+    - virtual_view_cell_mappings
+    """
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    mapping_ids = [
+        r[0]
+        for r in db.query(models.CameraMapping.id)
+        .filter(models.CameraMapping.floor_plan_id == floor_plan_id)
+        .all()
+    ]
+    deleted_ground = 0
+    if mapping_ids:
+        deleted_ground = (
+            db.query(models.CameraGroundCell)
+            .filter(models.CameraGroundCell.camera_mapping_id.in_(mapping_ids))
+            .delete(synchronize_session=False)
+        )
+        deleted_cam_mappings = (
+            db.query(models.CameraMapping)
+            .filter(models.CameraMapping.id.in_(mapping_ids))
+            .delete(synchronize_session=False)
+        )
+    else:
+        deleted_cam_mappings = 0
+
+    deleted_vv_cells = (
+        db.query(models.VirtualViewCellMapping)
+        .filter(models.VirtualViewCellMapping.floor_plan_id == floor_plan_id)
+        .delete(synchronize_session=False)
+    )
+
+    db.commit()
+    return {
+        "deleted_camera_ground_cells": int(deleted_ground or 0),
+        "deleted_camera_mappings": int(deleted_cam_mappings or 0),
+        "deleted_virtual_view_cell_mappings": int(deleted_vv_cells or 0),
+    }
+
+
 @router.post("/camera-mappings", response_model=schemas.CameraMappingOut)
 def create_camera_mapping(
     payload: schemas.CameraMappingCreate, db: Session = Depends(get_db)
