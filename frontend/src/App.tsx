@@ -1536,6 +1536,12 @@ const MappingView: React.FC = () => {
   const [bindSourceList, setBindSourceList] = useState<BindSourceItem[]>([]);
   const [floorCellToSourceKey, setFloorCellToSourceKey] = useState<Map<string, string>>(new Map());
   const [floorCellFillColors, setFloorCellFillColors] = useState<Map<string, string>>(new Map());
+  const floorCellToSourceKeyRef = useRef<Map<string, string>>(new Map());
+  const [bindingColorRefreshTick, setBindingColorRefreshTick] = useState(0);
+
+  useEffect(() => {
+    floorCellToSourceKeyRef.current = floorCellToSourceKey;
+  }, [floorCellToSourceKey]);
 
   const palette = [
     "#694FF9",
@@ -1633,7 +1639,7 @@ const MappingView: React.FC = () => {
         setFloorCellFillColors(new Map());
       }
     })();
-  }, [bindFloorPlanId]);
+  }, [bindFloorPlanId, bindingColorRefreshTick]);
 
   const camToFloor = useMemo(() => {
     const m = new Map<string, { row: number; col: number }>();
@@ -2701,6 +2707,7 @@ const MappingView: React.FC = () => {
                         `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
                       );
                       if (res2.ok) setCellMappings(await res2.json());
+                      setBindingColorRefreshTick((t) => t + 1);
                       setReplaceMappingId(null);
                     } catch (e) {
                       console.error(e);
@@ -2746,6 +2753,7 @@ const MappingView: React.FC = () => {
                       );
                       if (!res.ok) throw new Error("delete all failed");
                       setCellMappings([]);
+                      setBindingColorRefreshTick((t) => t + 1);
                       setVpSelectedCell(null);
                       setFpSelectedCell(null);
                       setReplaceMappingId(null);
@@ -2832,6 +2840,7 @@ const MappingView: React.FC = () => {
                                   );
                                   if (!res.ok) throw new Error("delete failed");
                                   setCellMappings((old) => old.filter((x) => x.id !== m.id));
+                                  setBindingColorRefreshTick((t) => t + 1);
                                   if (replaceMappingId === m.id) setReplaceMappingId(null);
                                 } catch (e) {
                                   console.error(e);
