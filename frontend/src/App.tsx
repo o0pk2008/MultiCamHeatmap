@@ -212,6 +212,28 @@ const HeatmapView: React.FC = () => {
   const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
   const wsRef = useRef<WebSocket | null>(null);
 
+  // === 方案 3：6 路置顶关注（实时） + 其余缩略图（轮询快照） ===
+  type HeatmapSource = {
+    kind: "camera" | "virtual";
+    camera_id: number;
+    camera_name: string;
+    webrtc_url?: string | null;
+    virtual_view_id?: number | null;
+    virtual_view_name?: string | null;
+  };
+  const slotCount = 6;
+  const sourceKeyOf = useCallback((s: HeatmapSource) => {
+    return s.kind === "virtual" && s.virtual_view_id
+      ? `virtual:${s.virtual_view_id}`
+      : `camera:${s.camera_id}`;
+  }, []);
+  const [pinnedSlots, setPinnedSlots] = useState<string[]>(() => Array.from({ length: slotCount }, () => ""));
+  const [thumbPage, setThumbPage] = useState(1);
+  const [thumbRefreshMs, setThumbRefreshMs] = useState<number>(3000);
+  const [thumbObjUrl, setThumbObjUrl] = useState<Record<number, string>>({});
+  const thumbPollIdxRef = useRef(0);
+  const thumbInFlightRef = useRef<Record<number, boolean>>({});
+
   useEffect(() => {
     const load = async () => {
       const [camRes, fpRes] = await Promise.all([
@@ -262,6 +284,114 @@ const HeatmapView: React.FC = () => {
       return !!c && c.enabled;
     });
   }, [cameras, heatmapSources]);
+
+  const sourceByKey = useMemo(() => {
+    const m = new Map<string, HeatmapSource>();
+    mappedCameras.forEach((s) => m.set(sourceKeyOf(s as any), s as any));
+    return m;
+  }, [mappedCameras, sourceKeyOf]);
+
+  // 当 sources 变化时：初始化/修复 pinnedSlots（填充空位，移除已不存在的 key）
+  useEffect(() => {
+    setPinnedSlots((old) => {
+      const existing = new Set(Array.from(sourceByKey.keys()));
+      const next = old.map((k) => (k && existing.has(k) ? k : ""));
+      // 填充空位：按 sources 顺序补齐
+      const used = new Set(next.filter(Boolean));
+      const orderedKeys = mappedCameras.map((s) => sourceKeyOf(s as any));
+      for (let i = 0; i < next.length; i++) {
+        if (next[i]) continue;
+        const cand = orderedKeys.find((k) => !used.has(k));
+        if (!cand) break;
+        next[i] = cand;
+        used.add(cand);
+      }
+      return next;
+    });
+    setThumbPage(1);
+  }, [mappedCameras, sourceByKey, sourceKeyOf]);
+
+  const pinnedSources = useMemo(() => {
+    return pinnedSlots
+      .map((k) => (k ? sourceByKey.get(k) || null : null))
+      .filter((x) => x !== null) as HeatmapSource[];
+  }, [pinnedSlots, sourceByKey]);
+
+  const remainingSources = useMemo(() => {
+    const pinned = new Set(pinnedSlots.filter(Boolean));
+    return mappedCameras.filter((s) => !pinned.has(sourceKeyOf(s as any))) as HeatmapSource[];
+  }, [mappedCameras, pinnedSlots, sourceKeyOf]);
+
+  const refreshThumb = useCallback(
+    async (s: HeatmapSource) => {
+      if (s.kind !== "virtual" || !s.virtual_view_id) return;
+      const vvId = s.virtual_view_id;
+      if (thumbInFlightRef.current[vvId]) return;
+      thumbInFlightRef.current[vvId] = true;
+      const url = `${API_BASE}/api/cameras/${s.camera_id}/virtual-views/${vvId}/snapshot.jpg?t=${Date.now()}`;
+      try {
+        const res = await fetch(url, { cache: "no-store" });
+        if (!res.ok) return;
+        if (res.status === 204) return; // 保持旧图
+        const blob = await res.blob();
+        const objUrl = URL.createObjectURL(blob);
+        await new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve();
+          img.onerror = () => resolve();
+          img.src = objUrl;
+        });
+        setThumbObjUrl((old) => {
+          const prev = old[vvId];
+          const next = { ...old, [vvId]: objUrl };
+          if (prev && prev !== objUrl) {
+            try {
+              URL.revokeObjectURL(prev);
+            } catch {}
+          }
+          return next;
+        });
+      } catch {
+        // ignore
+      } finally {
+        thumbInFlightRef.current[vvId] = false;
+      }
+    },
+    [],
+  );
+
+  // 初次：对 remaining virtual views 拉一轮缩略图
+  useEffect(() => {
+    remainingSources.forEach((s) => {
+      if (s.kind === "virtual" && s.virtual_view_id && !thumbObjUrl[s.virtual_view_id]) {
+        void refreshThumb(s);
+      }
+    });
+  }, [remainingSources, thumbObjUrl, refreshThumb]);
+
+  // 缩略图错峰轮询（remaining sources 里 only virtual）
+  useEffect(() => {
+    const list = remainingSources.filter((s) => s.kind === "virtual" && !!s.virtual_view_id) as HeatmapSource[];
+    if (list.length === 0) return;
+    const tickMs = Math.max(200, Math.floor(thumbRefreshMs / Math.max(1, list.length)));
+    const t = window.setInterval(() => {
+      const idx = thumbPollIdxRef.current % list.length;
+      thumbPollIdxRef.current = (thumbPollIdxRef.current + 1) % 1_000_000;
+      void refreshThumb(list[idx]);
+    }, tickMs);
+    return () => window.clearInterval(t);
+  }, [remainingSources, thumbRefreshMs, refreshThumb]);
+
+  // 清理 objectURL
+  useEffect(() => {
+    return () => {
+      try {
+        Object.values(thumbObjUrl).forEach((u) => {
+          if (typeof u === "string" && u) URL.revokeObjectURL(u);
+        });
+      } catch {}
+    };
+  }, [thumbObjUrl]);
 
   const vvMetaById = useMemo(() => {
     const m = new Map<number, CameraVirtualView>();
@@ -495,59 +625,220 @@ const HeatmapView: React.FC = () => {
               暂无可用摄像头，请先在“摄像头管理”中添加并启用，后续在“映射管理”中关联到平面图。
             </p>
           ) : (
-            <div className="grid min-h-0 flex-1 auto-rows-max grid-cols-1 items-start gap-3 overflow-y-auto sm:grid-cols-2 lg:grid-cols-3">
-              {mappedCameras.slice(0, 6).map((src) => (
-                <div
-                  key={`${src.kind}-${src.kind === "virtual" ? src.virtual_view_id : src.camera_id}`}
-                  className="overflow-hidden rounded-lg border border-slate-200 bg-black self-start"
-                >
-                  <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
-                    <span className="truncate">
-                      {src.kind === "virtual"
-                        ? `${src.camera_name} / ${src.virtual_view_name}`
-                        : src.camera_name}
-                    </span>
-                    <span className="text-slate-400">
-                      {src.kind === "virtual"
-                        ? `VV:${src.virtual_view_id}`
-                        : `ID:${src.camera_id}`}
-                    </span>
-                  </div>
-                  {/* 卡片画面区域比例：宽 4 / 高 3 */}
-                  <div className="aspect-[4/3] w-full bg-black">
-                    {src.kind === "virtual" && src.virtual_view_id ? (
-                      <div className="relative h-full w-full">
-                        <img
-                          src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview_shared"}.mjpeg`}
-                          className="h-full w-full object-contain"
-                          alt={`heatmap-virtual-${src.virtual_view_id}`}
-                          draggable={false}
-                        />
-                        {showMappedCamGrid && vvGridConfigs[src.virtual_view_id] && vvMetaById.get(src.virtual_view_id) ? (
-                          <VirtualViewGridOverlay
-                            view={vvMetaById.get(src.virtual_view_id)!}
-                            cfg={vvGridConfigs[src.virtual_view_id]}
-                            highlightCell={
-                              showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null
-                            }
-                          />
-                        ) : null}
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              {/* 上：6 路置顶关注（实时） */}
+              <div className="grid auto-rows-max grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {Array.from({ length: slotCount }).map((_, slotIdx) => {
+                  const key = pinnedSlots[slotIdx] || "";
+                  const src = key ? (sourceByKey.get(key) as HeatmapSource | undefined) : undefined;
+                  return (
+                    <div
+                      key={`slot-${slotIdx}`}
+                      className="overflow-hidden rounded-lg border border-slate-200 bg-black self-start"
+                      draggable={!!key}
+                      onDragStart={(e) => {
+                        // 槽位 -> 槽位：交换顺序
+                        if (!key) return;
+                        e.dataTransfer.setData("text/heatmap-slot-idx", String(slotIdx));
+                        e.dataTransfer.setData("text/heatmap-source-key", key);
+                        e.dataTransfer.effectAllowed = "move";
+                      }}
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        const fromSlotStr = e.dataTransfer.getData("text/heatmap-slot-idx") || "";
+                        const k = e.dataTransfer.getData("text/heatmap-source-key") || "";
+                        if (!k) return;
+
+                        // 1) 槽位 -> 槽位：交换
+                        const fromSlot = Number(fromSlotStr);
+                        if (Number.isFinite(fromSlot) && fromSlot >= 0 && fromSlot < slotCount && fromSlot !== slotIdx) {
+                          setPinnedSlots((old) => {
+                            const next = [...old];
+                            const tmp = next[slotIdx] || "";
+                            next[slotIdx] = next[fromSlot] || "";
+                            next[fromSlot] = tmp;
+                            return next;
+                          });
+                          return;
+                        }
+
+                        // 2) 缩略图 -> 槽位：替换（也覆盖“从槽位拖到自己”场景）
+                        setPinnedSlots((old) => {
+                          const next = [...old];
+                          next[slotIdx] = k;
+                          return next;
+                        });
+                      }}
+                      title={key ? "可拖拽到其他槽位交换顺序，或拖拽缩略图替换" : "拖拽下方缩略图到此槽位进行置顶关注"}
+                    >
+                      <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-[11px] text-slate-700">
+                        <span className="truncate">
+                          {src
+                            ? src.kind === "virtual"
+                              ? `${src.camera_name} / ${src.virtual_view_name}`
+                              : src.camera_name
+                            : `槽位 ${slotIdx + 1}`}
+                        </span>
+                        <span className="text-slate-400">
+                          {src
+                            ? src.kind === "virtual"
+                              ? `VV:${src.virtual_view_id}`
+                              : `ID:${src.camera_id}`
+                            : "拖拽替换"}
+                        </span>
                       </div>
-                    ) : src.webrtc_url ? (
-                      <iframe
-                        src={src.webrtc_url}
-                        className="h-full w-full border-none"
-                        allow="autoplay; fullscreen"
-                        title={`heatmap-camera-${src.camera_id}`}
-                      />
-                    ) : (
-                      <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">
-                        未配置播放地址
+                      <div className="aspect-[4/3] w-full bg-black">
+                        {src ? (
+                          src.kind === "virtual" && src.virtual_view_id ? (
+                            <div className="relative h-full w-full">
+                              <img
+                                src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview_shared"}.mjpeg`}
+                                className="h-full w-full object-contain"
+                                alt={`heatmap-virtual-${src.virtual_view_id}`}
+                                draggable={false}
+                              />
+                              {showMappedCamGrid &&
+                              vvGridConfigs[src.virtual_view_id] &&
+                              vvMetaById.get(src.virtual_view_id) ? (
+                                <VirtualViewGridOverlay
+                                  view={vvMetaById.get(src.virtual_view_id)!}
+                                  cfg={vvGridConfigs[src.virtual_view_id]}
+                                  highlightCell={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null}
+                                />
+                              ) : null}
+                            </div>
+                          ) : src.webrtc_url ? (
+                            <iframe
+                              src={src.webrtc_url}
+                              className="h-full w-full border-none"
+                              allow="autoplay; fullscreen"
+                              title={`heatmap-camera-${src.camera_id}-slot-${slotIdx}`}
+                            />
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">
+                              未配置播放地址
+                            </div>
+                          )
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">
+                            拖拽缩略图到此处
+                          </div>
+                        )}
                       </div>
-                    )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 下：其余缩略图（分页 + 刷新频率控制 + 拖拽置顶） */}
+              <div className="min-h-0 rounded-lg border border-slate-200 bg-white p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div className="text-xs font-semibold text-slate-700">其余缩略图</div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-1 text-[11px] text-slate-500">
+                      <span>刷新</span>
+                      <select
+                        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px]"
+                        value={thumbRefreshMs}
+                        onChange={(e) => setThumbRefreshMs(Number(e.target.value) || 3000)}
+                        title="缩略图刷新频率（错峰轮询）"
+                      >
+                        <option value={1000}>1s</option>
+                        <option value={3000}>3s</option>
+                        <option value={5000}>5s</option>
+                      </select>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {remainingSources.length} 路
+                    </div>
                   </div>
                 </div>
-              ))}
+
+                {(() => {
+                  const pageSize = 12;
+                  const totalPages = Math.max(1, Math.ceil(remainingSources.length / pageSize));
+                  const page = Math.min(totalPages, Math.max(1, thumbPage));
+                  const start = (page - 1) * pageSize;
+                  const items = remainingSources.slice(start, start + pageSize);
+                  return (
+                    <div className="space-y-2">
+                      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+                        {items.map((s) => {
+                          const k = sourceKeyOf(s as any);
+                          const vvId = s.virtual_view_id || 0;
+                          const snap = s.kind === "virtual" && vvId ? thumbObjUrl[vvId] || "" : "";
+                          return (
+                            <div
+                              key={`thumb-${k}`}
+                              className="overflow-hidden rounded border border-slate-200 bg-slate-50"
+                              draggable
+                              onDragStart={(e) => {
+                                e.dataTransfer.setData("text/heatmap-source-key", k);
+                                e.dataTransfer.effectAllowed = "move";
+                              }}
+                              title="拖拽到上方某个槽位"
+                            >
+                              <div className="flex items-center justify-between px-2 py-1 text-[11px] text-slate-700">
+                                <span className="truncate">
+                                  {s.kind === "virtual"
+                                    ? `${s.camera_name} / ${s.virtual_view_name}`
+                                    : s.camera_name}
+                                </span>
+                                <span className="text-slate-400">
+                                  {s.kind === "virtual" ? `VV:${s.virtual_view_id}` : `ID:${s.camera_id}`}
+                                </span>
+                              </div>
+                              <div className="aspect-[4/3] w-full bg-black">
+                                {s.kind === "virtual" && vvId ? (
+                                  snap ? (
+                                    <img
+                                      src={snap}
+                                      className="h-full w-full object-contain"
+                                      alt={`thumb-vv-${vvId}`}
+                                      draggable={false}
+                                    />
+                                  ) : (
+                                    <div className="flex h-full w-full items-center justify-center text-[11px] text-slate-200">
+                                      暂无缩略图
+                                    </div>
+                                  )
+                                ) : (
+                                  <div className="flex h-full w-full items-center justify-center text-[11px] text-slate-200">
+                                    摄像头预览
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {totalPages > 1 ? (
+                        <div className="flex items-center justify-between text-[11px] text-slate-600">
+                          <button
+                            className="rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50 disabled:opacity-50"
+                            disabled={page <= 1}
+                            onClick={() => setThumbPage((p) => Math.max(1, p - 1))}
+                          >
+                            上一页
+                          </button>
+                          <div>
+                            第 {page} / {totalPages} 页
+                          </div>
+                          <button
+                            className="rounded border border-slate-300 bg-white px-2 py-1 hover:bg-slate-50 disabled:opacity-50"
+                            disabled={page >= totalPages}
+                            onClick={() => setThumbPage((p) => Math.min(totalPages, p + 1))}
+                          >
+                            下一页
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           )}
         </div>
