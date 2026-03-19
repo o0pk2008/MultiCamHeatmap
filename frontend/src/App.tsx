@@ -2193,7 +2193,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
         const y = r * cellH;
         const cx = x + cellW / 2;
         const cy = y + cellH / 2;
-        const iconH = Math.max(24, cellH * 1.15);
+        const iconH = Math.max(24, cellH * 3);
         if (icon && icon.naturalWidth > 0 && icon.naturalHeight > 0) {
           const scale = iconH / icon.naturalHeight;
           const iconW = icon.naturalWidth * scale;
