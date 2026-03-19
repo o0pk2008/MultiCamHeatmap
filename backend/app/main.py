@@ -39,6 +39,11 @@ maps_dir = "/data/maps"
 os.makedirs(maps_dir, exist_ok=True)
 app.mount("/maps", StaticFiles(directory=maps_dir, html=False), name="maps")
 
+repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+icons_dir = "/data/icon" if os.path.isdir("/data/icon") else os.path.join(repo_root, "data", "icon")
+if os.path.isdir(icons_dir):
+    app.mount("/icons", StaticFiles(directory=icons_dir, html=False), name="icons")
+
 
 # 为 /maps 图片设置长缓存（避免切换页面时反复下载/解码导致排队）
 @app.middleware("http")
