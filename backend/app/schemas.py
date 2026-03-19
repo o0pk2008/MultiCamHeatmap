@@ -205,3 +205,8 @@ class HeatmapHistoryCellOut(BaseModel):
     floor_col: int
     count: int
 
+
+class HeatmapDwellCellOut(BaseModel):
+    floor_row: int
+    floor_col: int
+    dwell_sec: float

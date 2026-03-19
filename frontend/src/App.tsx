@@ -200,7 +200,29 @@ const HeatmapView: React.FC = () => {
   const [showHeatmapGrid, setShowHeatmapGrid] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [heatmapCells, setHeatmapCells] = useState<Map<string, number>>(new Map());
-  const [recordHistory, setRecordHistory] = useState(false);
+  const [heatmapColormap] = useState<"viridis" | "greenRed">("greenRed");
+  const [heatmapScale, setHeatmapScale] = useState<"log" | "linear">("log");
+  const [heatmapClip] = useState<"p95" | "p99" | "max">("p95");
+  const [heatmapAlphaMode, setHeatmapAlphaMode] = useState<"byValue" | "fixed">("byValue");
+  const [showHeatmapLegend, setShowHeatmapLegend] = useState(true);
+  const [heatmapRecentMode, setHeatmapRecentMode] = useState(true);
+  const [heatmapHalfLifeSec, setHeatmapHalfLifeSec] = useState<number>(60);
+  const [heatmapDataMode, setHeatmapDataMode] = useState<"live" | "history">("live");
+  const heatmapUpdatesEnabledRef = useRef(true);
+  const toDatetimeLocal = useCallback((d: Date) => {
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const mm = pad(d.getMonth() + 1);
+    const dd = pad(d.getDate());
+    const hh = pad(d.getHours());
+    const mi = pad(d.getMinutes());
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+  }, []);
+  const [historyEndLocal, setHistoryEndLocal] = useState<string>(() => toDatetimeLocal(new Date()));
+  const [historyStartLocal, setHistoryStartLocal] = useState<string>(() =>
+    toDatetimeLocal(new Date(Date.now() - 10 * 60 * 1000)),
+  );
+  const [recordHistory, setRecordHistory] = useState(true);
   const [showMappedCamGrid, setShowMappedCamGrid] = useState(false);
   const [showFootfallOnCamGrid, setShowFootfallOnCamGrid] = useState(false);
   const [allVirtualViews, setAllVirtualViews] = useState<
@@ -211,6 +233,12 @@ const HeatmapView: React.FC = () => {
   >({});
   const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
   const wsRef = useRef<WebSocket | null>(null);
+  const lastSampleBySourceRef = useRef<Map<string, { ts: number; cellKey: string }>>(new Map());
+  const lastDecayAtRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    heatmapUpdatesEnabledRef.current = heatmapDataMode === "live";
+  }, [heatmapDataMode]);
 
   // === 方案 3：6 路置顶关注（实时） + 其余缩略图（轮询快照） ===
   type HeatmapSource = {
@@ -256,6 +284,147 @@ const HeatmapView: React.FC = () => {
     load();
   }, [selectedFloorPlanId]);
 
+  const applyHeatmapDecay = useCallback((dtSec: number) => {
+    if (!Number.isFinite(dtSec) || dtSec <= 0) return;
+    const halfLife = Math.max(1, Number(heatmapHalfLifeSec) || 60);
+    const factor = Math.pow(0.5, dtSec / halfLife);
+    setHeatmapCells((old) => {
+      if (old.size === 0) return old;
+      const next = new Map<string, number>();
+      old.forEach((v, k) => {
+        const nv = v * factor;
+        if (nv > 1e-4) next.set(k, nv);
+      });
+      return next;
+    });
+  }, [heatmapHalfLifeSec]);
+
+  useEffect(() => {
+    if (!analyzing || !heatmapRecentMode || heatmapDataMode !== "live") {
+      lastDecayAtRef.current = null;
+      return;
+    }
+    let stopped = false;
+    const tick = () => {
+      if (stopped) return;
+      const now = performance.now();
+      const prev = lastDecayAtRef.current;
+      lastDecayAtRef.current = now;
+      if (prev != null) {
+        const dtSec = (now - prev) / 1000;
+        applyHeatmapDecay(dtSec);
+      }
+      setTimeout(tick, 300);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      lastDecayAtRef.current = null;
+    };
+  }, [analyzing, heatmapRecentMode, heatmapDataMode, applyHeatmapDecay]);
+
+  const handleHeatmapEvent = useCallback((evt: any, floorPlanId: number) => {
+    if (evt.floor_plan_id !== floorPlanId) return;
+    const r = Number(evt.floor_row);
+    const c = Number(evt.floor_col);
+    if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+    const cellKey = `${r},${c}`;
+
+    const sourceKey =
+      evt.virtual_view_id != null && Number.isFinite(Number(evt.virtual_view_id))
+        ? `virtual:${Number(evt.virtual_view_id)}`
+        : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
+          ? `camera:${Number(evt.camera_id)}`
+          : "unknown";
+
+    const tsRaw = Number(evt.ts);
+    const ts = Number.isFinite(tsRaw) ? tsRaw : performance.now() / 1000;
+
+    const prev = lastSampleBySourceRef.current.get(sourceKey);
+    if (prev) {
+      const dt = Math.max(0, Math.min(ts - prev.ts, 2));
+      if (dt > 0) {
+        setHeatmapCells((old) => {
+          const next = new Map(old);
+          next.set(prev.cellKey, (next.get(prev.cellKey) || 0) + dt);
+          return next;
+        });
+      }
+    }
+    lastSampleBySourceRef.current.set(sourceKey, { ts, cellKey });
+
+    if (
+      evt.virtual_view_id != null &&
+      Number.isFinite(Number(evt.virtual_view_id)) &&
+      evt.camera_row != null &&
+      evt.camera_col != null
+    ) {
+      const vvId = Number(evt.virtual_view_id);
+      const rr = Number(evt.camera_row);
+      const cc = Number(evt.camera_col);
+      if (Number.isFinite(rr) && Number.isFinite(cc)) {
+        setVvFootfalls((old) => ({
+          ...old,
+          [vvId]: { row: rr, col: cc, ts: Date.now() },
+        }));
+      }
+    }
+  }, []);
+
+  const loadCurrentDwellFromBackend = useCallback(async (floorPlanId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/heatmap/current-dwell?floor_plan_id=${floorPlanId}`);
+      const items: { floor_row: number; floor_col: number; dwell_sec: number }[] = res.ok ? await res.json() : [];
+      const m = new Map<string, number>();
+      items.forEach((it) => {
+        const r = Number(it.floor_row);
+        const c = Number(it.floor_col);
+        const v = Number(it.dwell_sec);
+        if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) return;
+        m.set(`${r},${c}`, v);
+      });
+      setHeatmapCells(m);
+      lastSampleBySourceRef.current = new Map();
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  const parseDatetimeLocalToEpochSec = useCallback((s: string) => {
+    const ms = new Date(s).getTime();
+    if (!Number.isFinite(ms) || ms <= 0) return null;
+    return ms / 1000;
+  }, []);
+
+  const loadHistoryDwellFromBackend = useCallback(async (floorPlanId: number, startLocal: string, endLocal: string) => {
+    const startTs = parseDatetimeLocalToEpochSec(startLocal);
+    const endTs = parseDatetimeLocalToEpochSec(endLocal);
+    if (startTs == null || endTs == null || startTs >= endTs) {
+      alert("历史时间范围不合法");
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/heatmap/history-dwell?floor_plan_id=${floorPlanId}&start_ts=${encodeURIComponent(
+          String(startTs),
+        )}&end_ts=${encodeURIComponent(String(endTs))}`,
+      );
+      const items: { floor_row: number; floor_col: number; dwell_sec: number }[] = res.ok ? await res.json() : [];
+      const m = new Map<string, number>();
+      items.forEach((it) => {
+        const r = Number(it.floor_row);
+        const c = Number(it.floor_col);
+        const v = Number(it.dwell_sec);
+        if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) return;
+        m.set(`${r},${c}`, v);
+      });
+      setHeatmapCells(m);
+      lastSampleBySourceRef.current = new Map();
+    } catch {
+      alert("加载历史失败");
+    }
+  }, [parseDatetimeLocalToEpochSec]);
+
   // 恢复状态：切换模块回来时，如果后端仍在分析，则自动重连 WS 并恢复按钮状态
   useEffect(() => {
     let cancelled = false;
@@ -271,6 +440,9 @@ const HeatmapView: React.FC = () => {
         // 如果需要运行且 WS 未连接，则连接
         if (shouldRun) {
           if (wsRef.current) return;
+          setHeatmapDataMode("live");
+          void loadCurrentDwellFromBackend(fpId);
+          lastSampleBySourceRef.current = new Map();
           const ws = new WebSocket(
             `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
               /:\d+$/,
@@ -280,29 +452,8 @@ const HeatmapView: React.FC = () => {
           ws.onmessage = (ev) => {
             try {
               const evt = JSON.parse(ev.data);
-              if (evt.floor_plan_id !== fpId) return;
-              const key = `${evt.floor_row},${evt.floor_col}`;
-              setHeatmapCells((old) => {
-                const m = new Map(old);
-                m.set(key, (m.get(key) || 0) + 1);
-                return m;
-              });
-              if (
-                evt.virtual_view_id != null &&
-                Number.isFinite(Number(evt.virtual_view_id)) &&
-                evt.camera_row != null &&
-                evt.camera_col != null
-              ) {
-                const vvId = Number(evt.virtual_view_id);
-                const r = Number(evt.camera_row);
-                const c = Number(evt.camera_col);
-                if (Number.isFinite(r) && Number.isFinite(c)) {
-                  setVvFootfalls((old) => ({
-                    ...old,
-                    [vvId]: { row: r, col: c, ts: Date.now() },
-                  }));
-                }
-              }
+              if (!heatmapUpdatesEnabledRef.current) return;
+              handleHeatmapEvent(evt, fpId);
             } catch (e) {
               console.error(e);
             }
@@ -326,7 +477,7 @@ const HeatmapView: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [selectedFloorPlanId]);
+  }, [selectedFloorPlanId, handleHeatmapEvent, loadCurrentDwellFromBackend]);
 
   // 卸载时关闭 WS（不自动 stop 后端分析；回到页面会根据 status 恢复）
   useEffect(() => {
@@ -524,6 +675,42 @@ const HeatmapView: React.FC = () => {
       ? `${API_BASE}/maps/${selectedFloorPlan.image_path.split("/").pop()}`
       : null;
 
+  const computeHeatmapMax = useCallback(() => {
+    const vals: number[] = [];
+    heatmapCells.forEach((v) => {
+      if (Number.isFinite(v) && v > 0) vals.push(v);
+    });
+    if (vals.length === 0) return 1;
+    vals.sort((a, b) => a - b);
+    const pick = (p: number) => vals[Math.min(vals.length - 1, Math.max(0, Math.floor((vals.length - 1) * p)))];
+    if (heatmapClip === "max") return vals[vals.length - 1];
+    if (heatmapClip === "p99") return pick(0.99);
+    return pick(0.95);
+  }, [heatmapCells, heatmapClip]);
+
+  const legendMax = useMemo(() => {
+    const mx = computeHeatmapMax();
+    return mx > 0 ? mx : 1;
+  }, [computeHeatmapMax]);
+
+  const formatDuration = useCallback((sec: number) => {
+    if (!Number.isFinite(sec) || sec <= 0) return "0s";
+    if (sec < 60) return `${sec.toFixed(sec < 10 ? 1 : 0)}s`;
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec - m * 60);
+    if (m < 60) return `${m}m${s ? `${s}s` : ""}`;
+    const h = Math.floor(m / 60);
+    const mm = m - h * 60;
+    return `${h}h${mm ? `${mm}m` : ""}`;
+  }, []);
+
+  const heatmapLegendGradient = useMemo(() => {
+    if (heatmapColormap === "greenRed") {
+      return "linear-gradient(to right, rgb(187,247,208), rgb(34,197,94), rgb(249,115,22), rgb(239,68,68))";
+    }
+    return "linear-gradient(to right, #440154, #482878, #3E4989, #31688E, #26828E, #1F9E89, #35B779, #6CCE59, #B4DE2C, #FDE725)";
+  }, [heatmapColormap]);
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-slate-800">热力图与映射摄像头</h2>
@@ -545,6 +732,24 @@ const HeatmapView: React.FC = () => {
             录制历史
           </label>
           <button
+            className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            onClick={async () => {
+              setHeatmapCells(new Map());
+              lastSampleBySourceRef.current = new Map();
+              if (selectedFloorPlanId) {
+                try {
+                  await fetch(`${API_BASE}/api/heatmap/reset-current?floor_plan_id=${selectedFloorPlanId}`, {
+                    method: "POST",
+                  });
+                } catch {}
+              }
+            }}
+            disabled={analyzing && heatmapRecentMode}
+            title={analyzing && heatmapRecentMode ? "开启“最近热度(衰减)”时会自动变化，建议先关闭再清空" : "清空热力数据"}
+          >
+            清空热力
+          </button>
+          <button
             className={`rounded px-3 py-1 text-xs font-medium text-white ${
               analyzing ? "bg-rose-500 hover:bg-rose-600" : "bg-[#694FF9] hover:bg-[#5b3ff6]"
             }`}
@@ -552,6 +757,9 @@ const HeatmapView: React.FC = () => {
               if (!selectedFloorPlanId) return;
               try {
                 if (!analyzing) {
+                  setHeatmapDataMode("live");
+                  setHeatmapCells(new Map());
+                  lastSampleBySourceRef.current = new Map();
                   await fetch(
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${
                       recordHistory ? "true" : "false"
@@ -568,30 +776,8 @@ const HeatmapView: React.FC = () => {
                 ws.onmessage = (ev) => {
                   try {
                     const evt = JSON.parse(ev.data);
-                    if (evt.floor_plan_id !== selectedFloorPlanId) return;
-                    const key = `${evt.floor_row},${evt.floor_col}`;
-                    setHeatmapCells((old) => {
-                      const m = new Map(old);
-                      m.set(key, (m.get(key) || 0) + 1);
-                      return m;
-                    });
-                    // 记录每个 virtual view 最近一次“落脚点命中”的 camera grid cell（用于调试叠加）
-                    if (
-                      evt.virtual_view_id != null &&
-                      Number.isFinite(Number(evt.virtual_view_id)) &&
-                      evt.camera_row != null &&
-                      evt.camera_col != null
-                    ) {
-                      const vvId = Number(evt.virtual_view_id);
-                      const r = Number(evt.camera_row);
-                      const c = Number(evt.camera_col);
-                      if (Number.isFinite(r) && Number.isFinite(c)) {
-                        setVvFootfalls((old) => ({
-                          ...old,
-                          [vvId]: { row: r, col: c, ts: Date.now() },
-                        }));
-                      }
-                    }
+                    if (!heatmapUpdatesEnabledRef.current) return;
+                    handleHeatmapEvent(evt, selectedFloorPlanId);
                   } catch (e) {
                     console.error(e);
                   }
@@ -611,6 +797,7 @@ const HeatmapView: React.FC = () => {
                   wsRef.current = null;
                   setAnalyzing(false);
                   setVvFootfalls({});
+                  lastSampleBySourceRef.current = new Map();
                   // 视情况决定是否清空热力
                   // setHeatmapCells(new Map());
                 }
@@ -640,6 +827,40 @@ const HeatmapView: React.FC = () => {
                 />
                 显示网格
               </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showHeatmapLegend}
+                  onChange={(e) => setShowHeatmapLegend(e.target.checked)}
+                />
+                显示色标
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={heatmapRecentMode}
+                  onChange={(e) => setHeatmapRecentMode(e.target.checked)}
+                />
+                最近热度
+              </label>
+              <select
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
+                value={heatmapScale}
+                onChange={(e) => setHeatmapScale(e.target.value as any)}
+                title="强度映射"
+              >
+                <option value="log">对数</option>
+                <option value="linear">线性</option>
+              </select>
+              <select
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
+                value={heatmapAlphaMode}
+                onChange={(e) => setHeatmapAlphaMode(e.target.value as any)}
+                title="透明度"
+              >
+                <option value="byValue">随强度</option>
+                <option value="fixed">固定</option>
+              </select>
               <span className="text-[11px] text-slate-500">选择平面图：</span>
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
@@ -659,6 +880,100 @@ const HeatmapView: React.FC = () => {
               </select>
             </div>
           </div>
+          {showHeatmapLegend ? (
+            <div className="mb-2 flex items-center gap-3">
+              <div className="h-2 flex-1 rounded" style={{ background: heatmapLegendGradient }} />
+              <div className="flex items-center gap-2 text-[11px] text-slate-600">
+                <span>0</span>
+                <span className="text-slate-400">→</span>
+                <span>{formatDuration(legendMax / 2)}</span>
+                <span className="text-slate-400">→</span>
+                <span>{formatDuration(legendMax)}</span>
+              </div>
+              {heatmapRecentMode ? (
+                <div className="flex items-center gap-2 text-[11px] text-slate-600">
+                  <span className="text-slate-400">半衰期</span>
+                  <input
+                    type="range"
+                    min={10}
+                    max={300}
+                    value={heatmapHalfLifeSec}
+                    onChange={(e) => setHeatmapHalfLifeSec(Number(e.target.value) || 60)}
+                  />
+                  <span className="w-10 text-right">{heatmapHalfLifeSec}s</span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-slate-500">数据源：</span>
+            <button
+              className={`rounded px-2 py-1 text-[11px] font-medium ${
+                heatmapDataMode === "live"
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+              onClick={() => {
+                setHeatmapDataMode("live");
+                if (selectedFloorPlanId) void loadCurrentDwellFromBackend(selectedFloorPlanId);
+              }}
+              disabled={!selectedFloorPlanId}
+              title="从后端当前统计同步（即使关闭浏览器后再打开也可查看）"
+            >
+              当前统计
+            </button>
+            <button
+              className={`rounded px-2 py-1 text-[11px] font-medium ${
+                heatmapDataMode === "history"
+                  ? "bg-slate-900 text-white"
+                  : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+              }`}
+              onClick={() => setHeatmapDataMode("history")}
+              title="历史回放会暂停实时热力更新（不影响后端继续分析）"
+            >
+              历史回放
+            </button>
+            {heatmapDataMode === "history" ? (
+              <>
+                <input
+                  type="datetime-local"
+                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                  value={historyStartLocal}
+                  onChange={(e) => setHistoryStartLocal(e.target.value)}
+                  title="开始时间"
+                />
+                <span className="text-[11px] text-slate-400">→</span>
+                <input
+                  type="datetime-local"
+                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                  value={historyEndLocal}
+                  onChange={(e) => setHistoryEndLocal(e.target.value)}
+                  title="结束时间"
+                />
+                <button
+                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => {
+                    if (!selectedFloorPlanId) return;
+                    void loadHistoryDwellFromBackend(selectedFloorPlanId, historyStartLocal, historyEndLocal);
+                  }}
+                  disabled={!selectedFloorPlanId}
+                >
+                  加载
+                </button>
+              </>
+            ) : (
+              <button
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                onClick={() => {
+                  if (selectedFloorPlanId) void loadCurrentDwellFromBackend(selectedFloorPlanId);
+                }}
+                disabled={!selectedFloorPlanId}
+                title="手动从后端同步一次当前热力"
+              >
+                同步
+              </button>
+            )}
+          </div>
           <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
             {floorPlanImageUrlStr && selectedFloorPlan ? (
               <FloorPlanCanvas
@@ -667,6 +982,13 @@ const HeatmapView: React.FC = () => {
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showHeatmapGrid}
                 heatmapCells={heatmapCells}
+                heatmapRender={{
+                  colormap: heatmapColormap,
+                  scale: heatmapScale,
+                  clip: heatmapClip,
+                  alphaMode: heatmapAlphaMode,
+                  vMax: legendMax,
+                }}
                 className="w-full h-full"
               />
             ) : (
@@ -674,6 +996,10 @@ const HeatmapView: React.FC = () => {
                 当前无平面图配置，请在“映射管理”中上传或选择平面图。
               </span>
             )}
+          </div>
+          <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
+            <span>热力值：估算停留时长（秒）</span>
+            <span>上限：{formatDuration(legendMax)}（{heatmapClip} · {heatmapScale}）</span>
           </div>
         </div>
 
@@ -1265,6 +1591,13 @@ type FloorPlanCanvasProps = {
   linkedHoverCell?: { row: number; col: number } | null;
   mappedCells?: Set<string>;
   heatmapCells?: Map<string, number>;
+  heatmapRender?: {
+    colormap: "viridis" | "greenRed";
+    scale: "log" | "linear";
+    clip: "p95" | "p99" | "max";
+    alphaMode: "byValue" | "fixed";
+    vMax: number;
+  };
   cellFillColors?: Map<string, string>;
 };
 
@@ -1281,6 +1614,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     linkedHoverCell = null,
     mappedCells,
     heatmapCells,
+    heatmapRender,
     cellFillColors,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1415,75 +1749,73 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       ctx.strokeRect(x, y, cellW, cellH);
     }
 
-    // 热力格子（从浅绿 -> 绿 -> 橙黄 -> 红，自适应最小/最大值）
+    // 热力格子
     if (heatmapCells && heatmapCells.size > 0) {
       const cellW = iw / cols;
       const cellH = ih / rows;
+      const opts = heatmapRender || {
+        colormap: "viridis" as const,
+        scale: "log" as const,
+        clip: "p95" as const,
+        alphaMode: "byValue" as const,
+        vMax: 1,
+      };
+      const vMax = Math.max(1e-6, Number(opts.vMax) || 1);
+      const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
+      const lerpColor = (c1: [number, number, number], c2: [number, number, number], t: number): [number, number, number] => [
+        Math.round(lerp(c1[0], c2[0], t)),
+        Math.round(lerp(c1[1], c2[1], t)),
+        Math.round(lerp(c1[2], c2[2], t)),
+      ];
 
-      let minVal = Infinity;
-      let maxVal = -Infinity;
-      heatmapCells.forEach((v) => {
-        if (v < minVal) minVal = v;
-        if (v > maxVal) maxVal = v;
+      const stopsGreenRed: [number, number, number][] = [
+        [187, 247, 208],
+        [34, 197, 94],
+        [249, 115, 22],
+        [239, 68, 68],
+      ];
+      const stopsViridis: [number, number, number][] = [
+        [68, 1, 84],
+        [72, 40, 120],
+        [62, 73, 137],
+        [49, 104, 142],
+        [38, 130, 142],
+        [31, 158, 137],
+        [53, 183, 121],
+        [109, 205, 89],
+        [180, 222, 44],
+        [253, 231, 37],
+      ];
+      const pickColor = (t: number): [number, number, number] => {
+        const stops = opts.colormap === "greenRed" ? stopsGreenRed : stopsViridis;
+        const n = stops.length;
+        const x = Math.min(1, Math.max(0, t)) * (n - 1);
+        const i0 = Math.floor(x);
+        const i1 = Math.min(n - 1, i0 + 1);
+        const tt = x - i0;
+        return lerpColor(stops[i0], stops[i1], tt);
+      };
+      const norm = (v: number) => {
+        const vv = Math.max(0, Math.min(v, vMax));
+        if (opts.scale === "linear") return vv / vMax;
+        return Math.log1p(vv) / Math.log1p(vMax);
+      };
+
+      heatmapCells.forEach((value, key) => {
+        if (!Number.isFinite(value) || value <= 0) return;
+        const [rs, cs] = key.split(",");
+        const r = Number(rs);
+        const c = Number(cs);
+        if (Number.isNaN(r) || Number.isNaN(c)) return;
+        if (r < 0 || r >= rows || c < 0 || c >= cols) return;
+        const t = Math.min(1, Math.max(0, norm(value)));
+        const [rr, gg, bb] = pickColor(t);
+        const a = opts.alphaMode === "fixed" ? 0.85 : Math.min(0.92, 0.08 + 0.84 * t);
+        const x = c * cellW;
+        const y = r * cellH;
+        ctx.fillStyle = `rgba(${rr},${gg},${bb},${a})`;
+        ctx.fillRect(x, y, cellW, cellH);
       });
-      if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
-        // 数据异常时直接跳过绘制
-      } else {
-        // 为了避免“1 和 2 就是从浅绿跳到红”，
-        // 给一个基础动态范围；当真实范围更大时，再按真实范围拉高到红色。
-        const rawSpan = maxVal - minVal;
-        const baseSpan = 10; // 基础跨度，可根据效果再微调
-        const span = rawSpan < baseSpan ? baseSpan : rawSpan;
-
-        const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
-        const lerpColor = (
-          c1: [number, number, number],
-          c2: [number, number, number],
-          t: number,
-        ): [number, number, number] => [
-          Math.round(lerp(c1[0], c2[0], t)),
-          Math.round(lerp(c1[1], c2[1], t)),
-          Math.round(lerp(c1[2], c2[2], t)),
-        ];
-
-        // 颜色锚点：
-        // 浅绿色 -> 绿色 -> 橙黄色 -> 红色
-        const cLightGreen: [number, number, number] = [187, 247, 208]; // #bbf7d0
-        const cGreen: [number, number, number] = [34, 197, 94]; // #22c55e
-        const cOrange: [number, number, number] = [249, 115, 22]; // #f97316
-        const cRed: [number, number, number] = [239, 68, 68]; // #ef4444
-
-        const colorForValue = (v: number): [number, number, number] => {
-          const tRaw = (v - minVal) / span;
-          const t = Math.min(1, Math.max(0, tRaw));
-          if (t < 1 / 3) {
-            // 0 - 1/3: 浅绿 -> 绿
-            const tt = t / (1 / 3);
-            return lerpColor(cLightGreen, cGreen, tt);
-          }
-          if (t < 2 / 3) {
-            // 1/3 - 2/3: 绿 -> 橙
-            const tt = (t - 1 / 3) / (1 / 3);
-            return lerpColor(cGreen, cOrange, tt);
-          }
-          // 2/3 - 1: 橙 -> 红
-          const tt = (t - 2 / 3) / (1 / 3);
-          return lerpColor(cOrange, cRed, tt);
-        };
-
-        heatmapCells.forEach((value, key) => {
-          const [rs, cs] = key.split(",");
-          const r = Number(rs);
-          const c = Number(cs);
-          if (Number.isNaN(r) || Number.isNaN(c)) return;
-          if (r < 0 || r >= rows || c < 0 || c >= cols) return;
-          const x = c * cellW;
-          const y = r * cellH;
-          const [rr, gg, bb] = colorForValue(value);
-          ctx.fillStyle = `rgba(${rr},${gg},${bb},0.9)`; // 固定透明度，主要用颜色表达强度
-          ctx.fillRect(x, y, cellW, cellH);
-        });
-      }
     }
 
     // linked hover（对侧面板联动的 hover，高亮但不覆盖当前 hover）
@@ -1535,7 +1867,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, heatmapCells, cellFillColors]);
+  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, heatmapCells, heatmapRender, cellFillColors]);
 
   useEffect(() => {
     draw();

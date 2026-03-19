@@ -15,7 +15,7 @@ from .routers.discovery import router as discovery_router
 
 from typing import List
 
-from .heatmap_store import record_heatmap_event, is_recording
+from .heatmap_store import record_heatmap_event, is_recording, update_current_dwell
 
 heatmap_clients: List[WebSocket] = []
 heatmap_lock = asyncio.Lock()
@@ -95,6 +95,10 @@ async def websocket_heatmap_events(ws: WebSocket):
         heatmap_clients.remove(ws)
 
 async def heatmap_broadcast(event: dict):
+  try:
+    update_current_dwell(event)
+  except Exception:
+    pass
   data = json.dumps(event)
   async with heatmap_lock:
     for ws in list(heatmap_clients):

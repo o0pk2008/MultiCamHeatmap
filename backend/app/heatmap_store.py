@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, Optional, Tuple
 
 import threading
 
@@ -11,6 +12,9 @@ from . import models
 _recording_floor_plans = set()  # floor_plan_id
 _recording_lock = threading.Lock()
 _db_write_lock = threading.Lock()
+_current_lock = threading.Lock()
+_current_dwell_sec: Dict[int, Dict[str, float]] = {}
+_current_last_by_source: Dict[int, Dict[str, Tuple[float, str]]] = {}
 
 
 def set_recording(floor_plan_id: int, enabled: bool) -> None:
@@ -60,8 +64,7 @@ def record_heatmap_event_sync(event: Dict[str, Any]) -> None:
 
     ts = _to_float_or_none(event.get("ts"))
     if ts is None:
-        # 缺失 ts 时用当前事件循环时间（近似）
-        ts = asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0.0
+        ts = time.time()
 
     camera_id = _to_int_or_none(event.get("camera_id"))
     virtual_view_id = _to_int_or_none(event.get("virtual_view_id"))
@@ -108,3 +111,49 @@ async def record_heatmap_event(event: Dict[str, Any]) -> None:
         # 避免 "Task exception was never retrieved"
         return
 
+
+def reset_current_dwell(floor_plan_id: int) -> None:
+    with _current_lock:
+        _current_dwell_sec.pop(int(floor_plan_id), None)
+        _current_last_by_source.pop(int(floor_plan_id), None)
+
+
+def update_current_dwell(event: Dict[str, Any], max_dt_sec: float = 2.0) -> None:
+    floor_plan_id = _to_int_or_none(event.get("floor_plan_id"))
+    floor_row = _to_int_or_none(event.get("floor_row"))
+    floor_col = _to_int_or_none(event.get("floor_col"))
+    if floor_plan_id is None or floor_row is None or floor_col is None:
+        return
+
+    ts = _to_float_or_none(event.get("ts"))
+    if ts is None:
+        ts = time.time()
+
+    vv_id = _to_int_or_none(event.get("virtual_view_id"))
+    cam_id = _to_int_or_none(event.get("camera_id"))
+    if vv_id is not None:
+        source_key = f"virtual:{vv_id}"
+    elif cam_id is not None:
+        source_key = f"camera:{cam_id}"
+    else:
+        source_key = "unknown"
+
+    cell_key = f"{floor_row},{floor_col}"
+
+    with _current_lock:
+        last_map = _current_last_by_source.setdefault(int(floor_plan_id), {})
+        dwell_map = _current_dwell_sec.setdefault(int(floor_plan_id), {})
+        prev = last_map.get(source_key)
+        if prev is not None:
+            prev_ts, prev_cell = prev
+            dt = ts - prev_ts
+            if dt > 0:
+                dt = min(float(dt), float(max_dt_sec))
+                dwell_map[prev_cell] = float(dwell_map.get(prev_cell, 0.0) + dt)
+        last_map[source_key] = (float(ts), cell_key)
+
+
+def get_current_dwell(floor_plan_id: int) -> Dict[str, float]:
+    with _current_lock:
+        m = _current_dwell_sec.get(int(floor_plan_id), {})
+        return dict(m)

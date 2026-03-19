@@ -2,6 +2,7 @@ import asyncio
 import random
 from typing import Dict, Tuple, List
 import json
+import time
 
 from . import models
 from .db import SessionLocal
@@ -171,7 +172,7 @@ class HeatmapAnalyzer:
                         "floor_col": c,
                         "camera_id": None,
                         "virtual_view_id": None,
-                        "ts": asyncio.get_event_loop().time(),
+                        "ts": time.time(),
                     }
                     try:
                         await heatmap_broadcast(event)
@@ -271,7 +272,7 @@ class HeatmapAnalyzer:
                             "virtual_view_id": vv_real_id,
                             "camera_row": cam_row,
                             "camera_col": cam_col,
-                            "ts": asyncio.get_event_loop().time(),
+                            "ts": time.time(),
                         }
                         try:
                             from .main import heatmap_broadcast
@@ -297,4 +298,3 @@ class HeatmapAnalyzer:
 
 
 analyzer = HeatmapAnalyzer()
-

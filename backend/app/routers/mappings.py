@@ -1,4 +1,4 @@
-from typing import List
+from typing import Dict, List, Tuple
 import os
 import uuid
 import asyncio
@@ -11,7 +11,7 @@ from sqlalchemy import func
 from .. import models, schemas
 from ..db import get_db
 from ..heatmap_analysis import analyzer
-from ..heatmap_store import set_recording, is_recording
+from ..heatmap_store import set_recording, is_recording, get_current_dwell, reset_current_dwell
 
 heatmap_running_floor_plans = set()  # floor_plan_id 集合
 
@@ -284,6 +284,7 @@ async def start_heatmap_analysis(
         raise HTTPException(status_code=404, detail="Floor plan not found")
     heatmap_running_floor_plans.add(floor_plan_id)
     set_recording(floor_plan_id, record_history)
+    reset_current_dwell(floor_plan_id)
     # 通过 HeatmapAnalyzer 启动/管理后台分析任务
     analyzer.start_for_floor_plan(floor_plan_id)
 
@@ -311,6 +312,109 @@ async def get_heatmap_status(floor_plan_id: int):
         "running": fp_id in heatmap_running_floor_plans,
         "record_history": is_recording(fp_id),
     }
+
+@router.post("/heatmap/reset-current")
+async def reset_heatmap_current(floor_plan_id: int):
+    reset_current_dwell(int(floor_plan_id))
+    return {"status": "ok", "floor_plan_id": int(floor_plan_id)}
+
+
+@router.get(
+    "/heatmap/current-dwell",
+    response_model=List[schemas.HeatmapDwellCellOut],
+)
+def get_heatmap_current_dwell(floor_plan_id: int) -> List[dict]:
+    m = get_current_dwell(int(floor_plan_id))
+    out: List[dict] = []
+    for key, sec in m.items():
+        try:
+            rs, cs = key.split(",", 1)
+            r = int(rs)
+            c = int(cs)
+        except Exception:
+            continue
+        out.append({"floor_row": r, "floor_col": c, "dwell_sec": float(sec)})
+    return out
+
+
+@router.get(
+    "/heatmap/history-dwell",
+    response_model=List[schemas.HeatmapDwellCellOut],
+)
+def get_heatmap_history_dwell(
+    floor_plan_id: int,
+    start_ts: float,
+    end_ts: float,
+    max_dt_sec: float = 2.0,
+    db: Session = Depends(get_db),
+) -> List[dict]:
+    """
+    按时间段查询热力图历史统计（按 floor cell 聚合“估算停留时长(秒)”）。
+    - start_ts / end_ts: Unix 时间戳（秒）
+    """
+    if start_ts >= end_ts:
+        raise HTTPException(status_code=400, detail="start_ts must be < end_ts")
+    if max_dt_sec <= 0:
+        raise HTTPException(status_code=400, detail="max_dt_sec must be > 0")
+    if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+
+    rows = (
+        db.query(
+            models.HeatmapEvent.ts,
+            models.HeatmapEvent.floor_row,
+            models.HeatmapEvent.floor_col,
+            models.HeatmapEvent.camera_id,
+            models.HeatmapEvent.virtual_view_id,
+        )
+        .filter(
+            models.HeatmapEvent.floor_plan_id == floor_plan_id,
+            models.HeatmapEvent.ts >= start_ts,
+            models.HeatmapEvent.ts < end_ts,
+        )
+        .order_by(models.HeatmapEvent.ts.asc(), models.HeatmapEvent.id.asc())
+        .all()
+    )
+
+    last_by_source: Dict[str, Tuple[float, str]] = {}
+    dwell: Dict[str, float] = {}
+    cap = float(max_dt_sec)
+
+    for ts, r, c, cam_id, vv_id in rows:
+        try:
+            tsf = float(ts)
+        except Exception:
+            continue
+
+        if vv_id is not None:
+            source_key = f"virtual:{int(vv_id)}"
+        elif cam_id is not None:
+            source_key = f"camera:{int(cam_id)}"
+        else:
+            source_key = "unknown"
+
+        cell_key = f"{int(r)},{int(c)}"
+        prev = last_by_source.get(source_key)
+        if prev is not None:
+            prev_ts, prev_cell = prev
+            dt = tsf - prev_ts
+            if dt > 0:
+                dt = min(float(dt), cap)
+                dwell[prev_cell] = float(dwell.get(prev_cell, 0.0) + dt)
+        last_by_source[source_key] = (tsf, cell_key)
+
+    out: List[dict] = []
+    for key, sec in dwell.items():
+        try:
+            rs, cs = key.split(",", 1)
+            rr = int(rs)
+            cc = int(cs)
+        except Exception:
+            continue
+        if sec <= 0:
+            continue
+        out.append({"floor_row": rr, "floor_col": cc, "dwell_sec": float(sec)})
+    return out
 
 
 @router.get(
