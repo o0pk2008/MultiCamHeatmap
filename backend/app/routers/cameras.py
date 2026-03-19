@@ -3,7 +3,7 @@ from typing import List
 import time
 
 import cv2
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -301,6 +301,42 @@ def preview_shared_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session 
             manager.remove_plain_subscriber(view_id)
 
     return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+
+@router.get("/{camera_id}/virtual-views/{view_id}/snapshot.jpg")
+def snapshot_virtual_view(camera_id: int, view_id: int, db: Session = Depends(get_db)):
+    """
+    返回单张 JPEG 快照（短连接），用于卡片缩略图轮询刷新。
+    复用 VirtualViewInferenceManager 的最新缓存帧（plain 模式，不做 YOLO）。
+    """
+    cam = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+
+    try:
+        manager.ensure_running_plain(view_id)
+    except Exception:
+        pass
+
+    # 尝试短暂等待首帧，避免刚创建时拿不到缓存导致缩略图空白
+    jpg = None
+    for _ in range(20):  # up to ~1s
+        fr = manager.get_latest(view_id)
+        if fr is not None and fr.jpeg:
+            jpg = fr.jpeg
+            break
+        time.sleep(0.05)
+
+    if not jpg:
+        return Response(status_code=204)
+    return Response(content=jpg, media_type="image/jpeg")
 
 
 @router.get("/{camera_id}/virtual-views/{view_id}/analyzed.mjpeg")

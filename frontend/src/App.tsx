@@ -3171,11 +3171,19 @@ const PanoramaViewsView: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [creating, setCreating] = useState(false);
   const [editMode, setEditMode] = useState<Record<number, boolean>>({});
+  // 卡片是否开启“实时预览”（默认关闭：只显示缩略图）
+  const [livePreview, setLivePreview] = useState<Record<number, boolean>>({});
+  // 缩略图 objectURL（预取 blob 后再替换，避免闪烁）
+  const [snapshotObjUrl, setSnapshotObjUrl] = useState<Record<number, string>>({});
+  // 全局缩略图刷新周期（ms）
+  const [snapshotRefreshMs, setSnapshotRefreshMs] = useState<number>(3000);
   // 用于强制 MJPEG 预览重连（保存参数后刷新画面）
   const [previewNonce, setPreviewNonce] = useState<Record<number, number>>({});
   // 为了避免频繁保存导致浏览器保留旧 MJPEG 连接，这里在重连时先短暂卸载 <img>
   const [previewDisabled, setPreviewDisabled] = useState<Record<number, boolean>>({});
   const previewRefreshTimersRef = useRef<Record<number, number>>({});
+  const snapshotPollIdxRef = useRef(0);
+  const snapshotInFlightRef = useRef<Record<number, boolean>>({});
 
   const loadCameras = useCallback(async () => {
     const res = await fetch(`${API_BASE}/api/cameras/`);
@@ -3217,6 +3225,78 @@ const PanoramaViewsView: React.FC = () => {
   useEffect(() => {
     loadViews();
   }, [loadViews]);
+
+  const refreshSnapshot = useCallback(
+    async (v: CameraVirtualView) => {
+      if (livePreview[v.id]) return;
+      if (snapshotInFlightRef.current[v.id]) return;
+      snapshotInFlightRef.current[v.id] = true;
+      const snapshotUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/snapshot.jpg?t=${Date.now()}`;
+      try {
+        const res = await fetch(snapshotUrl, { cache: "no-store" });
+        if (!res.ok) return;
+        if (res.status === 204) return;
+        const blob = await res.blob();
+        const objUrl = URL.createObjectURL(blob);
+
+        // 先预解码，确保新图就绪后再替换，避免闪白
+        await new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve();
+          img.onerror = () => resolve();
+          img.src = objUrl;
+        });
+
+        setSnapshotObjUrl((old) => {
+          const prev = old[v.id];
+          const next = { ...old, [v.id]: objUrl };
+          if (prev && prev !== objUrl) {
+            try {
+              URL.revokeObjectURL(prev);
+            } catch {}
+          }
+          return next;
+        });
+      } catch {
+        // ignore
+      } finally {
+        snapshotInFlightRef.current[v.id] = false;
+      }
+    },
+    [livePreview],
+  );
+
+  // 初次进入/视窗列表变化：先拉一轮缩略图
+  useEffect(() => {
+    views.forEach((v) => {
+      if (!livePreview[v.id]) void refreshSnapshot(v);
+    });
+  }, [views, livePreview, refreshSnapshot]);
+
+  // 缩略图轮询：错峰刷新（整体一轮约 3 秒）
+  useEffect(() => {
+    if (views.length === 0) return;
+    const tickMs = Math.max(200, Math.floor(snapshotRefreshMs / Math.max(1, views.length)));
+    const t = window.setInterval(() => {
+      const nonLive = views.filter((v) => !livePreview[v.id]);
+      if (nonLive.length === 0) return;
+      const idx = snapshotPollIdxRef.current % nonLive.length;
+      snapshotPollIdxRef.current = (snapshotPollIdxRef.current + 1) % 1_000_000;
+      void refreshSnapshot(nonLive[idx]);
+    }, tickMs);
+    return () => window.clearInterval(t);
+  }, [views, livePreview, refreshSnapshot, snapshotRefreshMs]);
+
+  // 组件卸载时回收 objectURL，避免内存泄漏
+  useEffect(() => {
+    return () => {
+      try {
+        Object.values(snapshotObjUrl).forEach((u) => {
+          if (typeof u === "string" && u) URL.revokeObjectURL(u);
+        });
+      } catch {}
+    };
+  }, [snapshotObjUrl]);
 
   const bumpPreview = (viewId: number) => {
     setPreviewNonce((m) => ({ ...m, [viewId]: Date.now() }));
@@ -3321,6 +3401,22 @@ const PanoramaViewsView: React.FC = () => {
       delete next[viewId];
       return next;
     });
+    setLivePreview((m) => {
+      const next = { ...m };
+      delete next[viewId];
+      return next;
+    });
+    setSnapshotObjUrl((m) => {
+      const next = { ...m };
+      const u = next[viewId];
+      delete next[viewId];
+      if (u) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {}
+      }
+      return next;
+    });
     setEditMode((m) => {
       const next = { ...m };
       delete next[viewId];
@@ -3368,7 +3464,22 @@ const PanoramaViewsView: React.FC = () => {
       <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-2 flex items-center justify-between">
           <div className="text-sm font-semibold text-slate-800">已创建视窗</div>
-          <div className="text-[11px] text-slate-500">共 {views.length} 个</div>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1 text-[11px] text-slate-500">
+              <span>缩略图刷新</span>
+              <select
+                className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px]"
+                value={snapshotRefreshMs}
+                onChange={(e) => setSnapshotRefreshMs(Number(e.target.value) || 3000)}
+                title="缩略图刷新频率（错峰轮询，不会同一时间全部刷新）"
+              >
+                <option value={1000}>1s</option>
+                <option value={3000}>3s</option>
+                <option value={5000}>5s</option>
+              </select>
+            </div>
+            <div className="text-[11px] text-slate-500">共 {views.length} 个</div>
+          </div>
         </div>
         {loading ? (
           <div className="text-xs text-slate-500">加载中…</div>
@@ -3380,7 +3491,9 @@ const PanoramaViewsView: React.FC = () => {
               const previewUrl = `${API_BASE}/api/cameras/${v.camera_id}/virtual-views/${v.id}/preview_shared.mjpeg`;
               const nonce = previewNonce[v.id];
               const previewUrlWithNonce = previewUrl ? (nonce ? `${previewUrl}?t=${nonce}` : previewUrl) : "";
+              const snapObj = snapshotObjUrl[v.id] || "";
               const canEdit = !!editMode[v.id];
+              const isLive = !!livePreview[v.id];
               return (
                 <div key={v.id} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
                 <div className="mb-2 flex items-start justify-between gap-2">
@@ -3413,9 +3526,30 @@ const PanoramaViewsView: React.FC = () => {
                       </button>
                     )}
                     <button
+                      className={`rounded border px-2 py-1 text-xs font-medium hover:bg-slate-50 ${
+                        isLive ? "border-amber-300 bg-amber-50 text-amber-800" : "border-slate-300 bg-white text-slate-700"
+                      }`}
+                      onClick={() => {
+                        setLivePreview((old) => {
+                          const next = { ...old, [v.id]: !old[v.id] };
+                          return next;
+                        });
+                        // 开启实时后，强制让 MJPEG 使用新 nonce（避免复用旧连接）
+                        if (!isLive) bumpPreview(v.id);
+                      }}
+                      title={isLive ? "停止实时预览（回到缩略图）" : "开始实时预览"}
+                    >
+                      {isLive ? "停止预览" : "开始预览"}
+                    </button>
+                    <button
                       className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
                       onClick={() => {
-                        forceRefreshPreview(v.id);
+                        // 实时：强制重连；缩略图：立即刷新一张
+                        if (isLive) {
+                          forceRefreshPreview(v.id);
+                        } else {
+                          void refreshSnapshot(v);
+                        }
                       }}
                     >
                       刷新
@@ -3432,7 +3566,8 @@ const PanoramaViewsView: React.FC = () => {
                 <div className="flex gap-3">
                   {/* 左侧：预览 */}
                   <div className="w-64 shrink-0 overflow-hidden rounded border border-slate-200 bg-slate-100">
-                    {previewUrlWithNonce && !previewDisabled[v.id] ? (
+                    {isLive ? (
+                      previewUrlWithNonce && !previewDisabled[v.id] ? (
                       <img
                         key={`${v.id}-${nonce}`}
                         src={previewUrlWithNonce}
@@ -3440,10 +3575,25 @@ const PanoramaViewsView: React.FC = () => {
                         className="h-48 w-full object-contain"
                         draggable={false}
                       />
+                      ) : (
+                        <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
+                          {previewDisabled[v.id] ? "重连中…" : "无预览"}
+                        </div>
+                      )
                     ) : (
-                      <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
-                        {previewDisabled[v.id] ? "重连中…" : "无预览"}
-                      </div>
+                      snapObj ? (
+                        <img
+                          key={`${v.id}-snap`}
+                          src={snapObj}
+                          alt={`virtual-view-snap-${v.id}`}
+                          className="h-48 w-full object-contain"
+                          draggable={false}
+                        />
+                      ) : (
+                        <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
+                          暂无缩略图
+                        </div>
+                      )
                     )}
                   </div>
 
