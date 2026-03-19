@@ -2233,6 +2233,11 @@ const MappingView: React.FC = () => {
   const [bindCameraOptions, setBindCameraOptions] = useState<BindCameraOption[]>([]);
   const [bindFloorPlanId, setBindFloorPlanId] = useState<number | "">("");
   const [bindCameraId, setBindCameraId] = useState<string>("");
+  const [bindVvSnapshotRefreshMs, setBindVvSnapshotRefreshMs] = useState<number>(3000);
+  const [bindVvSnapshotObjUrl, setBindVvSnapshotObjUrl] = useState<string>("");
+  const bindVvSnapshotTimerRef = useRef<number | null>(null);
+  const bindVvSnapshotInFlightRef = useRef<boolean>(false);
+  const bindVvSnapshotViewIdRef = useRef<number | null>(null);
   // 左侧平面图网格设置（可本地修改，保存时写回平面图）
   const [bindGridRows, setBindGridRows] = useState("");
   const [bindGridCols, setBindGridCols] = useState("");
@@ -2474,6 +2479,36 @@ const MappingView: React.FC = () => {
     loadBindCameras();
   }, []);
 
+  const refreshBindVirtualSnapshot = useCallback(async (view: CameraVirtualView) => {
+    if (bindVvSnapshotInFlightRef.current) return;
+    bindVvSnapshotInFlightRef.current = true;
+    const snapshotUrl = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/snapshot.jpg?t=${Date.now()}`;
+    try {
+      const res = await fetch(snapshotUrl, { cache: "no-store" });
+      if (!res.ok) return;
+      if (res.status === 204) return;
+      const blob = await res.blob();
+      const objUrl = URL.createObjectURL(blob);
+      await new Promise<void>((resolve) => {
+        const img = new Image();
+        img.onload = () => resolve();
+        img.onerror = () => resolve();
+        img.src = objUrl;
+      });
+      setBindVvSnapshotObjUrl((prev) => {
+        if (prev && prev !== objUrl) {
+          try {
+            URL.revokeObjectURL(prev);
+          } catch {}
+        }
+        return objUrl;
+      });
+    } catch {
+    } finally {
+      bindVvSnapshotInFlightRef.current = false;
+    }
+  }, []);
+
   // 切换摄像头（含 virtual PTZ）时重置 hover 等状态
   useEffect(() => {
     setVpHover(null);
@@ -2483,6 +2518,62 @@ const MappingView: React.FC = () => {
     setLinkedFpHoverCell(null);
     setLinkedVpHoverCell(null);
   }, [bindCameraId]);
+
+  useEffect(() => {
+    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    const viewId = mappingTab === "bind" && opt?.kind === "virtual" ? opt.view.id : null;
+    if (bindVvSnapshotViewIdRef.current !== viewId) {
+      bindVvSnapshotViewIdRef.current = viewId;
+      setBindVvSnapshotObjUrl((prev) => {
+        if (prev) {
+          try {
+            URL.revokeObjectURL(prev);
+          } catch {}
+        }
+        return "";
+      });
+    }
+  }, [bindCameraId, bindCameraOptions, mappingTab]);
+
+  useEffect(() => {
+    if (bindVvSnapshotTimerRef.current) {
+      window.clearInterval(bindVvSnapshotTimerRef.current);
+      bindVvSnapshotTimerRef.current = null;
+    }
+    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    if (mappingTab !== "bind" || !opt || opt.kind !== "virtual") return;
+    const view = opt.view;
+    void refreshBindVirtualSnapshot(view);
+    const t = window.setInterval(() => {
+      void refreshBindVirtualSnapshot(view);
+    }, Math.max(500, bindVvSnapshotRefreshMs));
+    bindVvSnapshotTimerRef.current = t;
+    return () => {
+      if (bindVvSnapshotTimerRef.current === t) {
+        window.clearInterval(t);
+        bindVvSnapshotTimerRef.current = null;
+      } else {
+        window.clearInterval(t);
+      }
+    };
+  }, [bindCameraId, bindCameraOptions, bindVvSnapshotRefreshMs, mappingTab, refreshBindVirtualSnapshot]);
+
+  useEffect(() => {
+    return () => {
+      if (bindVvSnapshotTimerRef.current) {
+        window.clearInterval(bindVvSnapshotTimerRef.current);
+        bindVvSnapshotTimerRef.current = null;
+      }
+      setBindVvSnapshotObjUrl((prev) => {
+        if (prev) {
+          try {
+            URL.revokeObjectURL(prev);
+          } catch {}
+        }
+        return "";
+      });
+    };
+  }, []);
 
   // hover 联动：右侧摄像头格子 hover -> 左侧平面图格子 hover
   useEffect(() => {
@@ -2891,9 +2982,8 @@ const MappingView: React.FC = () => {
                         </PanZoomViewport>
                       );
                     }
-                    // virtual PTZ：用 MJPEG 预览
+                    // virtual PTZ：轮询 snapshot.jpg 预览
                     const view = opt.view;
-                    const url = `${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/preview_shared.mjpeg`;
                     const aspectW = view.out_w || 960;
                     const aspectH = view.out_h || 540;
 
@@ -2933,6 +3023,20 @@ const MappingView: React.FC = () => {
                             <circle cx="7" cy="19.5" r="1.5" fill="currentColor" />
                           </svg>
                         </button>
+                        <div className="flex items-center gap-1 px-1 text-[11px] text-slate-600">
+                          <span className="text-slate-500">刷新</span>
+                          <select
+                            className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px]"
+                            value={bindVvSnapshotRefreshMs}
+                            onChange={(e) => setBindVvSnapshotRefreshMs(Number(e.target.value) || 3000)}
+                            title="预览刷新频率（轮询 snapshot.jpg）"
+                          >
+                            <option value={1000}>1s</option>
+                            <option value={3000}>3s</option>
+                            <option value={5000}>5s</option>
+                            <option value={10000}>10s</option>
+                          </select>
+                        </div>
                       </div>
                     );
 
@@ -3302,13 +3406,19 @@ const MappingView: React.FC = () => {
                             onPointerDownWorld={onPointerDownWorld}
                             onPointerUpWorld={onPointerUpWorld}
                           >
-                            <img
-                              src={url}
-                              alt={`virtual-view-${view.id}`}
-                              draggable={false}
-                              onDragStart={(e) => e.preventDefault()}
-                              className="h-full w-full object-contain"
-                            />
+                            {bindVvSnapshotObjUrl ? (
+                              <img
+                                src={bindVvSnapshotObjUrl}
+                                alt={`virtual-view-${view.id}`}
+                                draggable={false}
+                                onDragStart={(e) => e.preventDefault()}
+                                className="h-full w-full object-contain"
+                              />
+                            ) : (
+                              <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
+                                加载中…
+                              </div>
+                            )}
                           </PanZoomViewport>
                         </div>
 
