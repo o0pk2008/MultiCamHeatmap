@@ -375,6 +375,7 @@ const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => 
             gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
             gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
             showGrid={showGrid}
+            backgroundColor="white"
             heatmapCells={heatmapCells}
             poiCells={showPeople && mode === "current" ? poiCells : undefined}
             heatmapRender={{
@@ -528,6 +529,7 @@ const SharePeoplePage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
             gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
             gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
             showGrid={showGrid}
+            backgroundColor="white"
             poiCells={poiCells}
             className="h-full w-full"
           />
@@ -1731,6 +1733,7 @@ const HeatmapView: React.FC = () => {
                 gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showHeatmapGrid}
+                backgroundColor="white"
                 heatmapCells={heatmapCells}
                 poiCells={showPeopleOverlay ? poiCells : undefined}
                 heatmapRender={{
@@ -2065,6 +2068,7 @@ const PeoplePositionView: React.FC = () => {
                 gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showGrid}
+                backgroundColor="white"
                 poiCells={poiCells}
                 className="w-full h-full"
               />
@@ -2439,6 +2443,7 @@ type FloorPlanCanvasProps = {
   gridCols: number;
   className?: string;
   showGrid?: boolean;
+  backgroundColor?: string;
   selectedCell?: { row: number; col: number } | null;
   onCellClick?: (cell: { row: number; col: number } | null) => void;
   onCellHover?: (cell: { row: number; col: number } | null) => void;
@@ -2463,6 +2468,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     gridCols,
     className = "",
     showGrid = true,
+    backgroundColor,
     selectedCell = null,
     onCellClick,
     onCellHover,
@@ -2546,7 +2552,12 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
 
     // 先清空画布，避免拖拽/缩放时出现“残影”
     ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, cw, ch);
+    if (backgroundColor) {
+      ctx.fillStyle = backgroundColor;
+      ctx.fillRect(0, 0, cw, ch);
+    } else {
+      ctx.clearRect(0, 0, cw, ch);
+    }
 
     ctx.save();
     ctx.translate(pan.x, pan.y);
@@ -2558,7 +2569,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     const cols = Math.max(1, gridCols);
     // 网格线（可显示/隐藏）
     if (showGrid) {
-      ctx.strokeStyle = "rgba(14,165,233,0.55)";
+      ctx.strokeStyle = "rgba(14,165,233,0.3)";
       ctx.lineWidth = 1 / fitScale;
       for (let r = 0; r <= rows; r++) {
         const y = (ih * r) / rows;
