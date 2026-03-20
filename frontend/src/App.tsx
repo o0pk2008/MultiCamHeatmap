@@ -79,6 +79,8 @@ type HeatmapSource = {
   virtual_view_name?: string | null;
 };
 
+type Footfall = { row: number; col: number; ts: number };
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
   const [shareRoute, setShareRoute] = useState<ShareRoute>(() => parseShareRoute(window.location.hash));
@@ -192,7 +194,7 @@ const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => 
   const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
   const [statusText, setStatusText] = useState<string>("");
   const wsRef = useRef<WebSocket | null>(null);
-  const lastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const lastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
   const sourceStaleMs = 900;
 
   useEffect(() => {
@@ -292,13 +294,13 @@ const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => 
   const recomputePeople = useCallback(() => {
     const now = Date.now();
     const counts = new Map<string, number>();
-    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
-    lastSeenBySourceRef.current.forEach((v, k) => {
+    const nextByEntity = new Map<string, { tsMs: number; cellKey: string }>();
+    lastSeenByEntityRef.current.forEach((v, k) => {
       if (now - v.tsMs > sourceStaleMs) return;
-      nextBySource.set(k, v);
+      nextByEntity.set(k, v);
       counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
     });
-    lastSeenBySourceRef.current = nextBySource;
+    lastSeenByEntityRef.current = nextByEntity;
     setPoiCells(counts);
   }, [sourceStaleMs]);
 
@@ -306,11 +308,11 @@ const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => 
     if (!showPeople || mode !== "current" || !Number.isFinite(floorPlanId) || floorPlanId <= 0) {
       wsRef.current?.close();
       wsRef.current = null;
-      lastSeenBySourceRef.current = new Map();
+      lastSeenByEntityRef.current = new Map();
       setPoiCells(new Map());
       return;
     }
-    lastSeenBySourceRef.current = new Map();
+    lastSeenByEntityRef.current = new Map();
     setPoiCells(new Map());
     const ws = new WebSocket(
       `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
@@ -328,7 +330,9 @@ const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => 
             : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
               ? `camera:${Number(evt.camera_id)}`
               : "unknown";
-        lastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+        const trackId = evt.track_id != null ? Number(evt.track_id) : NaN;
+        const entityKey = Number.isFinite(trackId) ? `${sourceKey}:t${trackId}` : sourceKey;
+        lastSeenByEntityRef.current.set(entityKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
         recomputePeople();
       } catch {}
     };
@@ -405,7 +409,7 @@ const SharePeoplePage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
   const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
   const [running, setRunning] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const lastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const lastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
   const sourceStaleMs = 900;
 
   useEffect(() => {
@@ -428,13 +432,13 @@ const SharePeoplePage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
   const recompute = useCallback(() => {
     const now = Date.now();
     const counts = new Map<string, number>();
-    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
-    lastSeenBySourceRef.current.forEach((v, k) => {
+    const nextByEntity = new Map<string, { tsMs: number; cellKey: string }>();
+    lastSeenByEntityRef.current.forEach((v, k) => {
       if (now - v.tsMs > sourceStaleMs) return;
-      nextBySource.set(k, v);
+      nextByEntity.set(k, v);
       counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
     });
-    lastSeenBySourceRef.current = nextBySource;
+    lastSeenByEntityRef.current = nextByEntity;
     setPoiCells(counts);
   }, [sourceStaleMs]);
 
@@ -450,7 +454,9 @@ const SharePeoplePage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
           : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
             ? `camera:${Number(evt.camera_id)}`
             : "unknown";
-      lastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+      const trackId = evt.track_id != null ? Number(evt.track_id) : NaN;
+      const entityKey = Number.isFinite(trackId) ? `${sourceKey}:t${trackId}` : sourceKey;
+      lastSeenByEntityRef.current.set(entityKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
       recompute();
     },
     [floorPlanId, recompute],
@@ -628,7 +634,7 @@ const RealtimeView: React.FC = () => {
 const MappedCamerasGrid: React.FC<{
   sources: HeatmapSource[];
   analyzing: boolean;
-  vvFootfalls: Record<number, { row: number; col: number; ts: number }>;
+  vvFootfalls: Record<number, Footfall[]>;
 }> = ({ sources, analyzing, vvFootfalls }) => {
   const slotCount = 6;
   const sourceKeyOf = useCallback((s: HeatmapSource) => {
@@ -899,7 +905,7 @@ const MappedCamerasGrid: React.FC<{
                             <VirtualViewGridOverlay
                               view={vvMetaById.get(src.virtual_view_id)!}
                               cfg={vvGridConfigs[src.virtual_view_id]}
-                              highlightCell={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null}
+                              highlightCells={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null}
                             />
                           ) : null}
                         </div>
@@ -1066,14 +1072,14 @@ const HeatmapView: React.FC = () => {
     toDatetimeLocal(new Date(Date.now() - 10 * 60 * 1000)),
   );
   const [recordHistory, setRecordHistory] = useState(true);
-  const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
+  const [vvFootfalls, setVvFootfalls] = useState<Record<number, Footfall[]>>({});
   const [showPeopleOverlay, setShowPeopleOverlay] = useState(false);
   const showPeopleOverlayRef = useRef(false);
   const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
-  const poiLastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const poiLastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
   const poiSourceStaleMs = 900;
   const wsRef = useRef<WebSocket | null>(null);
-  const lastSampleBySourceRef = useRef<Map<string, { ts: number; cellKey: string }>>(new Map());
+  const lastSampleByEntityRef = useRef<Map<string, { ts: number; cellKey: string }>>(new Map());
   const lastDecayAtRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1083,7 +1089,7 @@ const HeatmapView: React.FC = () => {
   useEffect(() => {
     showPeopleOverlayRef.current = showPeopleOverlay;
     if (!showPeopleOverlay) {
-      poiLastSeenBySourceRef.current = new Map();
+      poiLastSeenByEntityRef.current = new Map();
       setPoiCells(new Map());
     }
   }, [showPeopleOverlay]);
@@ -1091,13 +1097,13 @@ const HeatmapView: React.FC = () => {
   const recomputePoiOverlay = useCallback(() => {
     const now = Date.now();
     const counts = new Map<string, number>();
-    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
-    poiLastSeenBySourceRef.current.forEach((v, k) => {
+    const nextByEntity = new Map<string, { tsMs: number; cellKey: string }>();
+    poiLastSeenByEntityRef.current.forEach((v, k) => {
       if (now - v.tsMs > poiSourceStaleMs) return;
-      nextBySource.set(k, v);
+      nextByEntity.set(k, v);
       counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
     });
-    poiLastSeenBySourceRef.current = nextBySource;
+    poiLastSeenByEntityRef.current = nextByEntity;
     setPoiCells(counts);
   }, [poiSourceStaleMs]);
 
@@ -1181,11 +1187,13 @@ const HeatmapView: React.FC = () => {
         : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
           ? `camera:${Number(evt.camera_id)}`
           : "unknown";
+    const trackId = evt.track_id != null ? Number(evt.track_id) : NaN;
+    const entityKey = Number.isFinite(trackId) ? `${sourceKey}:t${trackId}` : sourceKey;
 
     const tsRaw = Number(evt.ts);
     const ts = Number.isFinite(tsRaw) ? tsRaw : performance.now() / 1000;
 
-    const prev = lastSampleBySourceRef.current.get(sourceKey);
+    const prev = lastSampleByEntityRef.current.get(entityKey);
     if (prev) {
       const dt = Math.max(0, Math.min(ts - prev.ts, 2));
       if (dt > 0) {
@@ -1196,7 +1204,7 @@ const HeatmapView: React.FC = () => {
         });
       }
     }
-    lastSampleBySourceRef.current.set(sourceKey, { ts, cellKey });
+    lastSampleByEntityRef.current.set(entityKey, { ts, cellKey });
 
     if (
       evt.virtual_view_id != null &&
@@ -1208,10 +1216,14 @@ const HeatmapView: React.FC = () => {
       const rr = Number(evt.camera_row);
       const cc = Number(evt.camera_col);
       if (Number.isFinite(rr) && Number.isFinite(cc)) {
-        setVvFootfalls((old) => ({
-          ...old,
-          [vvId]: { row: rr, col: cc, ts: Date.now() },
-        }));
+        const now = Date.now();
+        setVvFootfalls((old) => {
+          const prev = Array.isArray(old[vvId]) ? old[vvId] : [];
+          const fresh = prev.filter((p) => now - p.ts <= 1200);
+          const withoutSame = fresh.filter((p) => !(p.row === rr && p.col === cc));
+          const nextList = [...withoutSame, { row: rr, col: cc, ts: now }].slice(-6);
+          return { ...old, [vvId]: nextList };
+        });
       }
     }
   }, []);
@@ -1230,7 +1242,9 @@ const HeatmapView: React.FC = () => {
           : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
             ? `camera:${Number(evt.camera_id)}`
             : "unknown";
-      poiLastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+      const trackId = evt.track_id != null ? Number(evt.track_id) : NaN;
+      const entityKey = Number.isFinite(trackId) ? `${sourceKey}:t${trackId}` : sourceKey;
+      poiLastSeenByEntityRef.current.set(entityKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
       recomputePoiOverlay();
     },
     [heatmapDataMode, recomputePoiOverlay],
@@ -1249,7 +1263,7 @@ const HeatmapView: React.FC = () => {
         m.set(`${r},${c}`, v);
       });
       setHeatmapCells(m);
-      lastSampleBySourceRef.current = new Map();
+      lastSampleByEntityRef.current = new Map();
     } catch {
       // ignore
     }
@@ -1284,7 +1298,7 @@ const HeatmapView: React.FC = () => {
         m.set(`${r},${c}`, v);
       });
       setHeatmapCells(m);
-      lastSampleBySourceRef.current = new Map();
+      lastSampleByEntityRef.current = new Map();
     } catch {
       alert("加载历史失败");
     }
@@ -1307,7 +1321,7 @@ const HeatmapView: React.FC = () => {
           if (wsRef.current) return;
           setHeatmapDataMode("live");
           void loadCurrentDwellFromBackend(fpId);
-          lastSampleBySourceRef.current = new Map();
+          lastSampleByEntityRef.current = new Map();
           const ws = new WebSocket(
             `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
               /:\d+$/,
@@ -1474,7 +1488,7 @@ const HeatmapView: React.FC = () => {
             className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
             onClick={async () => {
               setHeatmapCells(new Map());
-              lastSampleBySourceRef.current = new Map();
+              lastSampleByEntityRef.current = new Map();
               if (selectedFloorPlanId) {
                 try {
                   await fetch(`${API_BASE}/api/heatmap/reset-current?floor_plan_id=${selectedFloorPlanId}`, {
@@ -1498,7 +1512,7 @@ const HeatmapView: React.FC = () => {
                 if (!analyzing) {
                   setHeatmapDataMode("live");
                   setHeatmapCells(new Map());
-                  lastSampleBySourceRef.current = new Map();
+                  lastSampleByEntityRef.current = new Map();
                   await fetch(
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${
                       recordHistory ? "true" : "false"
@@ -1537,8 +1551,8 @@ const HeatmapView: React.FC = () => {
                   wsRef.current = null;
                   setAnalyzing(false);
                   setVvFootfalls({});
-                  lastSampleBySourceRef.current = new Map();
-                  poiLastSeenBySourceRef.current = new Map();
+                  lastSampleByEntityRef.current = new Map();
+                  poiLastSeenByEntityRef.current = new Map();
                   setPoiCells(new Map());
                   // 视情况决定是否清空热力
                   // setHeatmapCells(new Map());
@@ -1770,12 +1784,14 @@ const PeoplePositionView: React.FC = () => {
   const [selectedFloorPlanId, setSelectedFloorPlanId] = useState<number | null>(null);
   const [heatmapSources, setHeatmapSources] = useState<HeatmapSource[]>([]);
   const [showGrid, setShowGrid] = useState(false);
+  const [showTrackId, setShowTrackId] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [recordHistory, setRecordHistory] = useState(true);
   const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
-  const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
+  const [poiTrackIdsByCell, setPoiTrackIdsByCell] = useState<Map<string, number[]>>(new Map());
+  const [vvFootfalls, setVvFootfalls] = useState<Record<number, Footfall[]>>({});
   const wsRef = useRef<WebSocket | null>(null);
-  const lastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const lastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string; trackId: number | null }>>(new Map());
   const sourceStaleMs = 900;
 
   useEffect(() => {
@@ -1802,8 +1818,9 @@ const PeoplePositionView: React.FC = () => {
   useEffect(() => {
     if (selectedFloorPlanId == null) {
       setHeatmapSources([]);
-      lastSeenBySourceRef.current = new Map();
+      lastSeenByEntityRef.current = new Map();
       setPoiCells(new Map());
+      setPoiTrackIdsByCell(new Map());
       return;
     }
     fetch(`${API_BASE}/api/floor-plans/${selectedFloorPlanId}/heatmap-sources`)
@@ -1832,14 +1849,21 @@ const PeoplePositionView: React.FC = () => {
   const recomputePoiCells = useCallback(() => {
     const now = Date.now();
     const counts = new Map<string, number>();
-    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
-    lastSeenBySourceRef.current.forEach((v, k) => {
+    const tidsByCell = new Map<string, number[]>();
+    const nextByEntity = new Map<string, { tsMs: number; cellKey: string; trackId: number | null }>();
+    lastSeenByEntityRef.current.forEach((v, k) => {
       if (now - v.tsMs > sourceStaleMs) return;
-      nextBySource.set(k, v);
+      nextByEntity.set(k, v);
       counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
+      if (v.trackId != null) {
+        const arr = tidsByCell.get(v.cellKey) || [];
+        arr.push(v.trackId);
+        tidsByCell.set(v.cellKey, arr);
+      }
     });
-    lastSeenBySourceRef.current = nextBySource;
+    lastSeenByEntityRef.current = nextByEntity;
     setPoiCells(counts);
+    setPoiTrackIdsByCell(tidsByCell);
   }, [sourceStaleMs]);
 
   const handleEvent = useCallback(
@@ -1857,7 +1881,9 @@ const PeoplePositionView: React.FC = () => {
             ? `camera:${Number(evt.camera_id)}`
             : "unknown";
 
-      lastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey });
+      const trackId = evt.track_id != null ? Number(evt.track_id) : NaN;
+      const entityKey = Number.isFinite(trackId) ? `${sourceKey}:t${trackId}` : sourceKey;
+      lastSeenByEntityRef.current.set(entityKey, { tsMs: Date.now(), cellKey, trackId: Number.isFinite(trackId) ? trackId : null });
 
       if (
         evt.virtual_view_id != null &&
@@ -1869,10 +1895,14 @@ const PeoplePositionView: React.FC = () => {
         const rr = Number(evt.camera_row);
         const cc = Number(evt.camera_col);
         if (Number.isFinite(rr) && Number.isFinite(cc)) {
-          setVvFootfalls((old) => ({
-            ...old,
-            [vvId]: { row: rr, col: cc, ts: Date.now() },
-          }));
+          const now = Date.now();
+          setVvFootfalls((old) => {
+            const prev = Array.isArray(old[vvId]) ? old[vvId] : [];
+            const fresh = prev.filter((p) => now - p.ts <= 1200);
+            const withoutSame = fresh.filter((p) => !(p.row === rr && p.col === cc));
+            const nextList = [...withoutSame, { row: rr, col: cc, ts: now }].slice(-6);
+            return { ...old, [vvId]: nextList };
+          });
         }
       }
 
@@ -1902,8 +1932,9 @@ const PeoplePositionView: React.FC = () => {
         const shouldRun = !!st.running;
         if (shouldRun) {
           if (wsRef.current) return;
-          lastSeenBySourceRef.current = new Map();
+          lastSeenByEntityRef.current = new Map();
           setPoiCells(new Map());
+          setPoiTrackIdsByCell(new Map());
           const ws = new WebSocket(
             `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
               /:\d+$/,
@@ -2004,8 +2035,9 @@ const PeoplePositionView: React.FC = () => {
               if (!selectedFloorPlanId) return;
               try {
                 if (!analyzing) {
-                  lastSeenBySourceRef.current = new Map();
+                  lastSeenByEntityRef.current = new Map();
                   setPoiCells(new Map());
+                  setPoiTrackIdsByCell(new Map());
                   await fetch(
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${
                       recordHistory ? "true" : "false"
@@ -2038,8 +2070,9 @@ const PeoplePositionView: React.FC = () => {
                   wsRef.current = null;
                   setAnalyzing(false);
                   setVvFootfalls({});
-                  lastSeenBySourceRef.current = new Map();
+                  lastSeenByEntityRef.current = new Map();
                   setPoiCells(new Map());
+                  setPoiTrackIdsByCell(new Map());
                 }
               } catch (e) {
                 console.error(e);
@@ -2056,10 +2089,16 @@ const PeoplePositionView: React.FC = () => {
         <div className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
           <div className="mb-2 flex items-center justify-between">
             <span className="text-sm font-semibold text-slate-800">人员位置预览</span>
-            <label className="flex items-center gap-1 text-[11px] text-slate-600">
-              <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} />
-              显示网格
-            </label>
+            <div className="flex items-center gap-3">
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input type="checkbox" checked={showGrid} onChange={(e) => setShowGrid(e.target.checked)} />
+                显示网格
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input type="checkbox" checked={showTrackId} onChange={(e) => setShowTrackId(e.target.checked)} />
+                显示track_id
+              </label>
+            </div>
           </div>
           <div className="relative flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
             {floorPlanImageUrlStr && selectedFloorPlan ? (
@@ -2070,6 +2109,8 @@ const PeoplePositionView: React.FC = () => {
                 showGrid={showGrid}
                 backgroundColor="white"
                 poiCells={poiCells}
+                poiTrackIds={showTrackId ? poiTrackIdsByCell : undefined}
+                showPoiTrackIds={showTrackId}
                 className="w-full h-full"
               />
             ) : (
@@ -2091,14 +2132,22 @@ const PeoplePositionView: React.FC = () => {
 const VirtualViewGridOverlay: React.FC<{
   view: CameraVirtualView;
   cfg: { polygon: Pt[]; grid_rows: number; grid_cols: number };
-  highlightCell?: { row: number; col: number } | null;
-}> = ({ view, cfg, highlightCell = null }) => {
+  highlightCells?: Footfall[] | null;
+}> = ({ view, cfg, highlightCells = null }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
   // NOTE: 本项目当前的 TS 诊断环境对局部类型收窄有时会误报 never，
   // 这里用显式 any 来避免阻塞编译（运行时仍做严格数值校验）。
-  const hcAny = (highlightCell ?? null) as any;
+  const hcAny = (highlightCells ?? null) as any;
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const has = Array.isArray(hcAny) ? hcAny.length > 0 : false;
+    if (!has) return;
+    const t = window.setInterval(() => setTick((x) => (x + 1) % 1_000_000), 200);
+    return () => window.clearInterval(t);
+  }, [hcAny]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -2149,35 +2198,52 @@ const VirtualViewGridOverlay: React.FC<{
     const rows = Math.max(1, cfg.grid_rows);
     const cols = Math.max(1, cfg.grid_cols);
 
-    // 落脚点高亮（不透明红色）
-    const hr = hcAny?.row;
-    const hc = hcAny?.col;
-    if (
-      Number.isFinite(hr) &&
-      Number.isFinite(hc) &&
-      hr >= 0 &&
-      hr < rows &&
-      hc >= 0 &&
-      hc < cols
-    ) {
-      const r = hr as number;
-      const c = hc as number;
-      const u0 = c / cols;
-      const u1 = (c + 1) / cols;
-      const v0 = r / rows;
-      const v1 = (r + 1) / rows;
-      const p00 = applyHomography(H, { x: u0, y: v0 });
-      const p10 = applyHomography(H, { x: u1, y: v0 });
-      const p11 = applyHomography(H, { x: u1, y: v1 });
-      const p01 = applyHomography(H, { x: u0, y: v1 });
-      ctx.fillStyle = "rgba(239,68,68,1.0)";
-      ctx.beginPath();
-      ctx.moveTo(p00.x, p00.y);
-      ctx.lineTo(p10.x, p10.y);
-      ctx.lineTo(p11.x, p11.y);
-      ctx.lineTo(p01.x, p01.y);
-      ctx.closePath();
-      ctx.fill();
+    const now = Date.now();
+    const list: Footfall[] = Array.isArray(hcAny) ? hcAny : [];
+    const fresh = list
+      .map((p) => ({
+        row: Number(p?.row),
+        col: Number(p?.col),
+        ts: Number(p?.ts),
+      }))
+      .filter(
+        (p) =>
+          Number.isFinite(p.row) &&
+          Number.isFinite(p.col) &&
+          Number.isFinite(p.ts) &&
+          p.row >= 0 &&
+          p.row < rows &&
+          p.col >= 0 &&
+          p.col < cols &&
+          now - p.ts <= 1200,
+      ) as Footfall[];
+
+    if (fresh.length > 0) {
+      fresh.forEach((p) => {
+        const age = Math.max(0, now - p.ts);
+        const k = Math.max(0, Math.min(1, 1 - age / 1200));
+        const fillA = 0.15 + 0.55 * k;
+        const strokeA = 0.25 + 0.75 * k;
+        const u0 = p.col / cols;
+        const u1 = (p.col + 1) / cols;
+        const v0 = p.row / rows;
+        const v1 = (p.row + 1) / rows;
+        const p00 = applyHomography(H, { x: u0, y: v0 });
+        const p10 = applyHomography(H, { x: u1, y: v0 });
+        const p11 = applyHomography(H, { x: u1, y: v1 });
+        const p01 = applyHomography(H, { x: u0, y: v1 });
+        ctx.fillStyle = `rgba(239,68,68,${fillA})`;
+        ctx.strokeStyle = `rgba(239,68,68,${strokeA})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(p00.x, p00.y);
+        ctx.lineTo(p10.x, p10.y);
+        ctx.lineTo(p11.x, p11.y);
+        ctx.lineTo(p01.x, p01.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      });
     }
 
     // 外框
@@ -2212,7 +2278,7 @@ const VirtualViewGridOverlay: React.FC<{
       ctx.lineTo(p1.x, p1.y);
       ctx.stroke();
     }
-  }, [size, view, cfg, highlightCell]);
+  }, [size, view, cfg, tick, highlightCells]);
 
   return (
     <div ref={containerRef} className="pointer-events-none absolute inset-0">
@@ -2451,6 +2517,8 @@ type FloorPlanCanvasProps = {
   mappedCells?: Set<string>;
   heatmapCells?: Map<string, number>;
   poiCells?: Map<string, number>;
+  poiTrackIds?: Map<string, number[]>;
+  showPoiTrackIds?: boolean;
   heatmapRender?: {
     colormap: "viridis" | "greenRed";
     scale: "log" | "linear";
@@ -2476,6 +2544,8 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     mappedCells,
     heatmapCells,
     poiCells,
+    poiTrackIds,
+    showPoiTrackIds = false,
     heatmapRender,
     cellFillColors,
   } = props;
@@ -2771,6 +2841,34 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
           ctx.textBaseline = "middle";
           ctx.fillText(n > 99 ? "99+" : String(n), bx, by);
         }
+
+        if (showPoiTrackIds && poiTrackIds) {
+          const tids = poiTrackIds.get(key);
+          if (tids && tids.length > 0) {
+            const uniq = Array.from(new Set(tids.filter((v) => Number.isFinite(v)))).sort((a, b) => a - b);
+            if (uniq.length > 0) {
+              const s =
+                uniq.length <= 3
+                  ? `t:${uniq.join(",")}`
+                  : `t:${uniq.slice(0, 3).join(",")}+${uniq.length - 3}`;
+              const fontPx = Math.max(9 / fitScale, Math.min(14 / fitScale, Math.min(cellW, cellH) * 0.18));
+              ctx.font = `bold ${fontPx}px sans-serif`;
+              ctx.textAlign = "center";
+              ctx.textBaseline = "bottom";
+              const tx = cx;
+              const ty = y + cellH * 0.94;
+              const w = ctx.measureText(s).width;
+              const padX = Math.max(4 / fitScale, fontPx * 0.35);
+              const padY = Math.max(2 / fitScale, fontPx * 0.25);
+              const boxW = w + padX * 2;
+              const boxH = fontPx + padY * 2;
+              ctx.fillStyle = "rgba(15,23,42,0.78)";
+              ctx.fillRect(tx - boxW / 2, ty - boxH, boxW, boxH);
+              ctx.fillStyle = "rgba(255,255,255,0.95)";
+              ctx.fillText(s, tx, ty - padY);
+            }
+          }
+        }
       });
     }
 
@@ -2823,7 +2921,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, poiIconReadyTick, heatmapCells, poiCells, heatmapRender, cellFillColors]);
+  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, poiIconReadyTick, heatmapCells, poiCells, poiTrackIds, showPoiTrackIds, heatmapRender, cellFillColors]);
 
   useEffect(() => {
     draw();

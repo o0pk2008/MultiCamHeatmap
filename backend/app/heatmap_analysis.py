@@ -212,6 +212,9 @@ class HeatmapAnalyzer:
                     cls_ids = det.cls
                     if xyxy is None or cls_ids is None:
                         continue
+                    track_ids = getattr(det, "track_ids", None)
+                    if track_ids is None:
+                        track_ids = getattr(det, "ids", None)
 
                     # 将脚底点映射到“透视网格”的 cell：
                     # 先用 quad 的 homography 把像素坐标反变换到 unit square (u,v)，再算 row/col。
@@ -233,7 +236,7 @@ class HeatmapAnalyzer:
                     except Exception:
                         continue
 
-                    for (x1, y1, x2, y2), cid in zip(xyxy, cls_ids):
+                    for idx, ((x1, y1, x2, y2), cid) in enumerate(zip(xyxy, cls_ids)):
                         if int(cid) != 0:
                             continue
                         h = y2 - y1
@@ -264,6 +267,15 @@ class HeatmapAnalyzer:
                             continue
                         floor_row, floor_col, cam_id, vv_real_id = cell_map[key]
 
+                        track_id = None
+                        try:
+                            if track_ids is not None and idx < len(track_ids):
+                                tid = int(track_ids[idx])
+                                if tid >= 0:
+                                    track_id = tid
+                        except Exception:
+                            track_id = None
+
                         event = {
                             "floor_plan_id": floor_plan_id,
                             "floor_row": floor_row,
@@ -272,6 +284,7 @@ class HeatmapAnalyzer:
                             "virtual_view_id": vv_real_id,
                             "camera_row": cam_row,
                             "camera_col": cam_col,
+                            "track_id": track_id,
                             "ts": time.time(),
                         }
                         try:

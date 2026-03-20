@@ -131,12 +131,15 @@ def update_current_dwell(event: Dict[str, Any], max_dt_sec: float = 2.0) -> None
 
     vv_id = _to_int_or_none(event.get("virtual_view_id"))
     cam_id = _to_int_or_none(event.get("camera_id"))
+    track_id = _to_int_or_none(event.get("track_id"))
     if vv_id is not None:
         source_key = f"virtual:{vv_id}"
     elif cam_id is not None:
         source_key = f"camera:{cam_id}"
     else:
         source_key = "unknown"
+    if track_id is not None:
+        source_key = f"{source_key}:track:{track_id}"
 
     cell_key = f"{floor_row},{floor_col}"
 

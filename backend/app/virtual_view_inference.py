@@ -33,6 +33,8 @@ class VirtualViewDetections:
     """
     xyxy: Any  # numpy array
     cls: Any   # numpy array
+    ids: Any   # list[int] aligned with xyxy/cls; -1 means unknown (legacy)
+    track_ids: Any  # list[int] aligned with xyxy/cls; -1 means unknown
     w: int
     h: int
     ts: float
@@ -279,6 +281,9 @@ class VirtualViewInferenceManager:
         last_infer_ts = 0.0
         last_emit_ts = 0.0
         last_boxes = None  # (xyxy, cls)
+        last_ids = None    # list[int]
+        tracks: Dict[int, Tuple[float, float, float, int]] = {}
+        next_track_id = 1
 
         loaded = self._load_view(virtual_view_id)
         if not loaded:
@@ -331,6 +336,9 @@ class VirtualViewInferenceManager:
                     if not inference_enabled:
                         # plain 模式下不保留旧框，避免之后切换 analyzed 前“残留画框”
                         last_boxes = None
+                        last_ids = None
+                        tracks = {}
+                        next_track_id = 1
 
                 if cap is None or not cap.isOpened():
                     if cap is not None:
@@ -397,9 +405,76 @@ class VirtualViewInferenceManager:
                                         last_boxes = (xyxy, cls_ids)
                                         try:
                                             h_img, w_img = persp.shape[:2]
+                                        except Exception:
+                                            h_img, w_img = (0, 0)
+                                        ids = [-1 for _ in range(int(len(cls_ids)))]
+                                        try:
+                                            max_dist = max(25.0, 0.08 * float(max(w_img, h_img)))
+                                            used_tracks = set()
+                                            used_dets = set()
+                                            person_idxs = []
+                                            for i, cid in enumerate(cls_ids):
+                                                try:
+                                                    if int(cid) == 0:
+                                                        person_idxs.append(int(i))
+                                                except Exception:
+                                                    continue
+                                            person_idxs.sort(
+                                                key=lambda i: float((xyxy[i][2] - xyxy[i][0]) * (xyxy[i][3] - xyxy[i][1])),
+                                                reverse=True,
+                                            )
+
+                                            for i in person_idxs:
+                                                if i in used_dets:
+                                                    continue
+                                                x1, y1, x2, y2 = xyxy[i]
+                                                cx = float(x1 + x2) * 0.5
+                                                cy = float(y1 + y2) * 0.5
+                                                best_tid = None
+                                                best_d2 = None
+                                                for tid, (tx, ty, _ts, _miss) in tracks.items():
+                                                    if tid in used_tracks:
+                                                        continue
+                                                    dx = float(tx) - cx
+                                                    dy = float(ty) - cy
+                                                    d2 = dx * dx + dy * dy
+                                                    if best_d2 is None or d2 < best_d2:
+                                                        best_d2 = d2
+                                                        best_tid = int(tid)
+                                                if best_tid is not None and best_d2 is not None and best_d2 <= (max_dist * max_dist):
+                                                    ids[i] = int(best_tid)
+                                                    used_tracks.add(int(best_tid))
+                                                    used_dets.add(int(i))
+                                                    tracks[int(best_tid)] = (cx, cy, float(now), 0)
+                                                else:
+                                                    tid = int(next_track_id)
+                                                    next_track_id += 1
+                                                    ids[i] = tid
+                                                    used_tracks.add(tid)
+                                                    used_dets.add(int(i))
+                                                    tracks[tid] = (cx, cy, float(now), 0)
+
+                                            next_tracks: Dict[int, Tuple[float, float, float, int]] = {}
+                                            for tid, (tx, ty, ts0, miss) in tracks.items():
+                                                if int(tid) in used_tracks:
+                                                    next_tracks[int(tid)] = (float(tx), float(ty), float(ts0), 0)
+                                                    continue
+                                                miss2 = int(miss) + 1
+                                                if miss2 > 3:
+                                                    continue
+                                                if float(now) - float(ts0) > 1.5:
+                                                    continue
+                                                next_tracks[int(tid)] = (float(tx), float(ty), float(ts0), miss2)
+                                            tracks = next_tracks
+                                        except Exception:
+                                            pass
+                                        last_ids = ids
+                                        try:
                                             self._detections[virtual_view_id] = VirtualViewDetections(
                                                 xyxy=xyxy,
                                                 cls=cls_ids,
+                                                ids=ids,
+                                                track_ids=ids,
                                                 w=int(w_img),
                                                 h=int(h_img),
                                                 ts=float(now),
@@ -419,14 +494,20 @@ class VirtualViewInferenceManager:
                     except Exception:
                         annotated_img = plain_img
                     xyxy, cls_ids = last_boxes
-                    for (x1, y1, x2, y2), cid in zip(xyxy, cls_ids):
+                    for i, ((x1, y1, x2, y2), cid) in enumerate(zip(xyxy, cls_ids)):
                         if int(cid) != 0:  # person
                             continue
                         x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
                         cv2.rectangle(annotated_img, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
+                        label = "person"
+                        try:
+                            if last_ids is not None and i < len(last_ids) and int(last_ids[i]) >= 0:
+                                label = f"person#{int(last_ids[i])}"
+                        except Exception:
+                            label = "person"
                         cv2.putText(
                             annotated_img,
-                            "person",
+                            label,
                             (x1_i, max(y1_i - 5, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
@@ -461,4 +542,3 @@ class VirtualViewInferenceManager:
 
 
 manager = VirtualViewInferenceManager()
-
