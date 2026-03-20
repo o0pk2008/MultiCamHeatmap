@@ -9,6 +9,46 @@ const API_BASE =
 
 const POI_ICON_URL = `${API_BASE}/icons/poi.png`;
 
+type ShareKind = "heatmap" | "people";
+type ShareRoute =
+  | {
+      kind: ShareKind;
+      params: URLSearchParams;
+    }
+  | null;
+
+function parseShareRoute(hash: string): ShareRoute {
+  const h = String(hash || "");
+  if (!h.startsWith("#/share/")) return null;
+  const rest = h.slice("#/share/".length);
+  const [pathPart, queryPart] = rest.split("?", 2);
+  const kind = pathPart === "heatmap" || pathPart === "people" ? (pathPart as ShareKind) : null;
+  if (!kind) return null;
+  return { kind, params: new URLSearchParams(queryPart || "") };
+}
+
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.style.position = "fixed";
+      el.style.left = "-9999px";
+      el.style.top = "-9999px";
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(el);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
 // mediamtx 转发服务地址（按你的规则生成 CameraXX）
 // 从 Vite 环境变量中读取，便于通过 .env 配置：
 // VITE_MEDIA_HOST=192.168.2.94
@@ -41,6 +81,22 @@ type HeatmapSource = {
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
+  const [shareRoute, setShareRoute] = useState<ShareRoute>(() => parseShareRoute(window.location.hash));
+
+  useEffect(() => {
+    const onChange = () => setShareRoute(parseShareRoute(window.location.hash));
+    window.addEventListener("hashchange", onChange);
+    window.addEventListener("popstate", onChange);
+    return () => {
+      window.removeEventListener("hashchange", onChange);
+      window.removeEventListener("popstate", onChange);
+    };
+  }, []);
+
+  if (shareRoute) {
+    if (shareRoute.kind === "heatmap") return <ShareHeatmapPage params={shareRoute.params} />;
+    return <SharePeoplePage params={shareRoute.params} />;
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
@@ -114,6 +170,372 @@ const App: React.FC = () => {
           {activeTab === "people" && <PeoplePositionView />}
           {activeTab === "mapping" && <MappingView />}
         </main>
+      </div>
+    </div>
+  );
+};
+
+const ShareHeatmapPage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
+  const floorPlanId = Number(params.get("floor_plan_id") || "");
+  const embed = params.get("embed") === "1" || params.get("embed") === "true";
+  const showGrid = params.get("grid") === "1" || params.get("grid") === "true";
+  const mode = (params.get("mode") || "current") as "current" | "history";
+  const showPeople = params.get("people") === "1" || params.get("people") === "true";
+  const refreshMsRaw = Number(params.get("refresh_ms") || "1000");
+  const refreshMs = Math.min(60_000, Math.max(200, Number.isFinite(refreshMsRaw) ? refreshMsRaw : 1000));
+  const scale = (params.get("scale") || "log") as "log" | "linear";
+  const alphaMode = (params.get("alpha") || "byValue") as "byValue" | "fixed";
+  const clip = (params.get("clip") || "p95") as "p95" | "p99" | "max";
+
+  const [floorPlans, setFloorPlans] = useState<FloorPlan[]>([]);
+  const [heatmapCells, setHeatmapCells] = useState<Map<string, number>>(new Map());
+  const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
+  const [statusText, setStatusText] = useState<string>("");
+  const wsRef = useRef<WebSocket | null>(null);
+  const lastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const sourceStaleMs = 900;
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/floor-plans`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((fps: FloorPlan[]) => setFloorPlans(Array.isArray(fps) ? fps : []))
+      .catch(() => setFloorPlans([]));
+  }, []);
+
+  const selectedFloorPlan = useMemo(() => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return null;
+    return floorPlans.find((fp) => fp.id === floorPlanId) || null;
+  }, [floorPlans, floorPlanId]);
+
+  const imageUrl = useMemo(() => {
+    if (!selectedFloorPlan) return "";
+    return floorPlanImageUrl(selectedFloorPlan);
+  }, [selectedFloorPlan]);
+
+  const computeMax = useCallback(
+    (m: Map<string, number>) => {
+      const vals: number[] = [];
+      m.forEach((v) => {
+        if (Number.isFinite(v) && v > 0) vals.push(v);
+      });
+      if (vals.length === 0) return 1;
+      vals.sort((a, b) => a - b);
+      const pick = (p: number) => vals[Math.min(vals.length - 1, Math.max(0, Math.floor((vals.length - 1) * p)))];
+      if (clip === "max") return vals[vals.length - 1];
+      if (clip === "p99") return pick(0.99);
+      return pick(0.95);
+    },
+    [clip],
+  );
+
+  const loadCurrent = useCallback(async () => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/heatmap/current-dwell?floor_plan_id=${floorPlanId}`);
+      const items: { floor_row: number; floor_col: number; dwell_sec: number }[] = res.ok ? await res.json() : [];
+      const m = new Map<string, number>();
+      items.forEach((it) => {
+        const r = Number(it.floor_row);
+        const c = Number(it.floor_col);
+        const v = Number(it.dwell_sec);
+        if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) return;
+        m.set(`${r},${c}`, v);
+      });
+      setHeatmapCells(m);
+      setStatusText("");
+    } catch {
+      setStatusText("加载热力图数据失败");
+    }
+  }, [floorPlanId]);
+
+  const loadHistory = useCallback(async () => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return;
+    const startTs = Number(params.get("start_ts") || "");
+    const endTs = Number(params.get("end_ts") || "");
+    if (!Number.isFinite(startTs) || !Number.isFinite(endTs) || startTs >= endTs) {
+      setStatusText("历史参数缺失：start_ts / end_ts");
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/heatmap/history-dwell?floor_plan_id=${floorPlanId}&start_ts=${encodeURIComponent(
+          String(startTs),
+        )}&end_ts=${encodeURIComponent(String(endTs))}`,
+      );
+      const items: { floor_row: number; floor_col: number; dwell_sec: number }[] = res.ok ? await res.json() : [];
+      const m = new Map<string, number>();
+      items.forEach((it) => {
+        const r = Number(it.floor_row);
+        const c = Number(it.floor_col);
+        const v = Number(it.dwell_sec);
+        if (!Number.isFinite(r) || !Number.isFinite(c) || !Number.isFinite(v) || v <= 0) return;
+        m.set(`${r},${c}`, v);
+      });
+      setHeatmapCells(m);
+      setStatusText("");
+    } catch {
+      setStatusText("加载历史热力图失败");
+    }
+  }, [floorPlanId, params]);
+
+  useEffect(() => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return;
+    if (mode === "history") {
+      void loadHistory();
+      return;
+    }
+    void loadCurrent();
+    const t = window.setInterval(() => void loadCurrent(), refreshMs);
+    return () => window.clearInterval(t);
+  }, [floorPlanId, mode, loadCurrent, loadHistory, refreshMs]);
+
+  const recomputePeople = useCallback(() => {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
+    lastSeenBySourceRef.current.forEach((v, k) => {
+      if (now - v.tsMs > sourceStaleMs) return;
+      nextBySource.set(k, v);
+      counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
+    });
+    lastSeenBySourceRef.current = nextBySource;
+    setPoiCells(counts);
+  }, [sourceStaleMs]);
+
+  useEffect(() => {
+    if (!showPeople || mode !== "current" || !Number.isFinite(floorPlanId) || floorPlanId <= 0) {
+      wsRef.current?.close();
+      wsRef.current = null;
+      lastSeenBySourceRef.current = new Map();
+      setPoiCells(new Map());
+      return;
+    }
+    lastSeenBySourceRef.current = new Map();
+    setPoiCells(new Map());
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
+    );
+    ws.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (evt.floor_plan_id !== floorPlanId) return;
+        const r = Number(evt.floor_row);
+        const c = Number(evt.floor_col);
+        if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+        const sourceKey =
+          evt.virtual_view_id != null && Number.isFinite(Number(evt.virtual_view_id))
+            ? `virtual:${Number(evt.virtual_view_id)}`
+            : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
+              ? `camera:${Number(evt.camera_id)}`
+              : "unknown";
+        lastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+        recomputePeople();
+      } catch {}
+    };
+    ws.onclose = () => {
+      if (wsRef.current === ws) wsRef.current = null;
+    };
+    wsRef.current = ws;
+    const t = window.setInterval(recomputePeople, 250);
+    return () => {
+      window.clearInterval(t);
+      if (wsRef.current === ws) {
+        wsRef.current?.close();
+        wsRef.current = null;
+      } else {
+        try {
+          ws.close();
+        } catch {}
+      }
+    };
+  }, [floorPlanId, mode, showPeople, recomputePeople]);
+
+  const vMax = useMemo(() => computeMax(heatmapCells), [computeMax, heatmapCells]);
+
+  return (
+    <div className={`min-h-screen bg-slate-50 ${embed ? "" : "p-4"}`}>
+      {!embed ? (
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-sm font-semibold text-slate-800">热力图展示</div>
+          <div className="text-[11px] text-slate-500">
+            {selectedFloorPlan ? selectedFloorPlan.name : `floor_plan_id=${String(floorPlanId || "")}`}
+            {mode === "history" ? "（历史）" : "（实时）"}
+          </div>
+        </div>
+      ) : null}
+      <div className="relative h-[calc(100vh-32px)] w-full overflow-hidden rounded-lg border border-slate-200 bg-white">
+        {statusText ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 text-xs text-slate-600">
+            {statusText}
+          </div>
+        ) : null}
+        {selectedFloorPlan && imageUrl ? (
+          <FloorPlanCanvas
+            imageUrl={imageUrl}
+            gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
+            gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
+            showGrid={showGrid}
+            heatmapCells={heatmapCells}
+            poiCells={showPeople && mode === "current" ? poiCells : undefined}
+            heatmapRender={{
+              colormap: "greenRed",
+              scale,
+              clip,
+              alphaMode,
+              vMax,
+            }}
+            className="h-full w-full"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
+            未找到平面图，请检查 floor_plan_id
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const SharePeoplePage: React.FC<{ params: URLSearchParams }> = ({ params }) => {
+  const floorPlanId = Number(params.get("floor_plan_id") || "");
+  const embed = params.get("embed") === "1" || params.get("embed") === "true";
+  const showGrid = params.get("grid") === "1" || params.get("grid") === "true";
+  const [floorPlans, setFloorPlans] = useState<FloorPlan[]>([]);
+  const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
+  const [running, setRunning] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const lastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const sourceStaleMs = 900;
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/floor-plans`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((fps: FloorPlan[]) => setFloorPlans(Array.isArray(fps) ? fps : []))
+      .catch(() => setFloorPlans([]));
+  }, []);
+
+  const selectedFloorPlan = useMemo(() => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return null;
+    return floorPlans.find((fp) => fp.id === floorPlanId) || null;
+  }, [floorPlans, floorPlanId]);
+
+  const imageUrl = useMemo(() => {
+    if (!selectedFloorPlan) return "";
+    return floorPlanImageUrl(selectedFloorPlan);
+  }, [selectedFloorPlan]);
+
+  const recompute = useCallback(() => {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
+    lastSeenBySourceRef.current.forEach((v, k) => {
+      if (now - v.tsMs > sourceStaleMs) return;
+      nextBySource.set(k, v);
+      counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
+    });
+    lastSeenBySourceRef.current = nextBySource;
+    setPoiCells(counts);
+  }, [sourceStaleMs]);
+
+  const handleEvent = useCallback(
+    (evt: any) => {
+      if (evt.floor_plan_id !== floorPlanId) return;
+      const r = Number(evt.floor_row);
+      const c = Number(evt.floor_col);
+      if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+      const sourceKey =
+        evt.virtual_view_id != null && Number.isFinite(Number(evt.virtual_view_id))
+          ? `virtual:${Number(evt.virtual_view_id)}`
+          : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
+            ? `camera:${Number(evt.camera_id)}`
+            : "unknown";
+      lastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+      recompute();
+    },
+    [floorPlanId, recompute],
+  );
+
+  useEffect(() => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return;
+    const t = window.setInterval(recompute, 250);
+    return () => window.clearInterval(t);
+  }, [floorPlanId, recompute]);
+
+  useEffect(() => {
+    if (!Number.isFinite(floorPlanId) || floorPlanId <= 0) return;
+    let stopped = false;
+    const tick = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/heatmap/status?floor_plan_id=${floorPlanId}`);
+        const st = res.ok ? await res.json() : null;
+        const nextRunning = !!st?.running;
+        setRunning(nextRunning);
+        if (nextRunning) {
+          if (!wsRef.current) {
+            const ws = new WebSocket(
+              `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
+                /:\d+$/,
+                ":18080",
+              )}/ws/heatmap-events`,
+            );
+            ws.onmessage = (ev) => {
+              try {
+                handleEvent(JSON.parse(ev.data));
+              } catch {}
+            };
+            ws.onclose = () => {
+              wsRef.current = null;
+            };
+            wsRef.current = ws;
+          }
+        } else {
+          wsRef.current?.close();
+          wsRef.current = null;
+        }
+      } catch {
+      } finally {
+        window.setTimeout(tick, 2000);
+      }
+    };
+    void tick();
+    return () => {
+      stopped = true;
+      wsRef.current?.close();
+      wsRef.current = null;
+    };
+  }, [floorPlanId, handleEvent]);
+
+  return (
+    <div className={`min-h-screen bg-slate-50 ${embed ? "" : "p-4"}`}>
+      {!embed ? (
+        <div className="mb-3 flex items-center justify-between">
+          <div className="text-sm font-semibold text-slate-800">人员位置展示</div>
+          <div className="text-[11px] text-slate-500">
+            {selectedFloorPlan ? selectedFloorPlan.name : `floor_plan_id=${String(floorPlanId || "")}`}
+          </div>
+        </div>
+      ) : null}
+      <div className="relative h-[calc(100vh-32px)] w-full overflow-hidden rounded-lg border border-slate-200 bg-white">
+        {!running ? (
+          <div className="absolute inset-0 z-10 flex items-center justify-center bg-white/80 text-xs text-slate-600">
+            当前未启动分析
+          </div>
+        ) : null}
+        {selectedFloorPlan && imageUrl ? (
+          <FloorPlanCanvas
+            imageUrl={imageUrl}
+            gridRows={Math.max(1, selectedFloorPlan.grid_rows || 1)}
+            gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
+            showGrid={showGrid}
+            poiCells={poiCells}
+            className="h-full w-full"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
+            未找到平面图，请检查 floor_plan_id
+          </div>
+        )}
       </div>
     </div>
   );
@@ -643,6 +1065,11 @@ const HeatmapView: React.FC = () => {
   );
   const [recordHistory, setRecordHistory] = useState(true);
   const [vvFootfalls, setVvFootfalls] = useState<Record<number, { row: number; col: number; ts: number }>>({});
+  const [showPeopleOverlay, setShowPeopleOverlay] = useState(false);
+  const showPeopleOverlayRef = useRef(false);
+  const [poiCells, setPoiCells] = useState<Map<string, number>>(new Map());
+  const poiLastSeenBySourceRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
+  const poiSourceStaleMs = 900;
   const wsRef = useRef<WebSocket | null>(null);
   const lastSampleBySourceRef = useRef<Map<string, { ts: number; cellKey: string }>>(new Map());
   const lastDecayAtRef = useRef<number | null>(null);
@@ -650,6 +1077,33 @@ const HeatmapView: React.FC = () => {
   useEffect(() => {
     heatmapUpdatesEnabledRef.current = heatmapDataMode === "live";
   }, [heatmapDataMode]);
+
+  useEffect(() => {
+    showPeopleOverlayRef.current = showPeopleOverlay;
+    if (!showPeopleOverlay) {
+      poiLastSeenBySourceRef.current = new Map();
+      setPoiCells(new Map());
+    }
+  }, [showPeopleOverlay]);
+
+  const recomputePoiOverlay = useCallback(() => {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    const nextBySource = new Map<string, { tsMs: number; cellKey: string }>();
+    poiLastSeenBySourceRef.current.forEach((v, k) => {
+      if (now - v.tsMs > poiSourceStaleMs) return;
+      nextBySource.set(k, v);
+      counts.set(v.cellKey, (counts.get(v.cellKey) || 0) + 1);
+    });
+    poiLastSeenBySourceRef.current = nextBySource;
+    setPoiCells(counts);
+  }, [poiSourceStaleMs]);
+
+  useEffect(() => {
+    if (!analyzing || heatmapDataMode !== "live" || !showPeopleOverlay) return;
+    const t = window.setInterval(recomputePoiOverlay, 250);
+    return () => window.clearInterval(t);
+  }, [analyzing, heatmapDataMode, showPeopleOverlay, recomputePoiOverlay]);
 
   useEffect(() => {
     const load = async () => {
@@ -760,6 +1214,26 @@ const HeatmapView: React.FC = () => {
     }
   }, []);
 
+  const handlePoiOverlayEvent = useCallback(
+    (evt: any, floorPlanId: number) => {
+      if (!showPeopleOverlayRef.current) return;
+      if (heatmapDataMode !== "live") return;
+      if (evt.floor_plan_id !== floorPlanId) return;
+      const r = Number(evt.floor_row);
+      const c = Number(evt.floor_col);
+      if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+      const sourceKey =
+        evt.virtual_view_id != null && Number.isFinite(Number(evt.virtual_view_id))
+          ? `virtual:${Number(evt.virtual_view_id)}`
+          : evt.camera_id != null && Number.isFinite(Number(evt.camera_id))
+            ? `camera:${Number(evt.camera_id)}`
+            : "unknown";
+      poiLastSeenBySourceRef.current.set(sourceKey, { tsMs: Date.now(), cellKey: `${r},${c}` });
+      recomputePoiOverlay();
+    },
+    [heatmapDataMode, recomputePoiOverlay],
+  );
+
   const loadCurrentDwellFromBackend = useCallback(async (floorPlanId: number) => {
     try {
       const res = await fetch(`${API_BASE}/api/heatmap/current-dwell?floor_plan_id=${floorPlanId}`);
@@ -843,6 +1317,7 @@ const HeatmapView: React.FC = () => {
               const evt = JSON.parse(ev.data);
               if (!heatmapUpdatesEnabledRef.current) return;
               handleHeatmapEvent(evt, fpId);
+              handlePoiOverlayEvent(evt, fpId);
             } catch (e) {
               console.error(e);
             }
@@ -952,6 +1427,38 @@ const HeatmapView: React.FC = () => {
       <div className="mb-2 flex items-center justify-between">
         <div />
         <div className="flex items-center gap-3">
+          <button
+            className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            onClick={async () => {
+              if (!selectedFloorPlanId) return;
+              const base = `${window.location.origin}${window.location.pathname}#/share/heatmap`;
+              const qp = new URLSearchParams();
+              qp.set("floor_plan_id", String(selectedFloorPlanId));
+              qp.set("embed", "1");
+              qp.set("grid", showHeatmapGrid ? "1" : "0");
+              qp.set("refresh_ms", "1000");
+              qp.set("scale", heatmapScale);
+              qp.set("alpha", heatmapAlphaMode);
+              qp.set("clip", heatmapClip);
+              qp.set("people", showPeopleOverlay && heatmapDataMode === "live" ? "1" : "0");
+              if (heatmapDataMode === "history") {
+                const startTs = parseDatetimeLocalToEpochSec(historyStartLocal);
+                const endTs = parseDatetimeLocalToEpochSec(historyEndLocal);
+                qp.set("mode", "history");
+                if (startTs != null) qp.set("start_ts", String(startTs));
+                if (endTs != null) qp.set("end_ts", String(endTs));
+              } else {
+                qp.set("mode", "current");
+              }
+              const url = `${base}?${qp.toString()}`;
+              const ok = await copyToClipboard(url);
+              if (ok) alert("已复制分享链接");
+              else window.prompt("复制链接", url);
+            }}
+            title="生成可分享/可嵌入的展示链接（只展示，不包含侧边栏）"
+          >
+            分享
+          </button>
           <label className="flex items-center gap-1 text-[11px] text-slate-600">
             <input
               type="checkbox"
@@ -1008,6 +1515,7 @@ const HeatmapView: React.FC = () => {
                     const evt = JSON.parse(ev.data);
                     if (!heatmapUpdatesEnabledRef.current) return;
                     handleHeatmapEvent(evt, selectedFloorPlanId);
+                    handlePoiOverlayEvent(evt, selectedFloorPlanId);
                   } catch (e) {
                     console.error(e);
                   }
@@ -1028,6 +1536,8 @@ const HeatmapView: React.FC = () => {
                   setAnalyzing(false);
                   setVvFootfalls({});
                   lastSampleBySourceRef.current = new Map();
+                  poiLastSeenBySourceRef.current = new Map();
+                  setPoiCells(new Map());
                   // 视情况决定是否清空热力
                   // setHeatmapCells(new Map());
                 }
@@ -1072,6 +1582,16 @@ const HeatmapView: React.FC = () => {
                   onChange={(e) => setHeatmapRecentMode(e.target.checked)}
                 />
                 最近热度
+              </label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={showPeopleOverlay}
+                  onChange={(e) => setShowPeopleOverlay(e.target.checked)}
+                  disabled={heatmapDataMode !== "live"}
+                  title={heatmapDataMode !== "live" ? "历史回放模式下不叠加人员位置" : "在热力图上叠加显示人员位置 POI"}
+                />
+                显示人员位置
               </label>
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
@@ -1212,6 +1732,7 @@ const HeatmapView: React.FC = () => {
                 gridCols={Math.max(1, selectedFloorPlan.grid_cols || 1)}
                 showGrid={showHeatmapGrid}
                 heatmapCells={heatmapCells}
+                poiCells={showPeopleOverlay ? poiCells : undefined}
                 heatmapRender={{
                   colormap: heatmapColormap,
                   scale: heatmapScale,
@@ -1278,6 +1799,8 @@ const PeoplePositionView: React.FC = () => {
   useEffect(() => {
     if (selectedFloorPlanId == null) {
       setHeatmapSources([]);
+      lastSeenBySourceRef.current = new Map();
+      setPoiCells(new Map());
       return;
     }
     fetch(`${API_BASE}/api/floor-plans/${selectedFloorPlanId}/heatmap-sources`)
@@ -1443,6 +1966,24 @@ const PeoplePositionView: React.FC = () => {
           </select>
         </div>
         <div className="flex items-center gap-3">
+          <button
+            className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+            onClick={async () => {
+              if (!selectedFloorPlanId) return;
+              const base = `${window.location.origin}${window.location.pathname}#/share/people`;
+              const qp = new URLSearchParams();
+              qp.set("floor_plan_id", String(selectedFloorPlanId));
+              qp.set("embed", "1");
+              qp.set("grid", showGrid ? "1" : "0");
+              const url = `${base}?${qp.toString()}`;
+              const ok = await copyToClipboard(url);
+              if (ok) alert("已复制分享链接");
+              else window.prompt("复制链接", url);
+            }}
+            title="生成可分享/可嵌入的展示链接（只展示，不包含侧边栏）"
+          >
+            分享
+          </button>
           <label className="flex items-center gap-1 text-[11px] text-slate-600">
             <input
               type="checkbox"
