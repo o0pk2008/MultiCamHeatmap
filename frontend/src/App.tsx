@@ -851,11 +851,17 @@ const MappedCamerasGrid: React.FC<{
                   onDragOver={(e) => e.preventDefault()}
                   onDrop={(e) => {
                     e.preventDefault();
-                    const fromSlotStr = e.dataTransfer.getData("text/heatmap-slot-idx") || "";
+                    const fromSlotStr = (e.dataTransfer.getData("text/heatmap-slot-idx") || "").trim();
                     const k = e.dataTransfer.getData("text/heatmap-source-key") || "";
                     if (!k) return;
-                    const fromSlot = Number(fromSlotStr);
-                    if (Number.isFinite(fromSlot) && fromSlot >= 0 && fromSlot < slotCount && fromSlot !== slotIdx) {
+                    const fromSlot = fromSlotStr ? Number(fromSlotStr) : Number.NaN;
+                    if (
+                      fromSlotStr &&
+                      Number.isFinite(fromSlot) &&
+                      fromSlot >= 0 &&
+                      fromSlot < slotCount &&
+                      fromSlot !== slotIdx
+                    ) {
                       setPinnedSlots((old) => {
                         const next = [...old];
                         const tmp = next[slotIdx] || "";
@@ -4418,7 +4424,7 @@ const MappingView: React.FC = () => {
                         });
                         return;
                       }
-                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                      const imgPt = worldToImagePoint(world, vpViewportSizeRef.current, { allowOutside: true });
                       if (!imgPt) {
                         setVpHover(null);
                         return;
@@ -4462,7 +4468,7 @@ const MappingView: React.FC = () => {
                     const onPointerDownWorld = (world: Pt) => {
                       // 非编辑/非创建时：点击选择一个摄像头格子（用于绑定）
                       if (vpTool === "none" && !vpEditEnabled && vpQuad) {
-                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current);
+                        const imgPt = worldToImagePoint(world, vpViewportSizeRef.current, { allowOutside: true });
                         if (imgPt) {
                           const rows = Math.max(1, Number(vpRows) || 1);
                           const cols = Math.max(1, Number(vpCols) || 1);

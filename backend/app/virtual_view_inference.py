@@ -70,8 +70,8 @@ class VirtualViewInferenceManager:
             return
         if YOLO is None:
             return
-        # 默认 COCO 轻量模型（自动下载一次）
-        self._model = YOLO("yolov8n.pt")
+        # 默认 COCO 模型（自动下载一次）
+        self._model = YOLO("yolov8m.pt")
         # 显式切到 GPU（在部分环境中 ultralytics 默认不会自动选择 cuda）
         try:
             if torch is not None and torch.cuda.is_available():
