@@ -3326,6 +3326,8 @@ const MappingView: React.FC = () => {
   const [mappingsLoading, setMappingsLoading] = useState(false);
   const [mappingsSaving, setMappingsSaving] = useState(false);
   const [replaceMappingId, setReplaceMappingId] = useState<number | null>(null);
+  const [autoAnchors, setAutoAnchors] = useState<{ camera_row: number; camera_col: number; floor_row: number; floor_col: number }[]>([]);
+  const [autoOverwrite, setAutoOverwrite] = useState(false);
 
   const mappedCamCells = useMemo(() => {
     const s = new Set<string>();
@@ -4759,6 +4761,141 @@ const MappingView: React.FC = () => {
                   正在替换：请重新选择平面图格子后点击“替换绑定”。
                 </div>
               )}
+              <div className="mt-3 rounded border border-slate-200 bg-white p-2">
+                <div className="mb-1 text-[11px] font-semibold text-slate-700">锚点自动匹配</div>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                    disabled={
+                      !vpSelectedCell ||
+                      !fpSelectedCell ||
+                      autoAnchors.length >= 4 ||
+                      autoAnchors.some(
+                        (a) =>
+                          a.camera_row === (vpSelectedCell?.row ?? -1) &&
+                          a.camera_col === (vpSelectedCell?.col ?? -1),
+                      ) ||
+                      autoAnchors.some(
+                        (a) =>
+                          a.floor_row === (fpSelectedCell?.row ?? -1) &&
+                          a.floor_col === (fpSelectedCell?.col ?? -1),
+                      )
+                    }
+                    onClick={() => {
+                      if (!vpSelectedCell || !fpSelectedCell) return;
+                      if (autoAnchors.length >= 4) return;
+                      const newItem = {
+                        camera_row: vpSelectedCell.row,
+                        camera_col: vpSelectedCell.col,
+                        floor_row: fpSelectedCell.row,
+                        floor_col: fpSelectedCell.col,
+                      };
+                      setAutoAnchors((list) => {
+                        if (
+                          list.some(
+                            (a) =>
+                              a.camera_row === newItem.camera_row &&
+                              a.camera_col === newItem.camera_col,
+                          )
+                        )
+                          return list;
+                        if (
+                          list.some(
+                            (a) =>
+                              a.floor_row === newItem.floor_row &&
+                              a.floor_col === newItem.floor_col,
+                          )
+                        )
+                          return list;
+                        return [...list, newItem].slice(0, 4);
+                      });
+                    }}
+                  >
+                    添加锚点
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                    disabled={autoAnchors.length === 0}
+                    onClick={() => setAutoAnchors([])}
+                  >
+                    清空锚点
+                  </button>
+                  <label className="ml-2 inline-flex items-center gap-1 text-[11px] text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={autoOverwrite}
+                      onChange={(e) => setAutoOverwrite(e.target.checked)}
+                    />
+                    覆盖冲突
+                  </label>
+                  <button
+                    type="button"
+                    className="rounded bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                    disabled={
+                      mappingsSaving ||
+                      autoAnchors.length < 4 ||
+                      bindFloorPlanId === "" ||
+                      typeof bindFloorPlanId !== "number" ||
+                      !(bindCameraOptions.find((o) => o.key === bindCameraId) || null) ||
+                      (bindCameraOptions.find((o) => o.key === bindCameraId) || null)?.kind !== "virtual"
+                    }
+                    onClick={async () => {
+                      const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                      if (!opt || opt.kind !== "virtual") return;
+                      if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+                      if (autoAnchors.length < 4) return;
+                      setMappingsSaving(true);
+                      try {
+                        const res = await fetch(
+                          `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings/auto-anchors`,
+                          {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              floor_plan_id: bindFloorPlanId,
+                              anchors: autoAnchors,
+                              overwrite_conflict: autoOverwrite,
+                            }),
+                          },
+                        );
+                        if (!res.ok) {
+                          const txt = await res.text();
+                          throw new Error(txt || "auto-anchors failed");
+                        }
+                        const res2 = await fetch(
+                          `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
+                        );
+                        if (res2.ok) setCellMappings(await res2.json());
+                        setBindingColorRefreshTick((t) => t + 1);
+                      } catch (e) {
+                        console.error(e);
+                        alert("自动匹配失败");
+                      } finally {
+                        setMappingsSaving(false);
+                      }
+                    }}
+                  >
+                    自动匹配
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  {autoAnchors.map((a, idx) => (
+                    <div key={`${a.camera_row},${a.camera_col},${a.floor_row},${a.floor_col}`} className="flex items-center justify-between rounded border border-slate-200 bg-slate-50 px-2 py-1 text-[11px]">
+                      <div className="font-mono text-slate-800">
+                        C {a.camera_row}-{a.camera_col} → F {a.floor_row}-{a.floor_col}
+                      </div>
+                      <button
+                        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
+                        onClick={() => setAutoAnchors((list) => list.filter((_, i) => i !== idx))}
+                      >
+                        删
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <div className="flex-1 overflow-y-auto p-3">

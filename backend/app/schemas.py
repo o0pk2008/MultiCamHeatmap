@@ -108,6 +108,25 @@ class VirtualViewCellMappingOut(VirtualViewCellMappingBase):
         orm_mode = True
 
 
+class AnchorPair(BaseModel):
+    camera_row: int
+    camera_col: int
+    floor_row: int
+    floor_col: int
+
+
+class AutoAnchorRequest(BaseModel):
+    floor_plan_id: int
+    anchors: List[AnchorPair]
+    overwrite_conflict: bool = False
+
+
+class AutoAnchorResponse(BaseModel):
+    applied: int
+    skipped: int
+    conflicts: int
+
+
 class FloorPlanBase(BaseModel):
     name: str
     image_path: str

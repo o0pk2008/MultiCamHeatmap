@@ -282,7 +282,7 @@ class VirtualViewInferenceManager:
         last_emit_ts = 0.0
         last_boxes = None  # (xyxy, cls)
         last_ids = None    # list[int]
-        tracks: Dict[int, Tuple[float, float, float, int]] = {}
+        tracks: Dict[int, Tuple[float, float, float, float, float, int]] = {}
         next_track_id = 1
 
         loaded = self._load_view(virtual_view_id)
@@ -410,6 +410,8 @@ class VirtualViewInferenceManager:
                                         ids = [-1 for _ in range(int(len(cls_ids)))]
                                         try:
                                             max_dist = max(25.0, 0.08 * float(max(w_img, h_img)))
+                                            base_gate = max(25.0, 0.06 * float(max(w_img, h_img)))
+                                            max_speed = 0.35 * float(max(w_img, h_img))
                                             used_tracks = set()
                                             used_dets = set()
                                             person_idxs = []
@@ -432,39 +434,69 @@ class VirtualViewInferenceManager:
                                                 cy = float(y1 + y2) * 0.5
                                                 best_tid = None
                                                 best_d2 = None
-                                                for tid, (tx, ty, _ts, _miss) in tracks.items():
+                                                for tid, (tx, ty, vx, vy, ts0, _miss) in tracks.items():
                                                     if tid in used_tracks:
                                                         continue
-                                                    dx = float(tx) - cx
-                                                    dy = float(ty) - cy
+                                                    dtp = float(now) - float(ts0)
+                                                    if dtp < 0.0:
+                                                        dtp = 0.0
+                                                    px = float(tx) + float(vx) * float(dtp)
+                                                    py = float(ty) + float(vy) * float(dtp)
+                                                    dx = float(px) - cx
+                                                    dy = float(py) - cy
                                                     d2 = dx * dx + dy * dy
                                                     if best_d2 is None or d2 < best_d2:
                                                         best_d2 = d2
                                                         best_tid = int(tid)
-                                                if best_tid is not None and best_d2 is not None and best_d2 <= (max_dist * max_dist):
+                                                if best_tid is not None and best_d2 is not None:
+                                                    try:
+                                                        tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
+                                                        dtp = float(now) - float(ts0)
+                                                        if dtp < 0.0:
+                                                            dtp = 0.0
+                                                        gate = float(base_gate) + float(max_dist) + float(max_speed) * float(dtp)
+                                                        gate2 = float(gate) * float(gate)
+                                                    except Exception:
+                                                        gate2 = float(max_dist) * float(max_dist)
+                                                    ok_match = float(best_d2) <= float(gate2)
+                                                else:
+                                                    ok_match = False
+
+                                                if ok_match:
                                                     ids[i] = int(best_tid)
                                                     used_tracks.add(int(best_tid))
                                                     used_dets.add(int(i))
-                                                    tracks[int(best_tid)] = (cx, cy, float(now), 0)
+                                                    try:
+                                                        tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
+                                                        dt0 = float(now) - float(ts0)
+                                                        if dt0 <= 1e-3:
+                                                            dt0 = 1e-3
+                                                        ovx = (cx - float(tx0)) / float(dt0)
+                                                        ovy = (cy - float(ty0)) / float(dt0)
+                                                        nvx = 0.7 * float(vx0) + 0.3 * float(ovx)
+                                                        nvy = 0.7 * float(vy0) + 0.3 * float(ovy)
+                                                        tracks[int(best_tid)] = (cx, cy, float(nvx), float(nvy), float(now), 0)
+                                                    except Exception:
+                                                        tracks[int(best_tid)] = (cx, cy, 0.0, 0.0, float(now), 0)
                                                 else:
                                                     tid = int(next_track_id)
                                                     next_track_id += 1
                                                     ids[i] = tid
                                                     used_tracks.add(tid)
                                                     used_dets.add(int(i))
-                                                    tracks[tid] = (cx, cy, float(now), 0)
+                                                    tracks[tid] = (cx, cy, 0.0, 0.0, float(now), 0)
 
-                                            next_tracks: Dict[int, Tuple[float, float, float, int]] = {}
-                                            for tid, (tx, ty, ts0, miss) in tracks.items():
+                                            next_tracks: Dict[int, Tuple[float, float, float, float, float, int]] = {}
+                                            for tid, (tx, ty, vx, vy, ts0, miss) in tracks.items():
                                                 if int(tid) in used_tracks:
-                                                    next_tracks[int(tid)] = (float(tx), float(ty), float(ts0), 0)
+                                                    next_tracks[int(tid)] = (float(tx), float(ty), float(vx), float(vy), float(ts0), 0)
                                                     continue
                                                 miss2 = int(miss) + 1
-                                                if miss2 > 3:
+                                                if miss2 > 8:
                                                     continue
-                                                if float(now) - float(ts0) > 1.5:
+                                                if float(now) - float(ts0) > 2.5:
                                                     continue
-                                                next_tracks[int(tid)] = (float(tx), float(ty), float(ts0), miss2)
+                                                next_tracks[int(tid)] = (float(tx), float(ty), float(vx), float(vy), float(ts0), miss2)
                                             tracks = next_tracks
                                         except Exception:
                                             pass

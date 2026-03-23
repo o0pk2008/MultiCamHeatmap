@@ -3,6 +3,7 @@ from typing import List
 import time
 
 import cv2
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
@@ -547,3 +548,132 @@ def delete_all_virtual_view_cell_mappings(
     )
     db.commit()
 
+
+@router.post(
+    "/virtual-views/{view_id}/cell-mappings/auto-anchors",
+    response_model=schemas.AutoAnchorResponse,
+)
+def auto_map_by_anchors(
+    view_id: int,
+    payload: schemas.AutoAnchorRequest,
+    db: Session = Depends(get_db),
+) -> schemas.AutoAnchorResponse:
+    """
+    基于 4 对锚点（camera_grid <-> floor_grid）计算单应，并批量生成相机格到平面格的映射。
+    - 仅处理当前 virtual_view_id 与指定 floor_plan_id
+    - 冲突策略：默认跳过；可选择覆盖（删除冲突项后写入）
+    """
+    view = db.query(models.CameraVirtualView).filter(models.CameraVirtualView.id == view_id).first()
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+    fp = db.query(models.FloorPlan).filter(models.FloorPlan.id == payload.floor_plan_id).first()
+    if not fp:
+        raise HTTPException(status_code=404, detail="Floor plan not found")
+    cfg = (
+        db.query(models.CameraVirtualViewGridConfig)
+        .filter(models.CameraVirtualViewGridConfig.virtual_view_id == view_id)
+        .first()
+    )
+    if not cfg:
+        raise HTTPException(status_code=400, detail="Grid config not found for this virtual view")
+    if not payload.anchors or len(payload.anchors) < 4:
+        raise HTTPException(status_code=400, detail="At least 4 anchor pairs are required")
+
+    # 取前 4 对锚点，使用格子中心点坐标拟合单应（列为 x，行为 y）
+    src = []
+    dst = []
+    for a in payload.anchors[:4]:
+        src.append([float(a.camera_col) + 0.5, float(a.camera_row) + 0.5])
+        dst.append([float(a.floor_col) + 0.5, float(a.floor_row) + 0.5])
+    src_m = np.array(src, dtype=np.float32)
+    dst_m = np.array(dst, dtype=np.float32)
+    try:
+        H = cv2.getPerspectiveTransform(src_m, dst_m)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Failed to compute homography with provided anchors")
+
+    rows_cam = int(max(1, cfg.grid_rows or 1))
+    cols_cam = int(max(1, cfg.grid_cols or 1))
+    rows_fp = int(max(1, fp.grid_rows or 1))
+    cols_fp = int(max(1, fp.grid_cols or 1))
+
+    # 预读现有映射，便于 O(1) 检查
+    existing_rows = (
+        db.query(models.VirtualViewCellMapping)
+        .filter(
+            models.VirtualViewCellMapping.virtual_view_id == view_id,
+            models.VirtualViewCellMapping.floor_plan_id == payload.floor_plan_id,
+        )
+        .all()
+    )
+    by_cam = {(m.camera_row, m.camera_col): m for m in existing_rows}
+    by_floor = {(m.floor_row, m.floor_col): m for m in existing_rows}
+
+    applied = 0
+    skipped = 0
+    conflicts = 0
+
+    def map_point(col: float, row: float) -> (int, int):
+        p = np.array([col, row, 1.0], dtype=np.float32)
+        uvw = H @ p
+        w = float(uvw[2]) if abs(float(uvw[2])) > 1e-6 else 1e-6
+        x = float(uvw[0]) / w
+        y = float(uvw[1]) / w
+        fc = int(round(x - 0.5))
+        fr = int(round(y - 0.5))
+        return fr, fc
+
+    for r in range(rows_cam):
+        for c in range(cols_cam):
+            fr, fc = map_point(float(c) + 0.5, float(r) + 0.5)
+            if fr < 0 or fr >= rows_fp or fc < 0 or fc >= cols_fp:
+                skipped += 1
+                continue
+            cam_key = (r, c)
+            floor_key = (fr, fc)
+
+            conflict_m = by_floor.get(floor_key)
+            if conflict_m and (conflict_m.camera_row, conflict_m.camera_col) != cam_key:
+                # 冲突：该平面格已被别的相机格占用
+                if payload.overwrite_conflict:
+                    # 删除冲突映射
+                    db.delete(conflict_m)
+                    db.flush()
+                    by_cam.pop((conflict_m.camera_row, conflict_m.camera_col), None)
+                    by_floor.pop(floor_key, None)
+                else:
+                    conflicts += 1
+                    skipped += 1
+                    continue
+
+            m = by_cam.get(cam_key)
+            if not m:
+                m = models.VirtualViewCellMapping(
+                    virtual_view_id=view_id,
+                    floor_plan_id=payload.floor_plan_id,
+                    camera_row=r,
+                    camera_col=c,
+                    floor_row=fr,
+                    floor_col=fc,
+                )
+                db.add(m)
+                by_cam[cam_key] = m
+                by_floor[floor_key] = m
+                applied += 1
+            else:
+                # 如果目标未变则跳过
+                if m.floor_row == fr and m.floor_col == fc:
+                    skipped += 1
+                else:
+                    # 更新为新目标
+                    # 先清理旧的 floor_key 占用
+                    old_key = (m.floor_row, m.floor_col)
+                    if old_key in by_floor:
+                        by_floor.pop(old_key, None)
+                    m.floor_row = fr
+                    m.floor_col = fc
+                    by_floor[floor_key] = m
+                    applied += 1
+
+    db.commit()
+    return schemas.AutoAnchorResponse(applied=applied, skipped=skipped, conflicts=conflicts)
