@@ -12,6 +12,7 @@ import PeoplePositionView from "./views/PeoplePositionView";
 import HeatmapViewPage from "./views/HeatmapView";
 import MappedCamerasGrid from "./views/heatmap/MappedCamerasGrid";
 import FloorPlanCanvas from "./components/canvas/FloorPlanCanvas";
+import FootfallAnalysisView from "./views/FootfallAnalysisView";
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
@@ -91,6 +92,12 @@ const App: React.FC = () => {
               onChange={setActiveTab}
             />
             <SidebarTabButton
+              label="人流量分析"
+              tab="footfall"
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
+            <SidebarTabButton
               label="映射管理"
               tab="mapping"
               activeTab={activeTab}
@@ -110,6 +117,12 @@ const App: React.FC = () => {
           )}
           {activeTab === "people" && (
             <PeoplePositionView
+              FloorPlanCanvasComponent={FloorPlanCanvas}
+              MappedCamerasGridComponent={MappedCamerasGrid}
+            />
+          )}
+          {activeTab === "footfall" && (
+            <FootfallAnalysisView
               FloorPlanCanvasComponent={FloorPlanCanvas}
               MappedCamerasGridComponent={MappedCamerasGrid}
             />
