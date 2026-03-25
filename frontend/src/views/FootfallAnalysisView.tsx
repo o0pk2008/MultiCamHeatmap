@@ -50,7 +50,8 @@ type FootfallStats = {
   genderMale: number;
   genderFemale: number;
   ageBuckets: { label: string; value: number }[];
-  trendAll: { hour: number; value: number }[];
+  trendIn: { hour: number; value: number }[];
+  trendOut: { hour: number; value: number }[];
 };
 
 const storageKey = "footfall_line_configs_v1";
@@ -79,30 +80,79 @@ const toDateInputValue = (d: Date): string => {
   return `${y}-${m}-${day}`;
 };
 
-const hashString = (s: string): number => {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
+const toUTCDateInputValue = (d: Date): string => {
+  // YYYY-MM-DD in UTC
+  return d.toISOString().slice(0, 10);
 };
 
-const buildMockStats = (dateKey: string, realtimeTick = 0): FootfallStats => {
-  const seed = hashString(`${dateKey}:${realtimeTick}`);
-  const inCount = 80 + (seed % 180);
-  const outCount = Math.max(0, inCount - 5 + ((seed >> 2) % 11));
-  const genderMale = Math.max(0, Math.floor(inCount * (0.45 + ((seed % 21) - 10) / 200)));
-  const genderFemale = Math.max(0, inCount - genderMale);
-  const ageBase = [9, 33, 40, 26, 18, 10];
-  const ageLabels = ["0-12", "18-25", "26-35", "36-45", "46-55", "55+"];
-  const ageBuckets = ageBase.map((base, idx) => ({
-    label: ageLabels[idx],
-    value: Math.max(0, base + (((seed >> (idx + 1)) % 9) - 4)),
+const AGE_BUCKET_LABELS = ["0-12", "18-25", "26-35", "36-45", "46-55", "55+"] as const;
+
+const buildEmptyStats = (): FootfallStats => {
+  const ageBuckets = Array.from({ length: AGE_BUCKET_LABELS.length }, (_, idx) => ({
+    label: AGE_BUCKET_LABELS[idx],
+    value: 0,
   }));
-  const trendAll = Array.from({ length: 24 }, (_, h) => {
-    const bizBase = h >= 9 && h <= 21 ? 10 + Math.max(0, 20 - Math.abs(15 - h) * 2) : 2;
-    const noise = ((seed >> (h % 12)) % 5) - 2;
-    return { hour: h, value: Math.max(0, bizBase + noise) };
-  });
-  return { inCount, outCount, genderMale, genderFemale, ageBuckets, trendAll };
+  return {
+    inCount: 0,
+    outCount: 0,
+    genderMale: 0,
+    genderFemale: 0,
+    ageBuckets,
+    trendIn: Array.from({ length: 24 }, (_, hour) => ({ hour, value: 0 })),
+    trendOut: Array.from({ length: 24 }, (_, hour) => ({ hour, value: 0 })),
+  };
+};
+
+const VirtualViewMjpeg: React.FC<{
+  mjpegUrl: string;
+  title: string;
+  frameW: number;
+  frameH: number;
+  epoch: number;
+}> = ({ mjpegUrl, title, frameW, frameH, epoch }) => {
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const r0 = el.getBoundingClientRect();
+    if (r0.width > 0 && r0.height > 0) setBox({ w: r0.width, h: r0.height });
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (cr) setBox({ w: cr.width, h: cr.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const iw = Math.max(1, frameW);
+  const ih = Math.max(1, frameH);
+  const scale = box.w > 0 && box.h > 0 ? Math.min(box.w / iw, box.h / ih) : 1;
+
+  return (
+    <div ref={wrapRef} className="relative h-full w-full min-h-0 overflow-hidden bg-black">
+      <iframe
+        key={`vv-mjpeg-${epoch}`}
+        src={mjpegUrl}
+        title={title}
+        loading="eager"
+        scrolling="no"
+        className="pointer-events-none"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: iw,
+          height: ih,
+          border: "none",
+          backgroundColor: "#000",
+          transform: `translate(-50%, -50%) scale(${scale})`,
+          transformOrigin: "center center",
+        }}
+      />
+    </div>
+  );
 };
 
 const PanZoomViewport: React.FC<{
@@ -283,19 +333,187 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [floorLineP2, setFloorLineP2] = useState<Vec2 | null>(null);
   const [draggingFloorVertex, setDraggingFloorVertex] = useState<0 | 1 | null>(null);
   const [floorImgNaturalSize, setFloorImgNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [inCount] = useState(0);
-  const [outCount] = useState(0);
-  const [statsMode, setStatsMode] = useState<"date" | "realtime">("date");
-  const [statsDate, setStatsDate] = useState<string>(() => toDateInputValue(new Date()));
-  const [realtimeTick, setRealtimeTick] = useState(0);
-  const [statsData, setStatsData] = useState<FootfallStats>(() => buildMockStats(toDateInputValue(new Date())));
+  const [statsMode, setStatsMode] = useState<"date" | "realtime">("realtime");
+  const [statsDate, setStatsDate] = useState<string>(() => toUTCDateInputValue(new Date()));
+  const [statsData, setStatsData] = useState<FootfallStats>(() => buildEmptyStats());
+  const [analyzing, setAnalyzing] = useState(false);
   const [drawHint, setDrawHint] = useState("点击画面设置第一个点");
+
+  type HeatmapPersonEvent = {
+    floor_plan_id: number;
+    floor_row: number;
+    floor_col: number;
+    virtual_view_id?: number | null;
+    track_id?: number | null;
+    ts?: number;
+    gender?: string | null;
+    age_bucket?: string | null;
+    foot_u?: number | null;
+    foot_v?: number | null;
+    stable_id?: number | null;
+  };
+
+  const wsRef = useRef<WebSocket | null>(null);
+  const statsRef = useRef<FootfallStats>(buildEmptyStats());
+  const pendingCommitTimerRef = useRef<number | null>(null);
+  const trackZoneByIdRef = useRef<
+    Map<number, { side: -1 | 1; zoneSide: (-1 | 1) | null; lastCrossTs: number }>
+  >(new Map());
+  const analysisLineRef = useRef<{
+    // 过线判定使用“虚拟视窗原图归一化坐标”
+    vvP1: Vec2;
+    vvP2: Vec2;
+    virtualViewId: number;
+    filterMode: "date" | "realtime";
+    filterDateKey?: string;
+  } | null>(null);
+
+  const commitStatsToReact = useCallback(() => {
+    // 深拷贝，避免把 ref 对象引用直接暴露给 React
+    setStatsData({
+      ...statsRef.current,
+      ageBuckets: statsRef.current.ageBuckets.map((x) => ({ ...x })),
+      trendIn: statsRef.current.trendIn.map((x) => ({ ...x })),
+      trendOut: statsRef.current.trendOut.map((x) => ({ ...x })),
+    });
+  }, []);
+
+  const scheduleCommitStats = useCallback(() => {
+    if (pendingCommitTimerRef.current != null) return;
+    pendingCommitTimerRef.current = window.setTimeout(() => {
+      pendingCommitTimerRef.current = null;
+      commitStatsToReact();
+    }, 150);
+  }, [commitStatsToReact]);
+
+  const resetStats = useCallback(() => {
+    if (pendingCommitTimerRef.current != null) {
+      window.clearTimeout(pendingCommitTimerRef.current);
+      pendingCommitTimerRef.current = null;
+    }
+    statsRef.current = buildEmptyStats();
+    trackZoneByIdRef.current = new Map();
+    setStatsData(buildEmptyStats());
+  }, []);
+
+  const computeSignedDistByUv = useCallback((u: number, v: number): number | null => {
+    const cfg = analysisLineRef.current;
+    if (!cfg) return null;
+    const dx = cfg.vvP2.x - cfg.vvP1.x;
+    const dy = cfg.vvP2.y - cfg.vvP1.y;
+    const len = Math.hypot(dx, dy) || 0;
+    if (len <= 1e-12) return null;
+    const cross = dx * (v - cfg.vvP1.y) - dy * (u - cfg.vvP1.x);
+    return cross / len; // 有符号距离（单位：UV 归一化空间长度）
+  }, []);
+
+  const computeSideByUv = useCallback(
+    (u: number, v: number): -1 | 0 | 1 => {
+      const sd = computeSignedDistByUv(u, v);
+      if (sd == null) return 0;
+      const eps = 1e-6;
+      if (sd > eps) return 1;
+      if (sd < -eps) return -1;
+      return 0;
+    },
+    [computeSignedDistByUv],
+  );
+
+  // 判定线两侧各自延伸出一个“近线矩形区域”（这里在 UV 空间用近线带宽近似）
+  // sd 为 signed distance，只有当点落在 |sd| <= LINE_NEAR_ZONE_W 时才认为进入了近线区域。
+  const LINE_NEAR_ZONE_W = 0.05;
+
+  const computeZoneSideByUv = useCallback(
+    (u: number, v: number): (-1 | 1) | null => {
+      const sd = computeSignedDistByUv(u, v);
+      if (sd == null) return null;
+      if (Math.abs(sd) > LINE_NEAR_ZONE_W) return null;
+      return sd > 0 ? 1 : -1;
+    },
+    [computeSignedDistByUv],
+  );
+
+  const commitCrossCounts = useCallback(
+    (dir: "in" | "out", evt: HeatmapPersonEvent) => {
+      const tsSec = Number.isFinite(Number(evt.ts)) ? Number(evt.ts) : Date.now() / 1000;
+      const hour = new Date(tsSec * 1000).getHours();
+      if (dir === "in") {
+        statsRef.current.inCount += 1;
+        if (hour >= 0 && hour <= 23) statsRef.current.trendIn[hour].value += 1;
+      } else {
+        statsRef.current.outCount += 1;
+        if (hour >= 0 && hour <= 23) statsRef.current.trendOut[hour].value += 1;
+      }
+
+      // 性别/年龄统计只在“进入(in)”时累计
+      if (dir === "in") {
+        const gender = evt.gender ?? null;
+        if (gender === "male") statsRef.current.genderMale += 1;
+        if (gender === "female") statsRef.current.genderFemale += 1;
+
+        const ageBucket = evt.age_bucket ?? null;
+        if (ageBucket) {
+          const idx = statsRef.current.ageBuckets.findIndex((b) => b.label === ageBucket);
+          if (idx >= 0) statsRef.current.ageBuckets[idx].value += 1;
+        }
+      }
+
+      scheduleCommitStats();
+    },
+    [scheduleCommitStats],
+  );
+
+  const [lineFlash, setLineFlash] = useState<null | { kind: "in" | "out"; untilMs: number }>(null);
+
+  const flashLine = useCallback((kind: "in" | "out") => {
+    const until = Date.now() + 450;
+    setLineFlash({ kind, untilMs: until });
+    window.setTimeout(() => {
+      setLineFlash((cur) => {
+        if (!cur) return null;
+        if (Date.now() >= cur.untilMs) return null;
+        return cur;
+      });
+    }, 520);
+  }, []);
+
+  const handleHeatmapWsEvent = useCallback(
+    (raw: any) => {
+      if (!analysisLineRef.current) return;
+      const cfg = analysisLineRef.current;
+
+      const evt = raw ?? {};
+      if (evt.floor_plan_id !== selectedFloorPlanId) return;
+      const vvId = evt.virtual_view_id ?? null;
+      if (vvId == null || Number(vvId) !== cfg.virtualViewId) return;
+
+      if (cfg.filterMode === "date" && cfg.filterDateKey) {
+        const tsSec = Number.isFinite(Number(evt.ts)) ? Number(evt.ts) : NaN;
+        if (!Number.isFinite(tsSec)) return;
+        const dateKey = toUTCDateInputValue(new Date(tsSec * 1000));
+        if (dateKey !== cfg.filterDateKey) return;
+      }
+
+      const dirRaw = evt.direction;
+      if (dirRaw !== "in" && dirRaw !== "out") return;
+
+      // 后端已经判定方向和去抖/计数逻辑；前端只负责更新统计和闪烁
+      commitCrossCounts(dirRaw, {
+        ts: evt.ts,
+        gender: evt.gender ?? null,
+        age_bucket: evt.age_bucket ?? null,
+      } as HeatmapPersonEvent);
+      flashLine(dirRaw);
+    },
+    [commitCrossCounts, flashLine, selectedFloorPlanId],
+  );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
     y: 0,
     visible: false,
   });
   const [vvSnapshotRefreshMs, setVvSnapshotRefreshMs] = useState<number>(3000);
+  const [mjpegStreamEpoch, setMjpegStreamEpoch] = useState(0);
   const [vvSnapshotObjUrl, setVvSnapshotObjUrl] = useState<string>("");
   const vvSnapshotTimerRef = useRef<number | null>(null);
   const vvSnapshotInFlightRef = useRef<boolean>(false);
@@ -364,6 +582,33 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       .catch((e) => console.error(e));
   }, [selectedFloorPlanId]);
 
+  // 从后端加载已保存的判定线配置（用于跨电脑共享）
+  useEffect(() => {
+    if (selectedFloorPlanId == null) return;
+    fetch(`${API_BASE}/api/footfall/lines?floor_plan_id=${selectedFloorPlanId}`)
+      .then((r) => (r.ok ? r.json() : Promise.resolve([])))
+      .then((rows: any[]) => {
+        const next: Record<string, LineCfg> = {};
+        for (const it of rows || []) {
+          const vvId = Number(it.virtual_view_id);
+          if (!Number.isFinite(vvId)) continue;
+          const key = `vv:${vvId}`;
+          next[key] = {
+            p1: { x: Number(it.p1?.x ?? 0), y: Number(it.p1?.y ?? 0) },
+            p2: { x: Number(it.p2?.x ?? 0), y: Number(it.p2?.y ?? 0) },
+            floor_p1: it.floor_p1 ? { x: Number(it.floor_p1.x), y: Number(it.floor_p1.y) } : undefined,
+            floor_p2: it.floor_p2 ? { x: Number(it.floor_p2.x), y: Number(it.floor_p2.y) } : undefined,
+            inLabel: String(it.in_label ?? "进入"),
+            outLabel: String(it.out_label ?? "离开"),
+            enabled: it.enabled !== false,
+          };
+        }
+        setAllLineCfg(next);
+        writeAllLineCfg(next);
+      })
+      .catch((e) => console.error(e));
+  }, [selectedFloorPlanId]);
+
   const selectedFloorPlan = useMemo(
     () => floorPlans.find((fp) => fp.id === selectedFloorPlanId) || null,
     [floorPlans, selectedFloorPlanId],
@@ -405,6 +650,272 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     () => bindCameraOptions.find((o) => o.key === bindCameraId) || null,
     [bindCameraOptions, bindCameraId],
   );
+
+  const requiredVirtualViewId = selectedCameraOpt?.kind === "virtual" ? selectedCameraOpt.view.id : null;
+  const canStartFootfall =
+    selectedFloorPlanId != null &&
+    selectedFloorPlan != null &&
+    requiredVirtualViewId != null &&
+    !!(savedLineP1 ?? lineP1) &&
+    !!(savedLineP2 ?? lineP2) &&
+    !!floorLineP1 &&
+    !!floorLineP2 &&
+    lineEnabled;
+
+  const connectFootfallWs = useCallback(() => {
+    // 清理旧连接
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+
+    if (requiredVirtualViewId == null || selectedFloorPlanId == null) return;
+
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
+        /:\d+$/,
+        ":18080",
+      )}/ws/footfall-events`,
+    );
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        handleHeatmapWsEvent(data);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    ws.onclose = () => {
+      wsRef.current = null;
+      setAnalyzing(false);
+      analysisLineRef.current = null;
+    };
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch {}
+    };
+    wsRef.current = ws;
+  }, [handleHeatmapWsEvent, requiredVirtualViewId, selectedFloorPlanId]);
+
+  // 非分析状态下：从后端加载持久化统计（跨电脑共享）
+  useEffect(() => {
+    if (analyzing) return;
+    if (selectedFloorPlanId == null || requiredVirtualViewId == null) {
+      const empty = buildEmptyStats();
+      statsRef.current = empty;
+      setStatsData(empty);
+      return;
+    }
+    const mode = statsMode === "realtime" ? "realtime" : "date";
+    const url =
+      `${API_BASE}/api/footfall/stats?floor_plan_id=${selectedFloorPlanId}` +
+      `&virtual_view_id=${requiredVirtualViewId}` +
+      `&mode=${mode}` +
+      (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "");
+
+    fetch(url)
+      .then((r) => (r.ok ? r.json() : Promise.resolve(null)))
+      .then((data) => {
+        if (!data) return;
+        statsRef.current = data as FootfallStats;
+        setStatsData(data as FootfallStats);
+      })
+      .catch((e) => console.error(e));
+  }, [analyzing, selectedFloorPlanId, requiredVirtualViewId, statsMode, statsDate]);
+
+  // 分析状态同步：若后端已在运行，则本页进入 analyzing，禁止重复 start
+  useEffect(() => {
+    if (selectedFloorPlanId == null || requiredVirtualViewId == null) return;
+    if (!canStartFootfall) return;
+    if (analyzing) return;
+
+    const vvP1 = savedLineP1 ?? lineP1;
+    const vvP2 = savedLineP2 ?? lineP2;
+    if (!vvP1 || !vvP2) return;
+
+    fetch(
+      `${API_BASE}/api/footfall/status?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
+    )
+      .then((r) => (r.ok ? r.json() : Promise.resolve(null)))
+      .then((data) => {
+        if (!data || !data.running) return;
+        analysisLineRef.current = {
+          vvP1,
+          vvP2,
+          virtualViewId: requiredVirtualViewId,
+          filterMode: statsMode,
+          filterDateKey: statsMode === "date" ? statsDate : undefined,
+        };
+        setMjpegStreamEpoch((n) => n + 1);
+        setAnalyzing(true);
+        connectFootfallWs();
+      })
+      .catch((e) => console.error(e));
+  }, [
+    analyzing,
+    canStartFootfall,
+    connectFootfallWs,
+    requiredVirtualViewId,
+    savedLineP1,
+    savedLineP2,
+    lineP1,
+    lineP2,
+    selectedFloorPlanId,
+    statsMode,
+    statsDate,
+  ]);
+
+  const startFootfallAnalysis = useCallback(async () => {
+    if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId || !floorLineP1 || !floorLineP2) return;
+
+    // 如果后端已在运行，则避免重复触发“开始”
+    try {
+      const st = await fetch(
+        `${API_BASE}/api/footfall/status?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
+      );
+      if (st.ok) {
+        const data = await st.json();
+        if (data?.running) return;
+      }
+    } catch {}
+
+    // 统计使用的判定线固定在启动瞬间，避免用户在分析过程中移动点导致口径变化
+    const vvP1 = savedLineP1 ?? lineP1;
+    const vvP2 = savedLineP2 ?? lineP2;
+    if (!vvP1 || !vvP2) return;
+    analysisLineRef.current = {
+      vvP1,
+      vvP2,
+      virtualViewId: requiredVirtualViewId,
+      filterMode: statsMode,
+      filterDateKey: statsMode === "date" ? statsDate : undefined,
+    };
+    // 保留后端持久化统计作为初始值；分析期间只增量累加新事件
+    statsRef.current = JSON.parse(JSON.stringify(statsData)) as FootfallStats;
+    setStatsData(JSON.parse(JSON.stringify(statsData)) as FootfallStats);
+    trackZoneByIdRef.current = new Map();
+    setMjpegStreamEpoch((n) => n + 1);
+
+    try {
+      // 先启动后端实时过线统计，再建立 WS，避免丢帧
+      await fetch(`${API_BASE}/api/footfall/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          floor_plan_id: selectedFloorPlanId,
+          virtual_view_id: requiredVirtualViewId,
+          p1: vvP1,
+          p2: vvP2,
+          floor_p1: floorLineP1,
+          floor_p2: floorLineP2,
+          in_label: inLabel,
+          out_label: outLabel,
+          enabled: lineEnabled,
+          // UV near-line hysteresis band
+          zone_w: LINE_NEAR_ZONE_W,
+          emit_interval_sec: 0.03,
+        }),
+      });
+    } catch (e) {
+      console.error(e);
+      alert("开始检测分析失败");
+      analysisLineRef.current = null;
+      return;
+    }
+
+    // 清理旧连接
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
+        /:\d+$/,
+        ":18080",
+      )}/ws/footfall-events`,
+    );
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        handleHeatmapWsEvent(data);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    ws.onclose = () => {
+      wsRef.current = null;
+      setAnalyzing(false);
+    };
+    ws.onerror = () => {
+      // 出错通常会触发 close，这里兜底把状态清掉
+      try {
+        ws.close();
+      } catch {}
+    };
+
+    wsRef.current = ws;
+    setAnalyzing(true);
+  }, [
+    canStartFootfall,
+    requiredVirtualViewId,
+    selectedFloorPlanId,
+    floorLineP1,
+    floorLineP2,
+    lineEnabled,
+    selectedFloorPlan,
+    inLabel,
+    outLabel,
+    statsData,
+    statsMode,
+    statsDate,
+    handleHeatmapWsEvent,
+  ]);
+
+  const stopFootfallAnalysis = useCallback(async () => {
+    if (!selectedFloorPlanId) return;
+    try {
+      if (!requiredVirtualViewId) return;
+      await fetch(
+        `${API_BASE}/api/footfall/stop?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
+        { method: "POST" },
+      );
+    } catch (e) {
+      console.error(e);
+    }
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+    if (pendingCommitTimerRef.current != null) {
+      window.clearTimeout(pendingCommitTimerRef.current);
+      pendingCommitTimerRef.current = null;
+    }
+    setMjpegStreamEpoch((n) => n + 1);
+    setAnalyzing(false);
+    analysisLineRef.current = null;
+    trackZoneByIdRef.current = new Map();
+  }, [requiredVirtualViewId, selectedFloorPlanId]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        wsRef.current?.close();
+      } catch {}
+      wsRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!analyzing) return;
+    if (!analysisLineRef.current) return;
+    // 仅更新过滤口径并清空统计，后台任务不必重启
+    analysisLineRef.current.filterMode = statsMode;
+    analysisLineRef.current.filterDateKey = statsMode === "date" ? statsDate : undefined;
+    resetStats();
+  }, [statsMode, statsDate, analyzing, resetStats]);
+
   const displayP1 = savedLineP1 ?? lineP1;
   const displayP2 = savedLineP2 ?? lineP2;
   const firstSavedLineCameraKey = useMemo(() => {
@@ -419,47 +930,30 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     return rows[0]?.key || "";
   }, [allLineCfg, bindCameraOptions]);
 
+  const userSelectedCameraRef = useRef(false);
+
   useEffect(() => {
     if (!firstSavedLineCameraKey) return;
-    if (!bindCameraId || !allLineCfg[bindCameraId]) {
+    // 仅在尚未手动选择时进行兜底；避免用户点击后被立刻切回默认摄像头
+    if (!userSelectedCameraRef.current && (!bindCameraId || !allLineCfg[bindCameraId])) {
       setBindCameraId(firstSavedLineCameraKey);
     }
   }, [firstSavedLineCameraKey, bindCameraId, allLineCfg]);
-  useEffect(() => {
-    if (statsMode === "realtime") {
-      const t = window.setInterval(() => {
-        setRealtimeTick((v) => v + 1);
-      }, 5000);
-      return () => window.clearInterval(t);
-    }
-  }, [statsMode]);
-
-  useEffect(() => {
-    const dateKey = statsMode === "realtime" ? toDateInputValue(new Date()) : statsDate;
-    // 预留真实接口：目前先按日期生成演示数据，保证切换行为完整。
-    setStatsData(buildMockStats(dateKey, statsMode === "realtime" ? realtimeTick : 0));
-  }, [statsMode, statsDate, realtimeTick]);
-
-  const trendIn = statsData.trendAll.map((x, idx) => ({
-    hour: x.hour,
-    value: x.value + (idx % 3 === 0 ? 1 : 0),
-  }));
-  const trendOut = statsData.trendAll.map((x, idx) => ({
-    hour: x.hour,
-    value: Math.max(0, x.value - 2 + (idx % 4 === 0 ? 1 : 0)),
-  }));
+  // trendIn/trendOut 由后端实时事件实时累加得到
+  const trendIn = statsData.trendIn;
+  const trendOut = statsData.trendOut;
   const statsTitleDate = statsMode === "realtime" ? `${toDateInputValue(new Date())} 实时` : statsDate;
   const genderOption = useMemo(
     () => ({
       tooltip: { trigger: "item" },
-      legend: { bottom: 0, left: "center", textStyle: { fontSize: 11 } },
+      legend: { bottom: -8, left: "center", textStyle: { fontSize: 11 } },
       series: [
         {
           type: "pie",
-          radius: ["40%", "70%"],
+          radius: ["38%", "62%"],
           avoidLabelOverlap: false,
           itemStyle: { borderRadius: 4, borderColor: "#fff", borderWidth: 2 },
-          label: { show: true, formatter: "{b}: {c}" },
+          label: { show: true, formatter: "{b}: {c}", fontSize: 10 },
           data: [
             { value: statsData.genderMale, name: "男", itemStyle: { color: "#3B82F6" } },
             { value: statsData.genderFemale, name: "女", itemStyle: { color: "#EC4899" } },
@@ -603,22 +1097,9 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       window.clearInterval(vvSnapshotTimerRef.current);
       vvSnapshotTimerRef.current = null;
     }
-    if (!selectedCameraOpt || selectedCameraOpt.kind !== "virtual") return;
-    const view = selectedCameraOpt.view;
-    void refreshVirtualSnapshot(view);
-    const t = window.setInterval(() => {
-      void refreshVirtualSnapshot(view);
-    }, Math.max(500, vvSnapshotRefreshMs));
-    vvSnapshotTimerRef.current = t;
-    return () => {
-      if (vvSnapshotTimerRef.current === t) {
-        window.clearInterval(t);
-        vvSnapshotTimerRef.current = null;
-      } else {
-        window.clearInterval(t);
-      }
-    };
-  }, [selectedCameraOpt, vvSnapshotRefreshMs, refreshVirtualSnapshot]);
+    // real-time 预览使用 mjpeg iframe（preview_shared/analyzed），不再轮询 snapshot.jpg
+    return;
+  }, [analyzing, selectedCameraOpt, vvSnapshotRefreshMs, refreshVirtualSnapshot]);
 
   useEffect(() => {
     return () => {
@@ -639,6 +1120,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const onVirtualPreviewClick = (world: Vec2) => {
     if (contextMenu.visible) setContextMenu((m) => ({ ...m, visible: false }));
+    if (analyzing) return;
     if (!lineToolEnabled) return;
     if (!selectedCameraOpt || selectedCameraOpt.kind !== "virtual") return;
     const imgPt = worldToImagePoint(world, vvViewportRef.current, { allowOutside: false });
@@ -660,6 +1142,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   };
 
   const findCamVertexHit = useCallback((world: Vec2): 0 | 1 | null => {
+    if (analyzing) return null;
     if (!selectedCameraOpt || selectedCameraOpt.kind !== "virtual" || !lineP1 || !lineP2) return null;
     const imgPt = worldToImagePoint(world, vvViewportRef.current, { allowOutside: false });
     if (!imgPt) return null;
@@ -669,13 +1152,14 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     };
     const d1 = Math.hypot(p.x - lineP1.x, p.y - lineP1.y);
     const d2 = Math.hypot(p.x - lineP2.x, p.y - lineP2.y);
-    const hitR = 0.025;
+  const hitR = 0.025;
     if (d1 <= hitR) return 0;
     if (d2 <= hitR) return 1;
     return null;
-  }, [selectedCameraOpt, lineP1, lineP2]);
+  }, [selectedCameraOpt, lineP1, lineP2, analyzing]);
 
   const findFloorVertexHit = useCallback((world: Vec2): 0 | 1 | null => {
+    if (analyzing) return null;
     if (!floorLineP1 || !floorLineP2) return null;
     const imgPt = worldToImagePoint(world, floorViewportRef.current, { allowOutside: false });
     if (!imgPt) return null;
@@ -689,7 +1173,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     if (d1 <= hitR) return 0;
     if (d2 <= hitR) return 1;
     return null;
-  }, [floorLineP1, floorLineP2]);
+  }, [floorLineP1, floorLineP2, analyzing]);
 
   const renderVirtualOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, info: { w: number; h: number; pan: { x: number; y: number }; zoom: number }) => {
@@ -713,8 +1197,16 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         const p1 = toWorld(lineP1);
         const p2 = toWorld(lineP2);
         if (lineEnabled) {
-          ctx.strokeStyle = "#38BDF8";
-          ctx.lineWidth = 3;
+          const now = Date.now();
+          const flashing = lineFlash != null && now <= lineFlash.untilMs;
+          const flashColor = lineFlash?.kind === "in" ? "#10B981" : "#F97316";
+          if (flashing) {
+            ctx.strokeStyle = flashColor;
+            ctx.lineWidth = 6;
+          } else {
+            ctx.strokeStyle = "#38BDF8";
+            ctx.lineWidth = 3;
+          }
           ctx.beginPath();
           ctx.moveTo(p1.x, p1.y);
           ctx.lineTo(p2.x, p2.y);
@@ -790,11 +1282,19 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
       ctx.restore();
     },
-    [selectedCameraOpt, lineP1, lineP2, lineEnabled, inLabel, outLabel],
+    [selectedCameraOpt, lineP1, lineP2, lineEnabled, inLabel, outLabel, lineFlash],
   );
 
   const deleteCurrentLine = useCallback(() => {
     if (!bindCameraId) return;
+    const m = bindCameraId.match(/^vv:(\d+)$/);
+    const vvId = m ? Number(m[1]) : null;
+    if (selectedFloorPlanId != null && vvId != null) {
+      void fetch(
+        `${API_BASE}/api/footfall/lines?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${vvId}`,
+        { method: "DELETE" },
+      ).catch(() => {});
+    }
     setAllLineCfg((old) => {
       if (!old[bindCameraId]) return old;
       const next = { ...old };
@@ -809,7 +1309,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setFloorLineP1(null);
     setFloorLineP2(null);
     setDrawHint("已删除该摄像头判定线");
-  }, [bindCameraId]);
+  }, [bindCameraId, selectedFloorPlanId]);
 
   const lineCfgRows = useMemo(() => {
     const rows = Object.entries(allLineCfg)
@@ -836,6 +1336,14 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const deleteLineByKey = useCallback(
     (cameraKey: string) => {
+      const m = cameraKey.match(/^vv:(\d+)$/);
+      const vvId = m ? Number(m[1]) : null;
+      if (selectedFloorPlanId != null && vvId != null) {
+        void fetch(
+          `${API_BASE}/api/footfall/lines?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${vvId}`,
+          { method: "DELETE" },
+        ).catch(() => {});
+      }
       setAllLineCfg((old) => {
         if (!old[cameraKey]) return old;
         const next = { ...old };
@@ -853,7 +1361,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         setDrawHint("已删除该摄像头判定线");
       }
     },
-    [bindCameraId],
+    [bindCameraId, selectedFloorPlanId],
   );
 
   const renderFloorOverlay = useCallback(
@@ -919,7 +1427,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       ctx.arc(p2.x, p2.y, 6, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
-      const label = `进入 ${inCount} / 离开 ${outCount}`;
+      const label = `进入 ${statsData.inCount} / 离开 ${statsData.outCount}`;
       ctx.font = "600 12px sans-serif";
       const tw = Math.ceil(ctx.measureText(label).width);
       const lh = 20;
@@ -944,7 +1452,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       ctx.fillText(label, cx, ly - 4);
       ctx.restore();
     },
-    [selectedFloorPlan, floorImgNaturalSize, showGrid, floorLineP1, floorLineP2, inCount, outCount],
+    [selectedFloorPlan, floorImgNaturalSize, showGrid, floorLineP1, floorLineP2, statsData.inCount, statsData.outCount],
   );
 
   return (
@@ -1018,10 +1526,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                 className="rounded border border-slate-300 bg-white px-2 py-1"
                 value={statsDate}
                 onChange={(e) => {
-                  setStatsDate(e.target.value || toDateInputValue(new Date()));
+                  setStatsDate(e.target.value || toUTCDateInputValue(new Date()));
                   setStatsMode("date");
                 }}
-                disabled={statsMode === "realtime"}
+                  disabled={statsMode === "realtime" || analyzing}
                 title="选择日期加载统计数据"
               />
               <label className="flex items-center gap-1 select-none">
@@ -1029,9 +1537,24 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                   type="checkbox"
                   checked={statsMode === "realtime"}
                   onChange={(e) => setStatsMode(e.target.checked ? "realtime" : "date")}
+                    disabled={analyzing}
                 />
                 <span>实时数据</span>
               </label>
+                <button
+                  type="button"
+                  className={`rounded px-3 py-1 text-xs font-medium text-white ${
+                    analyzing ? "bg-rose-500 hover:bg-rose-600" : "bg-[#694FF9] hover:bg-[#5b3ff6]"
+                  } disabled:opacity-50`}
+                  disabled={!analyzing && !canStartFootfall}
+                  onClick={() => {
+                    if (analyzing) void stopFootfallAnalysis();
+                    else void startFootfallAnalysis();
+                  }}
+                  title={!canStartFootfall ? "需要：选择平面图 + 选择虚拟摄像头 + 保存判定线" : "启动/停止检测分析"}
+                >
+                  {analyzing ? "停止检测分析" : "开始检测分析"}
+                </button>
             </div>
           </div>
           <div className="mb-3 grid grid-cols-2 gap-2">
@@ -1049,10 +1572,20 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             <div className="rounded border border-slate-200 bg-slate-50 p-2 lg:col-span-1">
               <div className="mb-2 text-xs font-semibold text-slate-700">性别分布（男 / 女）</div>
               <ReactECharts option={genderOption} style={{ height: 190, width: "100%" }} notMerge />
+              {analyzing && statsData.genderMale + statsData.genderFemale === 0 ? (
+                <div className="mt-2 text-[11px] text-amber-600">
+                  当前检测不到男/女：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `best_Gender_classification.pt`），并能正确输出 gender（male/female）。
+                </div>
+              ) : null}
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2 lg:col-span-2">
               <div className="mb-2 text-xs font-semibold text-slate-700">年龄分层</div>
               <ReactECharts option={ageOption} style={{ height: 190, width: "100%" }} notMerge />
+              {analyzing && statsData.ageBuckets.reduce((a, b) => a + b.value, 0) === 0 ? (
+                <div className="mt-2 text-[11px] text-amber-600">
+                  当前检测不到年龄分桶：请确认后端已配置两个二阶段模型：性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `best_Gender_classification.pt`），年龄模型 `YOLO_FACE_AGE_MODEL_PATH`（默认 `yolo11n-face-age.pt`），并能正确输出年龄（会被映射到 `18-25/55+` 等分桶）。
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -1069,7 +1602,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           <select
             className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
             value={bindCameraId}
-            onChange={(e) => setBindCameraId(e.target.value)}
+            onChange={(e) => {
+              userSelectedCameraRef.current = true;
+              setBindCameraId(e.target.value);
+            }}
           >
             {bindCameraOptions.length === 0 && <option value="">无摄像头</option>}
             {bindCameraOptions.map((it) => (
@@ -1123,6 +1659,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                       className={`inline-flex h-8 w-8 items-center justify-center rounded hover:bg-slate-100 ${
                         lineToolEnabled ? "bg-emerald-100 text-emerald-700" : "text-slate-700"
                       }`}
+                      disabled={analyzing}
                       onClick={() => {
                         setLineToolEnabled((prev) => {
                           const next = !prev;
@@ -1138,36 +1675,12 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                         <circle cx="20" cy="6" r="2" fill="currentColor" />
                       </svg>
                     </button>
-                    <div className="flex items-center gap-1 px-1 text-[11px] text-slate-600">
-                      <span className="text-slate-500">刷新</span>
-                      <select
-                        className="rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px]"
-                        value={vvSnapshotRefreshMs}
-                        onChange={(e) => setVvSnapshotRefreshMs(Number(e.target.value) || 3000)}
-                        title="预览刷新频率（轮询 snapshot.jpg）"
-                      >
-                        <option value={1000}>1s</option>
-                        <option value={3000}>3s</option>
-                        <option value={5000}>5s</option>
-                        <option value={10000}>10s</option>
-                      </select>
-                    </div>
-                    <button
-                      type="button"
-                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
-                      onClick={() => {
-                        if (selectedCameraOpt.kind !== "virtual") return;
-                        void refreshVirtualSnapshot(selectedCameraOpt.view);
-                      }}
-                    >
-                      刷新
-                    </button>
                     {lineToolEnabled && (
                       <>
                         <button
                           type="button"
                           className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
-                          disabled={!lineP1 || !lineP2}
+                          disabled={!lineP1 || !lineP2 || analyzing}
                           onClick={() => {
                             if (!bindCameraId || !lineP1 || !lineP2) return;
                             setAllLineCfg((old) => {
@@ -1191,6 +1704,34 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                             if (!floorLineP1 && lineP1) setFloorLineP1(lineP1);
                             if (!floorLineP2 && lineP2) setFloorLineP2(lineP2);
                             setDrawHint("判定线已保存");
+
+                            // 保存成功后收起绘制工具栏，等同于结束绘制
+                            setLineToolEnabled(false);
+
+                        // 同步到后端：跨电脑共享判定线配置
+                        if (
+                          selectedFloorPlanId != null &&
+                          selectedCameraOpt?.kind === "virtual" &&
+                          lineP1 &&
+                          lineP2
+                        ) {
+                          const vvId = selectedCameraOpt.view.id;
+                          void fetch(`${API_BASE}/api/footfall/lines/upsert`, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                              floor_plan_id: selectedFloorPlanId,
+                              virtual_view_id: vvId,
+                              p1: lineP1,
+                              p2: lineP2,
+                              floor_p1: floorLineP1 ?? lineP1,
+                              floor_p2: floorLineP2 ?? lineP2,
+                              in_label: inLabel,
+                              out_label: outLabel,
+                              enabled: lineEnabled,
+                            }),
+                          }).catch(() => {});
+                        }
                           }}
                         >
                           保存
@@ -1198,6 +1739,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                         <button
                           type="button"
                           className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
+                          disabled={analyzing}
                           onClick={deleteCurrentLine}
                         >
                           删除
@@ -1208,18 +1750,15 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                 }
                 renderOverlay={renderVirtualOverlay}
               >
-                {vvSnapshotObjUrl ? (
-                  <img
-                    src={vvSnapshotObjUrl}
-                    className="h-full w-full object-contain"
-                    alt={`footfall-camera-${selectedCameraOpt.view.id}`}
-                    draggable={false}
-                  />
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center text-xs text-slate-400">
-                    加载中…
-                  </div>
-                )}
+                <VirtualViewMjpeg
+                  mjpegUrl={`${API_BASE}/api/cameras/${selectedCameraOpt.view.camera_id}/virtual-views/${
+                    selectedCameraOpt.view.id
+                  }/${analyzing ? "analyzed" : "preview_shared"}.mjpeg?stream=${mjpegStreamEpoch}`}
+                  title={`footfall-camera-${selectedCameraOpt.view.id}-${analyzing ? "analyzed" : "preview"}`}
+                  frameW={Math.max(1, Number(selectedCameraOpt.view.out_w) || 960)}
+                  frameH={Math.max(1, Number(selectedCameraOpt.view.out_h) || 540)}
+                  epoch={mjpegStreamEpoch}
+                />
               </PanZoomViewport>
             ) : selectedCameraOpt.camera.webrtc_url ? (
               <iframe

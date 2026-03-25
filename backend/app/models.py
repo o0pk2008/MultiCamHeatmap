@@ -201,3 +201,72 @@ class HeatmapEvent(Base):
     camera = relationship("Camera")
     virtual_view = relationship("CameraVirtualView")
 
+
+class FootfallLineConfig(Base):
+    """
+    进入/离开判定线配置（用于跨电脑共享）。
+
+    目前前端一次只允许对某个 virtual_view_id 配置一条线，因此用 (floor_plan_id, virtual_view_id)
+    做唯一约束进行 upsert。
+    """
+
+    __tablename__ = "footfall_line_configs"
+    __table_args__ = (
+        UniqueConstraint("floor_plan_id", "virtual_view_id", name="uq_footfall_line_cfg_fp_vv"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True
+    )
+
+    # 判定线使用虚拟视窗 UV 空间归一化坐标（0..1）
+    p1_u = Column(Float, nullable=False)
+    p1_v = Column(Float, nullable=False)
+    p2_u = Column(Float, nullable=False)
+    p2_v = Column(Float, nullable=False)
+
+    # 同一条线在平面图 UV 空间（0..1）的位置，用于绘制/校准（可选）
+    floor_p1_x = Column(Float, nullable=True)
+    floor_p1_y = Column(Float, nullable=True)
+    floor_p2_x = Column(Float, nullable=True)
+    floor_p2_y = Column(Float, nullable=True)
+
+    in_label = Column(String(32), nullable=False, default="进入")
+    out_label = Column(String(32), nullable=False, default="离开")
+    enabled = Column(Boolean, nullable=False, default=True)
+
+
+class FootfallCrossEvent(Base):
+    """
+    进入/离开计数触发事件（用于跨电脑累计统计）。
+    """
+
+    __tablename__ = "footfall_cross_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    line_config_id = Column(
+        Integer, ForeignKey("footfall_line_configs.id"), nullable=False, index=True
+    )
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True
+    )
+
+    direction = Column(String(8), nullable=False, index=True)  # "in" | "out"
+    ts = Column(Float, nullable=False, index=True)
+
+    track_id = Column(Integer, nullable=True, index=True)
+    stable_id = Column(Integer, nullable=True, index=True)
+
+    # foot origin point in UV space (optional)
+    foot_u = Column(Float, nullable=True)
+    foot_v = Column(Float, nullable=True)
+
+    # only meaningful when direction == "in"
+    gender = Column(String(16), nullable=True)
+    age_bucket = Column(String(16), nullable=True)
+

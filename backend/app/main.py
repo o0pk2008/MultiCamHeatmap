@@ -20,6 +20,9 @@ from .heatmap_store import record_heatmap_event, is_recording, update_current_dw
 heatmap_clients: List[WebSocket] = []
 heatmap_lock = asyncio.Lock()
 
+footfall_clients: List[WebSocket] = []
+footfall_lock = asyncio.Lock()
+
 app = FastAPI(title="MultiCam Heatmap Backend", version="0.1.0")
 
 app.add_middleware(
@@ -59,6 +62,9 @@ async def add_maps_cache_control(request: Request, call_next):
 app.include_router(cameras_router)
 app.include_router(mappings_router)
 app.include_router(discovery_router)
+from .routers.footfall import router as footfall_router
+
+app.include_router(footfall_router)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -104,6 +110,7 @@ async def heatmap_broadcast(event: dict):
     update_current_dwell(event)
   except Exception:
     pass
+
   data = json.dumps(event)
   async with heatmap_lock:
     for ws in list(heatmap_clients):
@@ -123,5 +130,43 @@ async def heatmap_broadcast(event: dict):
       t = asyncio.create_task(record_heatmap_event(event))
       # 避免未被 await 的 task 抛异常刷屏
       t.add_done_callback(lambda fut: fut.exception() if fut.cancelled() else fut.exception())
+  except Exception:
+    pass
+
+
+@app.websocket("/ws/footfall-events")
+async def websocket_footfall_events(ws: WebSocket):
+  await ws.accept()
+  async with footfall_lock:
+    footfall_clients.append(ws)
+  try:
+    while True:
+      await asyncio.sleep(10)
+  except WebSocketDisconnect:
+    pass
+  finally:
+    async with footfall_lock:
+      if ws in footfall_clients:
+        footfall_clients.remove(ws)
+
+
+async def footfall_broadcast(event: dict):
+  data = json.dumps(event)
+  async with footfall_lock:
+    for ws in list(footfall_clients):
+      try:
+        await ws.send_text(data)
+      except Exception:
+        try:
+          footfall_clients.remove(ws)
+        except ValueError:
+          pass
+
+  # 落库：用于跨电脑持久化（统计/回放）
+  try:
+    from .footfall_store import record_footfall_event
+
+    t = asyncio.create_task(record_footfall_event(event))
+    t.add_done_callback(lambda fut: fut.exception() if fut.cancelled() else fut.exception())
   except Exception:
     pass

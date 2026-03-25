@@ -3,6 +3,7 @@ import random
 from typing import Dict, Tuple, List
 import json
 import time
+import os
 
 from . import models
 from .db import SessionLocal
@@ -63,6 +64,16 @@ class HeatmapAnalyzer:
         - 仅做：检测框 -> 脚底点 -> camera grid -> floor grid -> 事件推送。
         """
         acquired: set = self._vv_refs.setdefault(int(floor_plan_id), set())
+        # 用 det.ts 去重：避免同一帧重复触发事件
+        last_det_ts_by_vv: Dict[int, float] = {}
+        interval_sec = float(os.environ.get("HEATMAP_ANALYZER_INTERVAL_SEC", "0.07"))
+        # stable_id：用于缓解 track_id 丢失/跳变导致的漏检（在 uv 空间做轻量关联）
+        stable_next_id = 1
+        stable_by_vv: Dict[int, Dict[int, Tuple[float, float, float]]] = {}  # vv_id -> stable_id -> (u,v,ts)
+        det_to_stable: Dict[int, Dict[int, int]] = {}  # vv_id -> det_track_id -> stable_id
+        stable_ttl_sec = float(os.environ.get("HEATMAP_STABLE_ID_TTL_SEC", "2.5"))
+        stable_match_dt_sec = float(os.environ.get("HEATMAP_STABLE_ID_MATCH_DT_SEC", "1.2"))
+        stable_match_dist = float(os.environ.get("HEATMAP_STABLE_ID_MATCH_DIST", "0.18"))
         try:
             while True:
                 # 每一轮查询一次当前 floor_plan 的网格和 virtual PTZ 映射关系
@@ -207,6 +218,15 @@ class HeatmapAnalyzer:
                     det = manager.get_latest_detections(vv_id)
                     if det is None:
                         continue
+                    try:
+                        det_ts = float(getattr(det, "ts", 0.0) or 0.0)
+                    except Exception:
+                        det_ts = 0.0
+                    if det_ts > 0:
+                        prev_ts = float(last_det_ts_by_vv.get(int(vv_id), 0.0))
+                        if det_ts <= prev_ts:
+                            continue
+                        last_det_ts_by_vv[int(vv_id)] = det_ts
 
                     xyxy = det.xyxy
                     cls_ids = det.cls
@@ -215,6 +235,9 @@ class HeatmapAnalyzer:
                     track_ids = getattr(det, "track_ids", None)
                     if track_ids is None:
                         track_ids = getattr(det, "ids", None)
+
+                    genders = getattr(det, "gender", None)
+                    age_buckets = getattr(det, "age_bucket", None)
 
                     # 将脚底点映射到“透视网格”的 cell：
                     # 先用 quad 的 homography 把像素坐标反变换到 unit square (u,v)，再算 row/col。
@@ -237,11 +260,18 @@ class HeatmapAnalyzer:
                         continue
 
                     for idx, ((x1, y1, x2, y2), cid) in enumerate(zip(xyxy, cls_ids)):
-                        if int(cid) != 0:
-                            continue
                         h = y2 - y1
                         foot_x = (x1 + x2) * 0.5
-                        foot_y = y2 - 0.02 * h
+                        # 脚步点：bbox 底部中心向上 1%
+                        foot_y = y2 - 0.01 * h
+                        # 同时给前端返回“虚拟视窗原图归一化坐标”，用于精确过线判定（避免 floor 网格映射误差）
+                        try:
+                            fw = float(getattr(det, "w", 0) or 0)
+                            fh = float(getattr(det, "h", 0) or 0)
+                        except Exception:
+                            fw, fh = (0.0, 0.0)
+                        foot_u = float(foot_x) / fw if fw > 1 else None
+                        foot_v = float(foot_y) / fh if fh > 1 else None
                         # 逆变换到 unit square
                         try:
                             p = np.array([foot_x, foot_y, 1.0], dtype=np.float32)
@@ -276,6 +306,75 @@ class HeatmapAnalyzer:
                         except Exception:
                             track_id = None
 
+                        # 只有可跟踪的人才产出事件（避免非人类目标干扰）
+                        if track_id is None:
+                            continue
+
+                        # === stable_id 关联（缓解 track_id 丢失/跳变）===
+                        vv_int = int(vv_id)
+                        now_ts = float(det_ts) if det_ts > 0 else time.time()
+                        st_map = stable_by_vv.setdefault(vv_int, {})
+                        dt_map = det_to_stable.setdefault(vv_int, {})
+                        # prune
+                        try:
+                            for sid, (_su, _sv, _sts) in list(st_map.items()):
+                                if now_ts - float(_sts) > stable_ttl_sec:
+                                    st_map.pop(int(sid), None)
+                        except Exception:
+                            pass
+                        try:
+                            for tid, sid in list(dt_map.items()):
+                                if int(sid) not in st_map:
+                                    dt_map.pop(int(tid), None)
+                        except Exception:
+                            pass
+
+                        stable_id = None
+                        try:
+                            stable_id = int(dt_map.get(int(track_id))) if int(track_id) in dt_map else None
+                        except Exception:
+                            stable_id = None
+
+                        if stable_id is None and foot_u is not None and foot_v is not None:
+                            # 在 uv 空间找最近且“最近出现”的 stable
+                            best_sid = None
+                            best_d2 = None
+                            for sid, (su, sv, sts) in st_map.items():
+                                dtp = now_ts - float(sts)
+                                if dtp < 0:
+                                    dtp = 0
+                                if dtp > stable_match_dt_sec:
+                                    continue
+                                dx = float(su) - float(foot_u)
+                                dy = float(sv) - float(foot_v)
+                                d2 = dx * dx + dy * dy
+                                if d2 <= stable_match_dist * stable_match_dist and (best_d2 is None or d2 < best_d2):
+                                    best_d2 = d2
+                                    best_sid = int(sid)
+                            if best_sid is not None:
+                                stable_id = int(best_sid)
+
+                        if stable_id is None:
+                            stable_id = int(stable_next_id)
+                            stable_next_id += 1
+                        dt_map[int(track_id)] = int(stable_id)
+                        if foot_u is not None and foot_v is not None:
+                            st_map[int(stable_id)] = (float(foot_u), float(foot_v), float(now_ts))
+
+                        gender = None
+                        try:
+                            if genders is not None and idx < len(genders):
+                                gender = genders[idx]
+                        except Exception:
+                            gender = None
+
+                        age_bucket = None
+                        try:
+                            if age_buckets is not None and idx < len(age_buckets):
+                                age_bucket = age_buckets[idx]
+                        except Exception:
+                            age_bucket = None
+
                         event = {
                             "floor_plan_id": floor_plan_id,
                             "floor_row": floor_row,
@@ -285,7 +384,13 @@ class HeatmapAnalyzer:
                             "camera_row": cam_row,
                             "camera_col": cam_col,
                             "track_id": track_id,
-                            "ts": time.time(),
+                            "stable_id": stable_id,
+                            "gender": gender,
+                            "age_bucket": age_bucket,
+                            "foot_u": foot_u,
+                            "foot_v": foot_v,
+                            # 优先使用 det.ts（更贴近实际采样时刻）
+                            "ts": float(det_ts) if det_ts > 0 else time.time(),
                         }
                         try:
                             from .main import heatmap_broadcast
@@ -293,7 +398,7 @@ class HeatmapAnalyzer:
                         except Exception:
                             pass
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(max(0.03, interval_sec))
         except asyncio.CancelledError:
             # 正常停止
             return
