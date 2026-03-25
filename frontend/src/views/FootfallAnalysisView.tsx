@@ -44,6 +44,15 @@ type LineCfg = {
   enabled: boolean;
 };
 
+type FootfallStats = {
+  inCount: number;
+  outCount: number;
+  genderMale: number;
+  genderFemale: number;
+  ageBuckets: { label: string; value: number }[];
+  trendAll: { hour: number; value: number }[];
+};
+
 const storageKey = "footfall_line_configs_v1";
 
 const readAllLineCfg = (): Record<string, LineCfg> => {
@@ -61,6 +70,39 @@ const writeAllLineCfg = (v: Record<string, LineCfg>) => {
   try {
     localStorage.setItem(storageKey, JSON.stringify(v));
   } catch {}
+};
+
+const toDateInputValue = (d: Date): string => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+};
+
+const hashString = (s: string): number => {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+};
+
+const buildMockStats = (dateKey: string, realtimeTick = 0): FootfallStats => {
+  const seed = hashString(`${dateKey}:${realtimeTick}`);
+  const inCount = 80 + (seed % 180);
+  const outCount = Math.max(0, inCount - 5 + ((seed >> 2) % 11));
+  const genderMale = Math.max(0, Math.floor(inCount * (0.45 + ((seed % 21) - 10) / 200)));
+  const genderFemale = Math.max(0, inCount - genderMale);
+  const ageBase = [9, 33, 40, 26, 18, 10];
+  const ageLabels = ["0-12", "18-25", "26-35", "36-45", "46-55", "55+"];
+  const ageBuckets = ageBase.map((base, idx) => ({
+    label: ageLabels[idx],
+    value: Math.max(0, base + (((seed >> (idx + 1)) % 9) - 4)),
+  }));
+  const trendAll = Array.from({ length: 24 }, (_, h) => {
+    const bizBase = h >= 9 && h <= 21 ? 10 + Math.max(0, 20 - Math.abs(15 - h) * 2) : 2;
+    const noise = ((seed >> (h % 12)) % 5) - 2;
+    return { hour: h, value: Math.max(0, bizBase + noise) };
+  });
+  return { inCount, outCount, genderMale, genderFemale, ageBuckets, trendAll };
 };
 
 const PanZoomViewport: React.FC<{
@@ -224,6 +266,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [bindCameraOptions, setBindCameraOptions] = useState<BindCameraOption[]>([]);
   const [bindCameraId, setBindCameraId] = useState<string>("");
+  const [allLineCfg, setAllLineCfg] = useState<Record<string, LineCfg>>(() => readAllLineCfg());
   const [selectedFloorPlanId, setSelectedFloorPlanId] = useState<number | null>(null);
   const [heatmapSources, setHeatmapSources] = useState<HeatmapSource[]>([]);
   const [showGrid, setShowGrid] = useState(true);
@@ -239,10 +282,13 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [floorLineP1, setFloorLineP1] = useState<Vec2 | null>(null);
   const [floorLineP2, setFloorLineP2] = useState<Vec2 | null>(null);
   const [draggingFloorVertex, setDraggingFloorVertex] = useState<0 | 1 | null>(null);
+  const [floorImgNaturalSize, setFloorImgNaturalSize] = useState<{ w: number; h: number } | null>(null);
   const [inCount] = useState(0);
   const [outCount] = useState(0);
-  const [hourRangeStart, setHourRangeStart] = useState(9);
-  const [hourRangeEnd, setHourRangeEnd] = useState(22);
+  const [statsMode, setStatsMode] = useState<"date" | "realtime">("date");
+  const [statsDate, setStatsDate] = useState<string>(() => toDateInputValue(new Date()));
+  const [realtimeTick, setRealtimeTick] = useState(0);
+  const [statsData, setStatsData] = useState<FootfallStats>(() => buildMockStats(toDateInputValue(new Date())));
   const [drawHint, setDrawHint] = useState("点击画面设置第一个点");
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
@@ -324,6 +370,28 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
   const floorPlanImageUrlStr = selectedFloorPlan ? floorPlanImageUrl(selectedFloorPlan) : null;
 
+  // 用图片实际像素尺寸来计算网格映射，避免 width_px/height_px 元数据与真实图片不一致
+  useEffect(() => {
+    if (!floorPlanImageUrlStr) {
+      setFloorImgNaturalSize(null);
+      return;
+    }
+    let cancelled = false;
+    const img = new Image();
+    img.onload = () => {
+      if (cancelled) return;
+      setFloorImgNaturalSize({ w: img.naturalWidth || 1, h: img.naturalHeight || 1 });
+    };
+    img.onerror = () => {
+      if (cancelled) return;
+      setFloorImgNaturalSize(null);
+    };
+    img.src = floorPlanImageUrlStr;
+    return () => {
+      cancelled = true;
+    };
+  }, [floorPlanImageUrlStr]);
+
   const mappedCameras = useMemo(() => {
     const camMap = new Map<number, Camera>();
     cameras.forEach((c) => camMap.set(c.id, c));
@@ -339,41 +407,48 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
   const displayP1 = savedLineP1 ?? lineP1;
   const displayP2 = savedLineP2 ?? lineP2;
-  const displayLineId = displayP1 && displayP2 ? "L-001" : "-";
-  const displayCameraId =
-    selectedCameraOpt?.kind === "virtual"
-      ? selectedCameraOpt.view.camera_id
-      : selectedCameraOpt?.kind === "camera"
-        ? selectedCameraOpt.camera.id
-        : "-";
-  const todayInCount = 128;
-  const todayOutCount = 117;
-  const genderMale = 72;
-  const genderFemale = 56;
-  const genderTotal = Math.max(1, genderMale + genderFemale);
-  const maleRatio = genderMale / genderTotal;
-  const femaleRatio = genderFemale / genderTotal;
-  const ageBuckets = [
-    { label: "0-12", value: 8 },
-    { label: "18-25", value: 34 },
-    { label: "26-35", value: 41 },
-    { label: "36-45", value: 27 },
-    { label: "46-55", value: 19 },
-    { label: "55+", value: 12 },
-  ];
-  const trendAll = Array.from({ length: 24 }, (_, h) => {
-    const base = h >= 9 && h <= 21 ? 12 + Math.max(0, 16 - Math.abs(15 - h) * 2) : 2;
-    return { hour: h, value: base + (h % 3) * 2 };
-  });
-  const trend = trendAll.filter((x) => x.hour >= hourRangeStart && x.hour <= hourRangeEnd);
-  const trendMax = Math.max(1, ...trend.map((x) => x.value));
-  const trendPoints = trend
-    .map((x, i) => {
-      const px = trend.length <= 1 ? 20 : 20 + (i / (trend.length - 1)) * 320;
-      const py = 120 - (x.value / trendMax) * 90;
-      return `${px},${py}`;
-    })
-    .join(" ");
+  const firstSavedLineCameraKey = useMemo(() => {
+    const rows = Object.entries(allLineCfg)
+      .map(([key, cfg]) => {
+        const opt = bindCameraOptions.find((o) => o.key === key);
+        if (!opt || !cfg?.p1 || !cfg?.p2) return null;
+        return { key, label: opt.label };
+      })
+      .filter(Boolean) as { key: string; label: string }[];
+    rows.sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
+    return rows[0]?.key || "";
+  }, [allLineCfg, bindCameraOptions]);
+
+  useEffect(() => {
+    if (!firstSavedLineCameraKey) return;
+    if (!bindCameraId || !allLineCfg[bindCameraId]) {
+      setBindCameraId(firstSavedLineCameraKey);
+    }
+  }, [firstSavedLineCameraKey, bindCameraId, allLineCfg]);
+  useEffect(() => {
+    if (statsMode === "realtime") {
+      const t = window.setInterval(() => {
+        setRealtimeTick((v) => v + 1);
+      }, 5000);
+      return () => window.clearInterval(t);
+    }
+  }, [statsMode]);
+
+  useEffect(() => {
+    const dateKey = statsMode === "realtime" ? toDateInputValue(new Date()) : statsDate;
+    // 预留真实接口：目前先按日期生成演示数据，保证切换行为完整。
+    setStatsData(buildMockStats(dateKey, statsMode === "realtime" ? realtimeTick : 0));
+  }, [statsMode, statsDate, realtimeTick]);
+
+  const trendIn = statsData.trendAll.map((x, idx) => ({
+    hour: x.hour,
+    value: x.value + (idx % 3 === 0 ? 1 : 0),
+  }));
+  const trendOut = statsData.trendAll.map((x, idx) => ({
+    hour: x.hour,
+    value: Math.max(0, x.value - 2 + (idx % 4 === 0 ? 1 : 0)),
+  }));
+  const statsTitleDate = statsMode === "realtime" ? `${toDateInputValue(new Date())} 实时` : statsDate;
   const genderOption = useMemo(
     () => ({
       tooltip: { trigger: "item" },
@@ -386,13 +461,13 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           itemStyle: { borderRadius: 4, borderColor: "#fff", borderWidth: 2 },
           label: { show: true, formatter: "{b}: {c}" },
           data: [
-            { value: genderMale, name: "男", itemStyle: { color: "#3B82F6" } },
-            { value: genderFemale, name: "女", itemStyle: { color: "#EC4899" } },
+            { value: statsData.genderMale, name: "男", itemStyle: { color: "#3B82F6" } },
+            { value: statsData.genderFemale, name: "女", itemStyle: { color: "#EC4899" } },
           ],
         },
       ],
     }),
-    [genderMale, genderFemale],
+    [statsData.genderMale, statsData.genderFemale],
   );
   const ageOption = useMemo(
     () => ({
@@ -400,28 +475,29 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       grid: { left: 30, right: 10, top: 20, bottom: 28 },
       xAxis: {
         type: "category",
-        data: ageBuckets.map((x) => x.label),
+        data: statsData.ageBuckets.map((x) => x.label),
         axisLabel: { fontSize: 10 },
       },
       yAxis: { type: "value", axisLabel: { fontSize: 10 } },
       series: [
         {
           type: "bar",
-          data: ageBuckets.map((x) => x.value),
+          data: statsData.ageBuckets.map((x) => x.value),
           itemStyle: { color: "#6366F1", borderRadius: [4, 4, 0, 0] },
           barWidth: "55%",
         },
       ],
     }),
-    [ageBuckets],
+    [statsData.ageBuckets],
   );
   const trendOption = useMemo(
     () => ({
       tooltip: { trigger: "axis" },
       grid: { left: 32, right: 10, top: 20, bottom: 26 },
+      legend: { top: 0, right: 10, textStyle: { fontSize: 11 } },
       xAxis: {
         type: "category",
-        data: trend.map((x) => `${x.hour}:00`),
+        data: trendIn.map((x) => `${x.hour}:00`),
         axisLabel: { fontSize: 10 },
       },
       yAxis: { type: "value", axisLabel: { fontSize: 10 } },
@@ -429,22 +505,31 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         {
           type: "line",
           smooth: true,
-          data: trend.map((x) => x.value),
+          name: "进入",
+          data: trendIn.map((x) => x.value),
           symbol: "circle",
           symbolSize: 6,
-          lineStyle: { color: "#4F46E5", width: 2.5 },
-          itemStyle: { color: "#4F46E5" },
-          areaStyle: { color: "rgba(99,102,241,0.12)" },
+          lineStyle: { color: "#10B981", width: 2.5 },
+          itemStyle: { color: "#10B981" },
+        },
+        {
+          type: "line",
+          smooth: true,
+          name: "离开",
+          data: trendOut.map((x) => x.value),
+          symbol: "circle",
+          symbolSize: 6,
+          lineStyle: { color: "#F97316", width: 2.5 },
+          itemStyle: { color: "#F97316" },
         },
       ],
     }),
-    [trend],
+    [trendIn, trendOut],
   );
 
   useEffect(() => {
     if (!bindCameraId) return;
-    const all = readAllLineCfg();
-    const cfg = all[bindCameraId];
+    const cfg = allLineCfg[bindCameraId];
     if (cfg) {
       setLineP1(cfg.p1);
       setLineP2(cfg.p2);
@@ -468,7 +553,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setFloorLineP1(null);
     setFloorLineP2(null);
     setDrawHint("点击画面设置第一个点");
-  }, [bindCameraId]);
+  }, [bindCameraId, allLineCfg]);
 
   const refreshVirtualSnapshot = useCallback(async (view: { id: number; camera_id: number }) => {
     if (vvSnapshotInFlightRef.current) return;
@@ -710,9 +795,13 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const deleteCurrentLine = useCallback(() => {
     if (!bindCameraId) return;
-    const all = readAllLineCfg();
-    delete all[bindCameraId];
-    writeAllLineCfg(all);
+    setAllLineCfg((old) => {
+      if (!old[bindCameraId]) return old;
+      const next = { ...old };
+      delete next[bindCameraId];
+      writeAllLineCfg(next);
+      return next;
+    });
     setLineP1(null);
     setLineP2(null);
     setSavedLineP1(null);
@@ -722,10 +811,55 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setDrawHint("已删除该摄像头判定线");
   }, [bindCameraId]);
 
+  const lineCfgRows = useMemo(() => {
+    const rows = Object.entries(allLineCfg)
+      .map(([key, cfg], idx) => {
+        const opt = bindCameraOptions.find((o) => o.key === key);
+        const cameraId =
+          opt?.kind === "virtual"
+            ? opt.view.camera_id
+            : opt?.kind === "camera"
+              ? opt.camera.id
+              : "-";
+        return {
+          key,
+          cfg,
+          lineId: `L-${String(idx + 1).padStart(3, "0")}`,
+          label: opt?.label || key,
+          cameraId,
+        };
+      })
+      .filter((it) => !!it.cfg?.p1 && !!it.cfg?.p2);
+    rows.sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
+    return rows;
+  }, [allLineCfg, bindCameraOptions]);
+
+  const deleteLineByKey = useCallback(
+    (cameraKey: string) => {
+      setAllLineCfg((old) => {
+        if (!old[cameraKey]) return old;
+        const next = { ...old };
+        delete next[cameraKey];
+        writeAllLineCfg(next);
+        return next;
+      });
+      if (cameraKey === bindCameraId) {
+        setLineP1(null);
+        setLineP2(null);
+        setSavedLineP1(null);
+        setSavedLineP2(null);
+        setFloorLineP1(null);
+        setFloorLineP2(null);
+        setDrawHint("已删除该摄像头判定线");
+      }
+    },
+    [bindCameraId],
+  );
+
   const renderFloorOverlay = useCallback(
     (ctx: CanvasRenderingContext2D, info: { w: number; h: number; pan: { x: number; y: number }; zoom: number }) => {
-      const aspectW = Math.max(1, selectedFloorPlan?.width_px || 1920);
-      const aspectH = Math.max(1, selectedFloorPlan?.height_px || 1080);
+      const aspectW = Math.max(1, floorImgNaturalSize?.w || selectedFloorPlan?.width_px || 1920);
+      const aspectH = Math.max(1, floorImgNaturalSize?.h || selectedFloorPlan?.height_px || 1080);
       floorViewportRef.current = { w: info.w, h: info.h, aspectW, aspectH };
       const scale = Math.min(info.w / aspectW, info.h / aspectH);
       const imgW = aspectW * scale;
@@ -736,12 +870,12 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       // 可选：绘制简化网格（与 showGrid 开关联动）
       if (showGrid && selectedFloorPlan) {
-        const rows = Math.max(1, selectedFloorPlan.grid_rows || 1);
-        const cols = Math.max(1, selectedFloorPlan.grid_cols || 1);
+        const rows = Math.max(1, Number(selectedFloorPlan.grid_rows) || 1);
+        const cols = Math.max(1, Number(selectedFloorPlan.grid_cols) || 1);
         ctx.save();
         ctx.translate(info.pan.x, info.pan.y);
         ctx.scale(info.zoom, info.zoom);
-        ctx.strokeStyle = "rgba(14,165,233,0.25)";
+        ctx.strokeStyle = "rgba(14,165,233,0.3)";
         ctx.lineWidth = 1;
         for (let r = 0; r <= rows; r++) {
           const y = imgY + (r / rows) * imgH;
@@ -785,7 +919,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       ctx.arc(p2.x, p2.y, 6, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
-      const label = `进出 ${inCount} / 离开 ${outCount}`;
+      const label = `进入 ${inCount} / 离开 ${outCount}`;
       ctx.font = "600 12px sans-serif";
       const tw = Math.ceil(ctx.measureText(label).width);
       const lh = 20;
@@ -810,7 +944,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       ctx.fillText(label, cx, ly - 4);
       ctx.restore();
     },
-    [selectedFloorPlan, showGrid, floorLineP1, floorLineP2, inCount, outCount],
+    [selectedFloorPlan, floorImgNaturalSize, showGrid, floorLineP1, floorLineP2, inCount, outCount],
   );
 
   return (
@@ -839,7 +973,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             显示网格
           </label>
         </div>
-        <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+        <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
           {floorPlanImageUrlStr && selectedFloorPlan ? (
             <PanZoomViewport
               className="h-full w-full"
@@ -876,15 +1010,38 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           )}
         </div>
         <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-          <div className="mb-3 text-sm font-semibold text-slate-800">数据统计</div>
+          <div className="mb-3 flex items-center justify-between">
+            <div className="text-sm font-semibold text-slate-800">数据统计</div>
+            <div className="flex items-center gap-2 text-[11px] text-slate-600">
+              <input
+                type="date"
+                className="rounded border border-slate-300 bg-white px-2 py-1"
+                value={statsDate}
+                onChange={(e) => {
+                  setStatsDate(e.target.value || toDateInputValue(new Date()));
+                  setStatsMode("date");
+                }}
+                disabled={statsMode === "realtime"}
+                title="选择日期加载统计数据"
+              />
+              <label className="flex items-center gap-1 select-none">
+                <input
+                  type="checkbox"
+                  checked={statsMode === "realtime"}
+                  onChange={(e) => setStatsMode(e.target.checked ? "realtime" : "date")}
+                />
+                <span>实时数据</span>
+              </label>
+            </div>
+          </div>
           <div className="mb-3 grid grid-cols-2 gap-2">
             <div className="rounded border border-emerald-200 bg-emerald-50 p-2">
-              <div className="text-[11px] text-emerald-800">今日累计进入</div>
-              <div className="text-lg font-semibold text-emerald-700">{todayInCount}</div>
+              <div className="text-[11px] text-emerald-800">{`${statsTitleDate} 累计进入`}</div>
+              <div className="text-lg font-semibold text-emerald-700">{statsData.inCount}</div>
             </div>
             <div className="rounded border border-orange-200 bg-orange-50 p-2">
-              <div className="text-[11px] text-orange-800">今日累计离开</div>
-              <div className="text-lg font-semibold text-orange-700">{todayOutCount}</div>
+              <div className="text-[11px] text-orange-800">{`${statsTitleDate} 累计离开`}</div>
+              <div className="text-lg font-semibold text-orange-700">{statsData.outCount}</div>
             </div>
           </div>
 
@@ -900,42 +1057,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           </div>
 
           <div className="rounded border border-slate-200 bg-slate-50 p-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-xs font-semibold text-slate-700">时段流量趋势（按小时）</div>
-              <div className="flex items-center gap-1 text-[11px] text-slate-600">
-                <select
-                  className="rounded border border-slate-300 bg-white px-1 py-0.5"
-                  value={hourRangeStart}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setHourRangeStart(v);
-                    if (v > hourRangeEnd) setHourRangeEnd(v);
-                  }}
-                >
-                  {Array.from({ length: 14 }, (_, i) => 9 + i).map((h) => (
-                    <option key={`s-${h}`} value={h}>
-                      {h}:00
-                    </option>
-                  ))}
-                </select>
-                <span>~</span>
-                <select
-                  className="rounded border border-slate-300 bg-white px-1 py-0.5"
-                  value={hourRangeEnd}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    setHourRangeEnd(v);
-                    if (v < hourRangeStart) setHourRangeStart(v);
-                  }}
-                >
-                  {Array.from({ length: 14 }, (_, i) => 9 + i).map((h) => (
-                    <option key={`e-${h}`} value={h}>
-                      {h}:00
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
+            <div className="mb-2 text-xs font-semibold text-slate-700">时段流量趋势（按小时）</div>
             <ReactECharts option={trendOption} style={{ height: 170, width: "100%" }} notMerge />
           </div>
         </div>
@@ -1048,17 +1170,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                           disabled={!lineP1 || !lineP2}
                           onClick={() => {
                             if (!bindCameraId || !lineP1 || !lineP2) return;
-                            const all = readAllLineCfg();
-                            all[bindCameraId] = {
-                              p1: lineP1,
-                              p2: lineP2,
-                              floor_p1: floorLineP1 ?? lineP1,
-                              floor_p2: floorLineP2 ?? lineP2,
-                              inLabel,
-                              outLabel,
-                              enabled: lineEnabled,
-                            };
-                            writeAllLineCfg(all);
+                            setAllLineCfg((old) => {
+                              const next = {
+                                ...old,
+                                [bindCameraId]: {
+                                  p1: lineP1,
+                                  p2: lineP2,
+                                  floor_p1: floorLineP1 ?? lineP1,
+                                  floor_p2: floorLineP2 ?? lineP2,
+                                  inLabel,
+                                  outLabel,
+                                  enabled: lineEnabled,
+                                },
+                              };
+                              writeAllLineCfg(next);
+                              return next;
+                            });
                             setSavedLineP1(lineP1);
                             setSavedLineP2(lineP2);
                             if (!floorLineP1 && lineP1) setFloorLineP1(lineP1);
@@ -1131,29 +1258,59 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
         <div className="mb-3 text-sm font-semibold text-slate-800">进出判定线配置</div>
         <div className="space-y-3">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-700">线段编号</span>
-              <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">
-                {displayLineId}
-              </span>
+          {lineCfgRows.length === 0 ? (
+            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+              暂无已保存线段，请先在摄像头画面中绘制并保存。
             </div>
-            <div className="mb-2 flex items-center justify-between">
-              <span className="text-xs font-semibold text-slate-700">摄像头编号</span>
-              <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">
-                {displayCameraId}
-              </span>
-            </div>
-            <div className="rounded border border-slate-200 bg-white p-2 text-xs text-slate-700">
-              <div className="mb-1 font-medium text-slate-600">线段坐标</div>
-              <div>
-                A[{displayP1 ? `${displayP1.x.toFixed(3)}, ${displayP1.y.toFixed(3)}` : "-"}]
+          ) : (
+            lineCfgRows.map((row) => (
+              <div key={row.key} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700">线段编号</span>
+                  <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
+                </div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700">绑定摄像头</span>
+                  <span className="max-w-[170px] truncate rounded bg-white px-2 py-0.5 text-xs text-slate-700" title={row.label}>
+                    {row.label}
+                  </span>
+                </div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-xs font-semibold text-slate-700">摄像头编号</span>
+                  <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.cameraId}</span>
+                </div>
+                <div className="rounded border border-slate-200 bg-white p-2 text-xs text-slate-700">
+                  <div className="mb-1 font-medium text-slate-600">线段坐标</div>
+                  <div>A[{`${row.cfg.p1.x.toFixed(3)}, ${row.cfg.p1.y.toFixed(3)}`}]</div>
+                  <div>B[{`${row.cfg.p2.x.toFixed(3)}, ${row.cfg.p2.y.toFixed(3)}`}]</div>
+                </div>
+                <div className="mt-2 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                    onClick={() => {
+                      setBindCameraId(row.key);
+                      setDrawHint("已切换到该线段绑定摄像头");
+                    }}
+                  >
+                    查看
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
+                    onClick={() => deleteLineByKey(row.key)}
+                  >
+                    删除
+                  </button>
+                </div>
               </div>
-              <div>
-                B[{displayP2 ? `${displayP2.x.toFixed(3)}, ${displayP2.y.toFixed(3)}` : "-"}]
-              </div>
+            ))
+          )}
+          {displayP1 && displayP2 ? (
+            <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
+              当前预览为已选摄像头绑定线段
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
     </div>
