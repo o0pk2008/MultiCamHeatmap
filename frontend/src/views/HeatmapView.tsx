@@ -26,6 +26,7 @@ type MappedGridLikeProps = {
   sources: HeatmapSource[];
   analyzing: boolean;
   vvFootfalls: Record<number, Footfall[]>;
+  mjpegStreamEpoch?: number;
 };
 
 type HeatmapViewProps = {
@@ -43,6 +44,8 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
   const [heatmapSources, setHeatmapSources] = useState<HeatmapSource[]>([]);
   const [showHeatmapGrid, setShowHeatmapGrid] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  /** 递增以强制映射宫格 MJPEG 换源、重建连接（与 preview_shared ⇄ analyzed 切换配套） */
+  const [heatmapMjpegStreamEpoch, setHeatmapMjpegStreamEpoch] = useState(0);
   const [heatmapCells, setHeatmapCells] = useState<Map<string, number>>(new Map());
   const [heatmapColormap] = useState<"viridis" | "greenRed">("greenRed");
   const [heatmapScale, setHeatmapScale] = useState<"log" | "linear">("log");
@@ -322,13 +325,16 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
           ws.onclose = () => {
             wsRef.current = null;
             setAnalyzing(false);
+            setHeatmapMjpegStreamEpoch((n) => n + 1);
           };
           wsRef.current = ws;
           setAnalyzing(true);
+          setHeatmapMjpegStreamEpoch((n) => n + 1);
         } else {
           wsRef.current?.close();
           wsRef.current = null;
           setAnalyzing(false);
+          setHeatmapMjpegStreamEpoch((n) => n + 1);
         }
       } catch {}
     })();
@@ -482,6 +488,8 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${recordHistory ? "true" : "false"}`,
                     { method: "POST" },
                   );
+                  // 给后台 acquire 推理与首帧缓存一短暂窗口，再切 analyzed MJPEG，减轻 SPA 内黑屏
+                  await new Promise((r) => setTimeout(r, 450));
                   const ws = new WebSocket(
                     `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
                   );
@@ -498,14 +506,17 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
                   ws.onclose = () => {
                     wsRef.current = null;
                     setAnalyzing(false);
+                    setHeatmapMjpegStreamEpoch((n) => n + 1);
                   };
                   wsRef.current = ws;
                   setAnalyzing(true);
+                  setHeatmapMjpegStreamEpoch((n) => n + 1);
                 } else {
                   await fetch(`${API_BASE}/api/heatmap/stop?floor_plan_id=${selectedFloorPlanId}`, { method: "POST" });
                   wsRef.current?.close();
                   wsRef.current = null;
                   setAnalyzing(false);
+                  setHeatmapMjpegStreamEpoch((n) => n + 1);
                   setVvFootfalls({});
                   lastSampleByEntityRef.current = new Map();
                   poiLastSeenByEntityRef.current = new Map();
@@ -589,7 +600,12 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
             <span>上限：{formatDuration(legendMax)}（{heatmapClip} · {heatmapScale}）</span>
           </div>
         </div>
-        <MappedCamerasGridComponent sources={mappedCameras} analyzing={analyzing} vvFootfalls={vvFootfalls} />
+        <MappedCamerasGridComponent
+          sources={mappedCameras}
+          analyzing={analyzing}
+          vvFootfalls={vvFootfalls}
+          mjpegStreamEpoch={heatmapMjpegStreamEpoch}
+        />
       </div>
     </div>
   );

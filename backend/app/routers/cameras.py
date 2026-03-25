@@ -19,6 +19,12 @@ from ..virtual_view_inference import manager
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
+# 避免浏览器在 SPA 内切换 MJPEG URL 时复用空白/陈旧缓存，导致 analyzed 长时间黑屏
+_MJPEG_NO_CACHE_HEADERS = {
+    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+    "Pragma": "no-cache",
+}
+
 
 #
 # NOTE
@@ -253,7 +259,11 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
         finally:
             cap.release()
 
-    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(
+        gen(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_MJPEG_NO_CACHE_HEADERS,
+    )
 
 
 @router.get("/{camera_id}/virtual-views/{view_id}/preview_shared.mjpeg")
@@ -301,7 +311,11 @@ def preview_shared_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session 
         finally:
             manager.remove_plain_subscriber(view_id)
 
-    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(
+        gen(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_MJPEG_NO_CACHE_HEADERS,
+    )
 
 
 @router.get("/{camera_id}/virtual-views/{view_id}/snapshot.jpg")
@@ -369,7 +383,15 @@ def analyzed_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depe
         last_ts = 0.0
         try:
             while True:
-                frame = manager.get_latest_annotated(view_id)
+                ann = manager.get_latest_annotated(view_id)
+                plain = manager.get_latest_plain(view_id)
+                if ann is None:
+                    frame = plain
+                elif plain is None:
+                    frame = ann
+                else:
+                    # 取较新的一层，避免 annotated 短暂落后时画面卡住
+                    frame = ann if ann.ts >= plain.ts else plain
                 if frame is None:
                     time.sleep(0.05)
                     continue
@@ -387,7 +409,11 @@ def analyzed_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depe
         finally:
             manager.remove_subscriber(view_id)
 
-    return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+    return StreamingResponse(
+        gen(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers=_MJPEG_NO_CACHE_HEADERS,
+    )
 
 
 @router.get("/virtual-views/{view_id}/grid-config", response_model=schemas.CameraVirtualViewGridConfigOut)

@@ -559,6 +559,9 @@ class VirtualViewInferenceManager:
                     ok_a, jpg_a = cv2.imencode(".jpg", annotated_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
                     if ok_a:
                         self._latest_annotated[virtual_view_id] = VirtualViewFrame(jpeg=jpg_a.tobytes(), ts=now)
+                    elif ok_p:
+                        # annotated 编码失败时仍发布 plain JPEG，避免 analyzed.mjpeg 长时间无首包导致浏览器黑屏
+                        self._latest_annotated[virtual_view_id] = VirtualViewFrame(jpeg=jpg_p.tobytes(), ts=now)
 
                 # 线程里稍微 sleep，避免 CPU 空转
                 time.sleep(0.001)

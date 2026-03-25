@@ -21,6 +21,7 @@ type MappedGridLikeProps = {
   sources: HeatmapSource[];
   analyzing: boolean;
   vvFootfalls: Record<number, Footfall[]>;
+  mjpegStreamEpoch?: number;
 };
 
 type FootfallAnalysisViewProps = {

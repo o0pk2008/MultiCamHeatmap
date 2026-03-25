@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { API_BASE } from "../../shared/config";
 import { applyHomography, computeHomography, orderQuad } from "../../shared/geometry";
 import { CameraVirtualView, Footfall, HeatmapSource, Pt } from "../../shared/types";
@@ -142,11 +142,111 @@ const VirtualViewGridOverlay: React.FC<{
   );
 };
 
+/** 主宫格 MJPEG：分批发起连接，减轻首屏争用；每批路数与批次间隔 */
+const MJPEG_STAGGER_BATCH = 2;
+const MJPEG_STAGGER_INTERVAL_MS = 300;
+
+/**
+ * 热力图宫格 MJPEG：SPA 内切换 analyzed 时需「短时卸载 + iframe」断干净旧 multipart 连接（用 img 易再黑屏）。
+ * iframe 内联文档易出滚动条：按 virtual view 的 out_w/out_h 与槽位尺寸算 scale，等价 object-contain。
+ */
+const MJPEG_SWAP_UNMOUNT_MS = 160;
+
+const HeatmapSlotMjpeg: React.FC<{
+  staggerAllowed: boolean;
+  mjpegUrl: string;
+  imgKey: string;
+  alt: string;
+  frameW: number;
+  frameH: number;
+  gridOverlay: React.ReactNode;
+}> = ({ staggerAllowed, mjpegUrl, imgKey, alt, frameW, frameH, gridOverlay }) => {
+  const [streamVisible, setStreamVisible] = useState(false);
+  const firstUrlForSlotRef = useRef(true);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+
+  useEffect(() => {
+    if (!staggerAllowed) {
+      setStreamVisible(false);
+      return;
+    }
+    if (firstUrlForSlotRef.current) {
+      firstUrlForSlotRef.current = false;
+      setStreamVisible(true);
+      return;
+    }
+    setStreamVisible(false);
+    const t = window.setTimeout(() => setStreamVisible(true), MJPEG_SWAP_UNMOUNT_MS);
+    return () => window.clearTimeout(t);
+  }, [staggerAllowed, mjpegUrl]);
+
+  useLayoutEffect(() => {
+    const el = wrapRef.current;
+    if (!el || !streamVisible) return;
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0) setBox({ w: r.width, h: r.height });
+  }, [streamVisible, imgKey]);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el || !streamVisible) return;
+    const ro = new ResizeObserver((entries) => {
+      const cr = entries[0]?.contentRect;
+      if (cr) setBox({ w: cr.width, h: cr.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [streamVisible]);
+
+  const iw = Math.max(1, frameW);
+  const ih = Math.max(1, frameH);
+  const scale =
+    box.w > 0 && box.h > 0 ? Math.min(box.w / iw, box.h / ih) : 1;
+
+  if (!staggerAllowed) {
+    return (
+      <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">加载中...</div>
+    );
+  }
+  if (!streamVisible) {
+    return (
+      <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">加载中...</div>
+    );
+  }
+  return (
+    <div ref={wrapRef} className="relative h-full w-full min-h-0 overflow-hidden bg-black">
+      <iframe
+        key={imgKey}
+        src={mjpegUrl}
+        title={alt}
+        loading="eager"
+        scrolling="no"
+        className="pointer-events-none"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          width: iw,
+          height: ih,
+          border: "none",
+          backgroundColor: "#000",
+          transform: `translate(-50%, -50%) scale(${scale})`,
+          transformOrigin: "center center",
+        }}
+      />
+      {gridOverlay}
+    </div>
+  );
+};
+
 const MappedCamerasGrid: React.FC<{
   sources: HeatmapSource[];
   analyzing: boolean;
   vvFootfalls: Record<number, Footfall[]>;
-}> = ({ sources, analyzing, vvFootfalls }) => {
+  /** 递增则强制换 MJPEG URL/重建 img，避免 SPA 内切换 analyzed 时沿用旧长连接导致无画面 */
+  mjpegStreamEpoch?: number;
+}> = ({ sources, analyzing, vvFootfalls, mjpegStreamEpoch = 0 }) => {
   const slotCount = 6;
   const sourceKeyOf = useCallback((s: HeatmapSource) => {
     return s.kind === "virtual" && s.virtual_view_id
@@ -169,6 +269,27 @@ const MappedCamerasGrid: React.FC<{
   const [vvGridConfigs, setVvGridConfigs] = useState<Record<number, { polygon: Pt[]; grid_rows: number; grid_cols: number }>>(
     {},
   );
+
+  const pinnedSlotsKey = useMemo(() => pinnedSlots.join("\0"), [pinnedSlots]);
+  const [mjpegStaggerWave, setMjpegStaggerWave] = useState(0);
+  const mjpegStaggerTimersRef = useRef<number[]>([]);
+
+  useEffect(() => {
+    mjpegStaggerTimersRef.current.forEach((id) => window.clearTimeout(id));
+    mjpegStaggerTimersRef.current = [];
+    setMjpegStaggerWave(0);
+    const extraWaves = Math.max(0, Math.ceil(slotCount / MJPEG_STAGGER_BATCH) - 1);
+    for (let b = 1; b <= extraWaves; b++) {
+      const tid = window.setTimeout(() => {
+        setMjpegStaggerWave(b);
+      }, b * MJPEG_STAGGER_INTERVAL_MS);
+      mjpegStaggerTimersRef.current.push(tid);
+    }
+    return () => {
+      mjpegStaggerTimersRef.current.forEach((id) => window.clearTimeout(id));
+      mjpegStaggerTimersRef.current = [];
+    };
+  }, [pinnedSlotsKey, slotCount]);
 
   useEffect(() => {
     fetch(`${API_BASE}/api/cameras/virtual-views/all`)
@@ -202,6 +323,7 @@ const MappedCamerasGrid: React.FC<{
         next[i] = cand;
         used.add(cand);
       }
+      if (next.length === old.length && next.every((v, i) => v === old[i])) return old;
       return next;
     });
     setThumbPage(1);
@@ -371,12 +493,34 @@ const MappedCamerasGrid: React.FC<{
                   <div className="aspect-[4/3] w-full bg-black">
                     {src ? (
                       src.kind === "virtual" && src.virtual_view_id ? (
-                        <div className="relative h-full w-full">
-                          <img src={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview_shared"}.mjpeg`} className="h-full w-full object-contain" alt={`heatmap-virtual-${src.virtual_view_id}`} draggable={false} />
-                          {showMappedCamGrid && vvGridConfigs[src.virtual_view_id] && vvMetaById.get(src.virtual_view_id) ? (
-                            <VirtualViewGridOverlay view={vvMetaById.get(src.virtual_view_id)!} cfg={vvGridConfigs[src.virtual_view_id]} highlightCells={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null} />
-                          ) : null}
-                        </div>
+                        (() => {
+                          const batchIdx = Math.floor(slotIdx / MJPEG_STAGGER_BATCH);
+                          const canStartMjpeg = batchIdx <= mjpegStaggerWave;
+                          const path = `${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/${analyzing ? "analyzed" : "preview_shared"}.mjpeg`;
+                          const mjpegUrl = `${path}?stream=${mjpegStreamEpoch}&slot=${slotIdx}`;
+                          const vvMeta = vvMetaById.get(src.virtual_view_id);
+                          const fw = vvMeta?.out_w || 960;
+                          const fh = vvMeta?.out_h || 540;
+                          return (
+                            <HeatmapSlotMjpeg
+                              staggerAllowed={canStartMjpeg}
+                              mjpegUrl={mjpegUrl}
+                              imgKey={`${key}-${analyzing}-e${mjpegStreamEpoch}-s${slotIdx}`}
+                              alt={`heatmap-virtual-${src.virtual_view_id}`}
+                              frameW={fw}
+                              frameH={fh}
+                              gridOverlay={
+                                showMappedCamGrid && vvGridConfigs[src.virtual_view_id] && vvMetaById.get(src.virtual_view_id) ? (
+                                  <VirtualViewGridOverlay
+                                    view={vvMetaById.get(src.virtual_view_id)!}
+                                    cfg={vvGridConfigs[src.virtual_view_id]}
+                                    highlightCells={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null}
+                                  />
+                                ) : null
+                              }
+                            />
+                          );
+                        })()
                       ) : src.webrtc_url ? (
                         <iframe src={src.webrtc_url} className="h-full w-full border-none" allow="autoplay; fullscreen" title={`heatmap-camera-${src.camera_id}-slot-${slotIdx}`} />
                       ) : (
