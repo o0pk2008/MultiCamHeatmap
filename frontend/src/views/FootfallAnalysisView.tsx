@@ -347,6 +347,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [statsData, setStatsData] = useState<FootfallStats>(() => buildEmptyStats());
   const [analyzing, setAnalyzing] = useState(false);
   const [faceCaptures, setFaceCaptures] = useState<FaceCaptureItem[]>([]);
+  const [newFaceCaptureIds, setNewFaceCaptureIds] = useState<number[]>([]);
   const [faceCaptureOffset, setFaceCaptureOffset] = useState(0);
   const [faceCaptureHasMore, setFaceCaptureHasMore] = useState(true);
   const [faceCaptureLoading, setFaceCaptureLoading] = useState(false);
@@ -367,6 +368,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const faceCaptureReqSeqRef = useRef(0);
   const faceCaptureLoadingRef = useRef(false);
   const faceCaptureOffsetRef = useRef(0);
+  const faceCaptureAnimTimerRef = useRef<number | null>(null);
   const faceCapturePageSize = 20;
   const faceCaptureRowH = 84;
   const trackZoneByIdRef = useRef<
@@ -424,6 +426,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     const vvIdNow = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
     if (vvIdNow == null) {
       setFaceCaptures([]);
+      setNewFaceCaptureIds([]);
       setFaceCaptureOffset(0);
       setFaceCaptureHasMore(true);
       return;
@@ -450,7 +453,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       if (thisReqSeq !== faceCaptureReqSeqRef.current) return;
       const list = Array.isArray(data) ? data : [];
       if (reset) {
-        setFaceCaptures(list);
+        setFaceCaptures((prev) => {
+          const prevIds = new Set(prev.map((x) => x.id));
+          const added = list.filter((x) => !prevIds.has(x.id)).map((x) => x.id);
+          if (added.length > 0) {
+            setNewFaceCaptureIds((old) => Array.from(new Set([...old, ...added])));
+            if (faceCaptureAnimTimerRef.current != null) {
+              window.clearTimeout(faceCaptureAnimTimerRef.current);
+              faceCaptureAnimTimerRef.current = null;
+            }
+            faceCaptureAnimTimerRef.current = window.setTimeout(() => {
+              setNewFaceCaptureIds((old) => old.filter((id) => !added.includes(id)));
+              faceCaptureAnimTimerRef.current = null;
+            }, 420);
+          }
+          return list;
+        });
         setFaceCaptureOffset(list.length);
         faceCaptureOffsetRef.current = list.length;
       } else {
@@ -1014,6 +1032,15 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
     };
   }, [analyzing, fetchStatsFromBackend]);
+
+  useEffect(() => {
+    return () => {
+      if (faceCaptureAnimTimerRef.current != null) {
+        window.clearTimeout(faceCaptureAnimTimerRef.current);
+        faceCaptureAnimTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     // 无论 analyzing 与否，都先加载一页，避免刷新页面后抓拍列表空白
@@ -1971,7 +1998,13 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                   <div
                     key={it.id}
                     className="absolute left-0 right-0 px-0.5 pb-2"
-                    style={{ top: `${top}px`, height: `${faceCaptureRowH}px` }}
+                    style={{
+                      top: `${top}px`,
+                      height: `${faceCaptureRowH}px`,
+                      opacity: newFaceCaptureIds.includes(it.id) ? 0 : 1,
+                      transform: newFaceCaptureIds.includes(it.id) ? "translateY(-6px)" : "translateY(0)",
+                      transition: "top 220ms ease, opacity 260ms ease, transform 260ms ease",
+                    }}
                   >
                     <div className="flex h-[76px] flex-row gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
                       <img
