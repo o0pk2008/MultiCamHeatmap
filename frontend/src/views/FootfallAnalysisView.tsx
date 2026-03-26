@@ -347,6 +347,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [statsData, setStatsData] = useState<FootfallStats>(() => buildEmptyStats());
   const [analyzing, setAnalyzing] = useState(false);
   const [faceCaptures, setFaceCaptures] = useState<FaceCaptureItem[]>([]);
+  const [faceCaptureOffset, setFaceCaptureOffset] = useState(0);
+  const [faceCaptureHasMore, setFaceCaptureHasMore] = useState(true);
+  const [faceCaptureLoading, setFaceCaptureLoading] = useState(false);
+  const [faceScrollTop, setFaceScrollTop] = useState(0);
   const [drawHint, setDrawHint] = useState("点击画面设置第一个点");
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -359,6 +363,12 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const statsRefreshTimerRef = useRef<number | null>(null);
   const statsPollTimerRef = useRef<number | null>(null);
   const faceCapturePollTimerRef = useRef<number | null>(null);
+  const faceCaptureContainerRef = useRef<HTMLDivElement | null>(null);
+  const faceCaptureReqSeqRef = useRef(0);
+  const faceCaptureLoadingRef = useRef(false);
+  const faceCaptureOffsetRef = useRef(0);
+  const faceCapturePageSize = 20;
+  const faceCaptureRowH = 84;
   const trackZoneByIdRef = useRef<
     Map<number, { side: -1 | 1; zoneSide: (-1 | 1) | null; lastCrossTs: number }>
   >(new Map());
@@ -409,31 +419,61 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     }, 120);
   }, [fetchStatsFromBackend]);
 
-  const fetchFaceCaptures = useCallback(async () => {
+  const fetchFaceCaptures = useCallback(async (reset: boolean = true) => {
     const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
     const vvIdNow = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
     if (vvIdNow == null) {
       setFaceCaptures([]);
+      setFaceCaptureOffset(0);
+      setFaceCaptureHasMore(true);
       return;
     }
+    if (faceCaptureLoadingRef.current && !reset) return;
+    const thisReqSeq = ++faceCaptureReqSeqRef.current;
     try {
+      faceCaptureLoadingRef.current = true;
+      setFaceCaptureLoading(true);
       const mode = statsMode === "realtime" ? "realtime" : "date";
       const tzOffsetMin = new Date().getTimezoneOffset();
+      const reqOffset = reset ? 0 : faceCaptureOffsetRef.current;
       const r = await fetch(
         `${API_BASE}/api/footfall/face-captures?virtual_view_id=${vvIdNow}` +
           `&floor_plan_id=${selectedFloorPlanId ?? ""}` +
           `&mode=${mode}` +
           (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "") +
           `&tz_offset_minutes=${encodeURIComponent(String(tzOffsetMin))}` +
-          `&limit=12`,
+          `&offset=${encodeURIComponent(String(reqOffset))}` +
+          `&limit=${encodeURIComponent(String(faceCapturePageSize))}`,
       );
       if (!r.ok) return;
       const data = (await r.json()) as FaceCaptureItem[];
-      setFaceCaptures(Array.isArray(data) ? data : []);
+      if (thisReqSeq !== faceCaptureReqSeqRef.current) return;
+      const list = Array.isArray(data) ? data : [];
+      if (reset) {
+        setFaceCaptures(list);
+        setFaceCaptureOffset(list.length);
+        faceCaptureOffsetRef.current = list.length;
+      } else {
+        setFaceCaptures((old) => [...old, ...list]);
+        const nextOffset = reqOffset + list.length;
+        setFaceCaptureOffset(nextOffset);
+        faceCaptureOffsetRef.current = nextOffset;
+      }
+      setFaceCaptureHasMore(list.length >= faceCapturePageSize);
     } catch {
       // ignore transient network errors
+    } finally {
+      faceCaptureLoadingRef.current = false;
+      if (thisReqSeq === faceCaptureReqSeqRef.current) {
+        setFaceCaptureLoading(false);
+      }
     }
   }, [bindCameraId, bindCameraOptions, selectedFloorPlanId, statsDate, statsMode]);
+
+  const loadMoreFaceCaptures = useCallback(() => {
+    if (!faceCaptureHasMore || faceCaptureLoading) return;
+    void fetchFaceCaptures(false);
+  }, [faceCaptureHasMore, faceCaptureLoading, fetchFaceCaptures]);
 
   // UV near-line hysteresis band
   const LINE_NEAR_ZONE_W = 0.05;
@@ -976,20 +1016,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   }, [analyzing, fetchStatsFromBackend]);
 
   useEffect(() => {
-    if (!analyzing || requiredVirtualViewId == null) {
-      if (faceCapturePollTimerRef.current != null) {
-        window.clearInterval(faceCapturePollTimerRef.current);
-        faceCapturePollTimerRef.current = null;
-      }
-      return;
-    }
-    void fetchFaceCaptures();
+    // 无论 analyzing 与否，都先加载一页，避免刷新页面后抓拍列表空白
+    void fetchFaceCaptures(true);
     if (faceCapturePollTimerRef.current != null) {
       window.clearInterval(faceCapturePollTimerRef.current);
       faceCapturePollTimerRef.current = null;
     }
+    if (!analyzing || requiredVirtualViewId == null) {
+      return;
+    }
     faceCapturePollTimerRef.current = window.setInterval(() => {
-      void fetchFaceCaptures();
+      // 实时模式下仅在列表顶部自动刷新，避免历史滚动中跳动
+      const el = faceCaptureContainerRef.current;
+      const nearTop = !el || el.scrollTop < 24;
+      if (statsMode === "realtime" && nearTop) {
+        void fetchFaceCaptures(true);
+      }
     }, 1200);
     return () => {
       if (faceCapturePollTimerRef.current != null) {
@@ -997,7 +1039,16 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         faceCapturePollTimerRef.current = null;
       }
     };
-  }, [analyzing, fetchFaceCaptures, requiredVirtualViewId]);
+  }, [analyzing, fetchFaceCaptures, requiredVirtualViewId, statsMode, selectedFloorPlanId, bindCameraId, statsDate]);
+
+  const faceVisibleRange = useMemo(() => {
+    const el = faceCaptureContainerRef.current;
+    const viewportH = Math.max(1, el?.clientHeight || 400);
+    const start = Math.max(0, Math.floor(faceScrollTop / faceCaptureRowH) - 3);
+    const count = Math.ceil(viewportH / faceCaptureRowH) + 6;
+    const end = Math.min(faceCaptures.length, start + count);
+    return { start, end };
+  }, [faceCaptures.length, faceScrollTop]);
 
   useEffect(() => {
     if (!analyzing) return;
@@ -1896,31 +1947,57 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-2 md:row-start-1 md:row-span-2">
         <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍（进入方向）</div>
-        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+        <div
+          ref={faceCaptureContainerRef}
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto pr-1"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            setFaceScrollTop(el.scrollTop);
+            if (el.scrollHeight - (el.scrollTop + el.clientHeight) < 120) {
+              loadMoreFaceCaptures();
+            }
+          }}
+        >
           {faceCaptures.length === 0 ? (
             <div className="rounded border border-dashed border-slate-300 bg-slate-50 p-3 text-xs text-slate-500">
               暂无抓拍记录（仅显示经过判定线“进入”方向的人脸）
             </div>
           ) : (
-            faceCaptures.map((it) => (
-              <div key={it.id} className="flex flex-row gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
-                <img
-                  src={`data:image/jpeg;base64,${it.image_base64}`}
-                  alt={`face-${it.id}`}
-                  className="h-16 w-16 flex-shrink-0 rounded object-cover"
-                />
-                <div className="flex flex-col justify-center">
-                  <div className="text-xs text-slate-700">
-                    性别：{it.gender === "male" ? "男" : it.gender === "female" ? "女" : "未知"}
+            <div style={{ position: "relative", height: `${faceCaptures.length * faceCaptureRowH}px` }}>
+              {faceCaptures.slice(faceVisibleRange.start, faceVisibleRange.end).map((it, i) => {
+                const idx = faceVisibleRange.start + i;
+                const top = idx * faceCaptureRowH;
+                return (
+                  <div
+                    key={it.id}
+                    className="absolute left-0 right-0 px-0.5 pb-2"
+                    style={{ top: `${top}px`, height: `${faceCaptureRowH}px` }}
+                  >
+                    <div className="flex h-[76px] flex-row gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
+                      <img
+                        src={`data:image/jpeg;base64,${it.image_base64}`}
+                        alt={`face-${it.id}`}
+                        className="h-16 w-16 flex-shrink-0 rounded object-cover"
+                      />
+                      <div className="flex flex-col justify-center">
+                        <div className="text-xs text-slate-700">
+                          性别：{it.gender === "male" ? "男" : it.gender === "female" ? "女" : "未知"}
+                        </div>
+                        <div className="mt-1 text-xs text-slate-700">年龄：{it.age_bucket || "未知"}</div>
+                        <div className="mt-1 text-[11px] text-slate-500">
+                          时间：{Number.isFinite(Number(it.ts)) ? new Date(Number(it.ts) * 1000).toLocaleString() : "-"}
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div className="mt-1 text-xs text-slate-700">年龄：{it.age_bucket || "未知"}</div>
-                  <div className="mt-1 text-[11px] text-slate-500">
-                    时间：{Number.isFinite(Number(it.ts)) ? new Date(Number(it.ts) * 1000).toLocaleString() : "-"}
-                  </div>
-                </div>
-              </div>
-            ))
+                );
+              })}
+            </div>
           )}
+          {faceCaptureLoading ? <div className="py-1 text-center text-[11px] text-slate-500">加载中...</div> : null}
+          {!faceCaptureHasMore && faceCaptures.length > 0 ? (
+            <div className="py-1 text-center text-[11px] text-slate-400">已加载全部历史</div>
+          ) : null}
         </div>
       </div>
 

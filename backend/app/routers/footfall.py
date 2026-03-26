@@ -289,8 +289,10 @@ async def footfall_face_captures(
     date_key: Optional[str] = None,  # YYYY-MM-DD
     tz_offset_minutes: Optional[int] = None,
     limit: int = 12,
+    offset: int = 0,
 ):
-    lim = max(1, min(int(limit), 36))
+    lim = max(1, min(int(limit), 200))
+    off = max(0, int(offset))
 
     def _tz_from_offset_minutes(tz_min: Optional[int]) -> timezone:
         if tz_min is None:
@@ -331,7 +333,7 @@ async def footfall_face_captures(
         )
         if floor_plan_id is not None:
             q = q.filter(models.FootfallFaceCapture.floor_plan_id == int(floor_plan_id))
-        rows = q.order_by(models.FootfallFaceCapture.ts.desc()).limit(lim).all()
+        rows = q.order_by(models.FootfallFaceCapture.ts.desc()).offset(off).limit(lim).all()
 
     out: List[FaceCaptureOut] = []
     for r in rows:
