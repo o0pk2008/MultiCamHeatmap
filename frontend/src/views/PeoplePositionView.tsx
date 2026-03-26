@@ -44,6 +44,9 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
   const [poiTrackIdsByCell, setPoiTrackIdsByCell] = useState<Map<string, number[]>>(new Map());
   const [vvFootfalls, setVvFootfalls] = useState<Record<number, Footfall[]>>({});
   const wsRef = useRef<WebSocket | null>(null);
+  const peopleHeatmapWsIntentionalCloseRef = useRef(false);
+  const peopleHeatmapReconnectTimerRef = useRef<number | null>(null);
+  const openPeopleHeatmapWsLiveRef = useRef<(floorPlanId: number) => void>(() => {});
   const lastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string; trackId: number | null }>>(new Map());
   const sourceStaleMs = 900;
 
@@ -164,6 +167,63 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
     [recomputePoiCells],
   );
 
+  const openPeopleHeatmapWebSocket = useCallback((floorPlanId: number) => {
+    if (peopleHeatmapReconnectTimerRef.current != null) {
+      window.clearTimeout(peopleHeatmapReconnectTimerRef.current);
+      peopleHeatmapReconnectTimerRef.current = null;
+    }
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
+    );
+    ws.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        handleEvent(evt, floorPlanId);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    ws.onclose = () => {
+      wsRef.current = null;
+      if (peopleHeatmapWsIntentionalCloseRef.current) {
+        peopleHeatmapWsIntentionalCloseRef.current = false;
+        return;
+      }
+      peopleHeatmapReconnectTimerRef.current = window.setTimeout(() => {
+        peopleHeatmapReconnectTimerRef.current = null;
+        void (async () => {
+          try {
+            const r = await fetch(`${API_BASE}/api/heatmap/status?floor_plan_id=${floorPlanId}`);
+            const data = r.ok ? await r.json() : null;
+            if (data?.running) {
+              setAnalyzing(true);
+              openPeopleHeatmapWsLiveRef.current(floorPlanId);
+            } else {
+              setAnalyzing(false);
+            }
+          } catch {
+            setAnalyzing(false);
+          }
+        })();
+      }, 450);
+    };
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch {}
+    };
+    wsRef.current = ws;
+  }, [handleEvent]);
+
+  useEffect(() => {
+    openPeopleHeatmapWsLiveRef.current = openPeopleHeatmapWebSocket;
+  }, [openPeopleHeatmapWebSocket]);
+
   useEffect(() => {
     if (!analyzing) return;
     const t = window.setInterval(() => {
@@ -185,31 +245,16 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
         const shouldRun = !!st.running;
         if (shouldRun) {
           if (wsRef.current) return;
+          setAnalyzing(true);
           lastSeenByEntityRef.current = new Map();
           setPoiCells(new Map());
           setPoiTrackIdsByCell(new Map());
-          const ws = new WebSocket(
-            `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
-              /:\d+$/,
-              ":18080",
-            )}/ws/heatmap-events`,
-          );
-          ws.onmessage = (ev) => {
-            try {
-              const evt = JSON.parse(ev.data);
-              handleEvent(evt, fpId);
-            } catch (e) {
-              console.error(e);
-            }
-          };
-          ws.onclose = () => {
-            wsRef.current = null;
-            setAnalyzing(false);
-          };
-          wsRef.current = ws;
-          setAnalyzing(true);
+          peopleHeatmapWsIntentionalCloseRef.current = false;
+          openPeopleHeatmapWebSocket(fpId);
         } else {
+          peopleHeatmapWsIntentionalCloseRef.current = true;
           wsRef.current?.close();
+          peopleHeatmapWsIntentionalCloseRef.current = false;
           wsRef.current = null;
           setAnalyzing(false);
         }
@@ -219,16 +264,30 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedFloorPlanId, handleEvent]);
+  }, [selectedFloorPlanId, handleEvent, openPeopleHeatmapWebSocket]);
 
   useEffect(() => {
     return () => {
+      peopleHeatmapWsIntentionalCloseRef.current = true;
+      if (peopleHeatmapReconnectTimerRef.current != null) {
+        window.clearTimeout(peopleHeatmapReconnectTimerRef.current);
+        peopleHeatmapReconnectTimerRef.current = null;
+      }
       try {
         wsRef.current?.close();
       } catch {}
       wsRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (peopleHeatmapReconnectTimerRef.current != null) {
+        window.clearTimeout(peopleHeatmapReconnectTimerRef.current);
+        peopleHeatmapReconnectTimerRef.current = null;
+      }
+    };
+  }, [selectedFloorPlanId]);
 
   return (
     <div className="space-y-4">
@@ -291,33 +350,27 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
                   lastSeenByEntityRef.current = new Map();
                   setPoiCells(new Map());
                   setPoiTrackIdsByCell(new Map());
-                  await fetch(
+                  const startRes = await fetch(
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${
                       recordHistory ? "true" : "false"
                     }`,
                     { method: "POST" },
                   );
-                  const ws = new WebSocket(
-                    `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
-                      /:\d+$/,
-                      ":18080",
-                    )}/ws/heatmap-events`,
-                  );
-                  ws.onmessage = (ev) => {
+                  if (startRes.ok) {
                     try {
-                      const evt = JSON.parse(ev.data);
-                      handleEvent(evt, selectedFloorPlanId);
-                    } catch (e) {
-                      console.error(e);
-                    }
-                  };
-                  ws.onclose = () => {
-                    wsRef.current = null;
-                    setAnalyzing(false);
-                  };
-                  wsRef.current = ws;
+                      const st = await startRes.json();
+                      if (typeof st?.record_history === "boolean") setRecordHistory(st.record_history);
+                    } catch {}
+                  }
+                  peopleHeatmapWsIntentionalCloseRef.current = false;
+                  openPeopleHeatmapWebSocket(selectedFloorPlanId);
                   setAnalyzing(true);
                 } else {
+                  peopleHeatmapWsIntentionalCloseRef.current = true;
+                  if (peopleHeatmapReconnectTimerRef.current != null) {
+                    window.clearTimeout(peopleHeatmapReconnectTimerRef.current);
+                    peopleHeatmapReconnectTimerRef.current = null;
+                  }
                   await fetch(`${API_BASE}/api/heatmap/stop?floor_plan_id=${selectedFloorPlanId}`, { method: "POST" });
                   wsRef.current?.close();
                   wsRef.current = null;

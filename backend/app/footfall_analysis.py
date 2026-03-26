@@ -20,17 +20,22 @@ class FootfallLine:
 
 class FootfallAnalyzer:
     """
-    在后端基于 YOLO 检测 + track(stable_id) 实时判断进入/离开。
+    在后端基于 YOLO 检测 + 追踪 ID 实时判断进入/离开。
 
-    关键点：
-    - 过线判定使用同一坐标系：foot_u/foot_v（bbox 底部中心->UV）
-    - 进入/离开由线两侧符号变化 + 近线带 hysteresis 决定
-    - 输出仅“翻边计数事件”，前端不再做过线状态机，从而避免丢帧漏检
+    与 Ultralytics ObjectCounter（线段区域）一致的核心原则：
+    - 仅用「上一帧落脚点 → 当前帧落脚点」线段与计数线段求交判断是否过线；
+    - 几何状态按 track_id 保存（与推理里用 bbox 中心做关联的 track 一致；落脚点统一为脚底，
+      避免 stable_id 合并把不同人的轨迹拼成一段导致错判）；
+    - stable_id 仅用于上报与统计，不参与距离与过线计算。
+
+    方向语义（与原有前端一致）：signed_dist 从负半平面到正半平面记为 in，反之为 out。
     """
 
     def __init__(self) -> None:
         self._tasks: Dict[str, asyncio.Task] = {}
         self._stops: Dict[str, asyncio.Event] = {}
+        # 运行中会随 POST /footfall/start 更新，使多终端调整线或刷新后几何立即生效
+        self._session_line: Dict[str, FootfallLine] = {}
 
     def _session_key(self, floor_plan_id: int, virtual_view_id: int) -> str:
         return f"fp{int(floor_plan_id)}-vv{int(virtual_view_id)}"
@@ -43,6 +48,7 @@ class FootfallAnalyzer:
         emit_interval_sec: float = 0.03,
     ) -> None:
         key = self._session_key(floor_plan_id, virtual_view_id)
+        self._session_line[key] = line
         # 无论是否已在运行，都更新可视化线（便于 YOLO 对齐验证）
         try:
             manager.set_footfall_line_uv(
@@ -54,13 +60,13 @@ class FootfallAnalyzer:
             pass
 
         if key in self._tasks:
-            # already running; ignore repeated start
+            # 已在运行：只更新上面的几何与可视化，不重复创建任务
             return
         stop_event = asyncio.Event()
         self._stops[key] = stop_event
         loop = asyncio.get_running_loop()
         self._tasks[key] = loop.create_task(
-            self._run_session(key, floor_plan_id, virtual_view_id, line, emit_interval_sec, stop_event),
+            self._run_session(key, floor_plan_id, virtual_view_id, emit_interval_sec, stop_event),
         )
 
         # 让 YOLO inference 保持运行（即使没有 analyzed.mjpeg 订阅者）
@@ -89,6 +95,11 @@ class FootfallAnalyzer:
                 pass
         try:
             manager.release_inference(int(virtual_view_id))
+        except Exception:
+            pass
+
+        try:
+            self._session_line.pop(key, None)
         except Exception:
             pass
 
@@ -161,44 +172,61 @@ class FootfallAnalyzer:
                 return True
         return False
 
+    @staticmethod
+    def _motion_cross_line(line: FootfallLine, prev_u: float, prev_v: float, u: float, v: float) -> float:
+        dx = float(line.p2[0] - line.p1[0])
+        dy = float(line.p2[1] - line.p1[1])
+        return dx * (v - prev_v) - dy * (u - prev_u)
+
     async def _run_session(
         self,
         session_key: str,
         floor_plan_id: int,
         virtual_view_id: int,
-        line: FootfallLine,
         emit_interval_sec: float,
         stop_event: asyncio.Event,
     ) -> None:
-        line_config_id = int(line.line_config_id)
         stable_next_id = 1
 
-        # stable_id state: stable_id -> {last_sd, armed, cooldown_until_ts, last_ts}
-        state_by_sid: Dict[int, Dict[str, Any]] = {}
+        # 过线几何与防抖：仅按 track_id（与推理线程分配的 ID 一致）
+        geom_by_tid: Dict[int, Dict[str, Any]] = {}
 
-        # stable association: track_id -> stable_id
+        # stable_id 仅作事件属性：track_id -> stable_id；近邻匹配用
         det_track_to_sid: Dict[int, int] = {}
-        # stable memory for uv matching: sid -> (u, v, ts)
         stable_by_uv: Dict[int, Tuple[float, float, float]] = {}
 
         stable_ttl_sec = float(os.environ.get("HEATMAP_STABLE_ID_TTL_SEC", "2.5"))
         stable_match_dt_sec = float(os.environ.get("HEATMAP_STABLE_ID_MATCH_DT_SEC", "1.2"))
         stable_match_dist = float(os.environ.get("HEATMAP_STABLE_ID_MATCH_DIST", "0.18"))
 
-        # 过线事件冷却：同一个对象穿越后需要冷却，并且离开近线带后才能重新计数
         cooldown_sec = float(os.environ.get("HEATMAP_FOOTFALL_COOLDOWN_SEC", "0.8"))
-
         rearm_sd_mult = float(os.environ.get("HEATMAP_FOOTFALL_REARM_SD_MULT", "1.4"))
 
-        # 全局最近穿越去重：解决 stable_id/track_id 抖动导致的同一次经过重复计数
-        cross_pos_dist = float(os.environ.get("HEATMAP_CROSS_POS_DIST", "0.03"))  # UV distance
+        cross_pos_dist = float(os.environ.get("HEATMAP_CROSS_POS_DIST", "0.03"))
         cross_dedup_dt = float(os.environ.get("HEATMAP_CROSS_DEDUP_DT_SEC", "1.0"))
-        recent_crosses: list[Tuple[float, float, float, str]] = []  # (u,v,ts,dir)
+        recent_crosses: list[Tuple[float, float, float, str]] = []
+
+        # 半平面容差：与 zone_w 成比例，避免在在线附近抖动反复判穿越
+        sd_tol_base = float(os.environ.get("HEATMAP_FOOTFALL_SD_TOL_MULT", "0.25"))
 
         last_emit_ts_by_vv = 0.0
 
         try:
             while not stop_event.is_set():
+                line = self._session_line.get(session_key)
+                if line is None:
+                    await asyncio.sleep(emit_interval_sec)
+                    continue
+
+                line_config_id = int(line.line_config_id)
+                p1u = float(line.p1[0])
+                p1v = float(line.p1[1])
+                p2u = float(line.p2[0])
+                p2v = float(line.p2[1])
+                line_dx = p2u - p1u
+                line_dy = p2v - p1v
+                line_len = math.hypot(line_dx, line_dy)
+
                 det = manager.get_latest_detections(int(virtual_view_id))
                 if det is None:
                     await asyncio.sleep(emit_interval_sec)
@@ -234,14 +262,17 @@ class FootfallAnalyzer:
                     await asyncio.sleep(emit_interval_sec)
                     continue
 
-                # pruning stable memories
                 now_ts = det_ts
                 for sid, (_u, _v, sts) in list(stable_by_uv.items()):
                     if now_ts - float(sts) > stable_ttl_sec:
                         stable_by_uv.pop(int(sid), None)
-                        state_by_sid.pop(int(sid), None)
+                for tid_k, gst in list(geom_by_tid.items()):
+                    if now_ts - float(gst.get("last_ts", 0.0)) > stable_ttl_sec:
+                        geom_by_tid.pop(int(tid_k), None)
 
-                # iterate detections
+                sd_tol = max(1e-5, float(sd_tol_base) * float(line.zone_w))
+                cross_z_min = max(1e-8, 1e-6 * max(line_len, 1e-9))
+
                 try:
                     n_det = min(len(xyxy), len(cls_ids), len(track_ids))  # type: ignore[arg-type]
                 except Exception:
@@ -255,6 +286,16 @@ class FootfallAnalyzer:
                     if tid < 0:
                         continue
 
+                    try:
+                        cid_int = int(cls_ids[idx])
+                    except Exception:
+                        continue
+                    try:
+                        if not manager.is_person_detection_class(cid_int):
+                            continue
+                    except Exception:
+                        pass
+
                     x1, y1, x2, y2 = xyxy[idx]
                     foot_x = float(x1 + x2) * 0.5
                     foot_y = float(y2) - 0.01 * float(y2 - y1)
@@ -266,12 +307,9 @@ class FootfallAnalyzer:
                     sd = self._signed_dist(float(foot_u), float(foot_v), line)
                     if sd is None:
                         continue
-                    # sd 符号表示点位于判定线两侧；用于穿越方向判定
 
-                    # stable id association
                     sid = det_track_to_sid.get(tid)
                     if sid is None:
-                        # match by uv in recent memory
                         best_sid = None
                         best_d2 = None
                         for cand_sid, (su, sv, sts) in stable_by_uv.items():
@@ -293,73 +331,66 @@ class FootfallAnalyzer:
                             stable_next_id += 1
                         det_track_to_sid[int(tid)] = int(sid)
 
-                    # update stable uv memory
                     stable_by_uv[int(sid)] = (float(foot_u), float(foot_v), float(now_ts))
 
-                    prev = state_by_sid.get(int(sid))
+                    prev = geom_by_tid.get(int(tid))
                     if prev is None:
-                        init_sign = 1 if sd > 0 else -1 if sd < 0 else 0
-                        state_by_sid[int(sid)] = {
+                        geom_by_tid[int(tid)] = {
                             "last_sd": float(sd),
                             "last_foot_u": float(foot_u),
                             "last_foot_v": float(foot_v),
-                            "last_nonzero_sign": init_sign,
-                            "last_ts": det_ts,
+                            "last_ts": float(det_ts),
                             "armed": True,
                             "cooldown_until_ts": 0.0,
                         }
                         continue
 
                     prev_sd = float(prev.get("last_sd") or 0.0)
-                    curr_nonzero_sign = 1 if sd > 0 else -1 if sd < 0 else 0
-
                     armed = bool(prev.get("armed", True))
                     cooldown_until_ts = float(prev.get("cooldown_until_ts") or 0.0)
                     rearm_sd_thr = float(rearm_sd_mult) * float(line.zone_w)
 
-                    # 冷却/未解锁状态：不计数；离开近线带后重新 armed
                     if (not armed) or (det_ts < cooldown_until_ts):
-                        if abs(sd) > rearm_sd_thr:
+                        if abs(float(sd)) > rearm_sd_thr:
                             prev["armed"] = True
                             prev["cooldown_until_ts"] = 0.0
                         prev["last_sd"] = float(sd)
                         prev["last_foot_u"] = float(foot_u)
                         prev["last_foot_v"] = float(foot_v)
                         prev["last_ts"] = float(det_ts)
-                        state_by_sid[int(sid)] = prev
+                        geom_by_tid[int(tid)] = prev
                         continue
 
                     counted_dir: Optional[str] = None
 
-                    prev_foot_u = float(prev.get("last_foot_u") or foot_u)
-                    prev_foot_v = float(prev.get("last_foot_v") or foot_v)
+                    prev_foot_u = float(prev.get("last_foot_u"))
+                    prev_foot_v = float(prev.get("last_foot_v"))
 
-                    # 线段相交判定（更鲁棒，适配丢帧）
                     intersects = self._segments_intersect(
                         prev_foot_u,
                         prev_foot_v,
                         float(foot_u),
                         float(foot_v),
-                        float(line.p1[0]),
-                        float(line.p1[1]),
-                        float(line.p2[0]),
-                        float(line.p2[1]),
+                        p1u,
+                        p1v,
+                        p2u,
+                        p2v,
                     )
 
                     if intersects:
-                        # 方向优先使用 signed-dist 符号翻转（保持与之前方向一致）
-                        if prev_sd < 0 and sd > 0:
-                            counted_dir = "in"
-                        elif prev_sd > 0 and sd < 0:
-                            counted_dir = "out"
-                        else:
-                            # 兜底：用 cross(LineVec, MoveVec) 决定方向
-                            line_vec_x = float(line.p2[0] - line.p1[0])
-                            line_vec_y = float(line.p2[1] - line.p1[1])
-                            move_vec_x = float(foot_u - prev_foot_u)
-                            move_vec_y = float(foot_v - prev_foot_v)
-                            cross2 = line_vec_x * move_vec_y - line_vec_y * move_vec_x
-                            counted_dir = "in" if cross2 > 0 else "out"
+                        cross_z = self._motion_cross_line(
+                            line, prev_foot_u, prev_foot_v, float(foot_u), float(foot_v)
+                        )
+                        strong = (prev_sd > sd_tol and sd < -sd_tol) or (prev_sd < -sd_tol and sd > sd_tol)
+                        if strong:
+                            counted_dir = "in" if float(sd) > 0 else "out"
+                        elif abs(prev_sd) <= sd_tol or abs(float(sd)) <= sd_tol:
+                            if abs(cross_z) >= cross_z_min:
+                                counted_dir = "in" if cross_z > 0 else "out"
+                        elif prev_sd * float(sd) < 0:
+                            counted_dir = "in" if float(sd) > 0 else "out"
+                        elif abs(cross_z) >= cross_z_min:
+                            counted_dir = "in" if cross_z > 0 else "out"
 
                     if counted_dir is not None:
                         # 全局最近穿越去重：同方向、同位置、同时间窗内的重复触发抑制
@@ -425,12 +456,11 @@ class FootfallAnalyzer:
                         prev["armed"] = False
                         prev["cooldown_until_ts"] = float(det_ts) + float(cooldown_sec)
 
-                    # always update state
                     prev["last_sd"] = float(sd)
                     prev["last_foot_u"] = float(foot_u)
                     prev["last_foot_v"] = float(foot_v)
                     prev["last_ts"] = float(det_ts)
-                    state_by_sid[int(sid)] = prev
+                    geom_by_tid[int(tid)] = prev
 
                 await asyncio.sleep(emit_interval_sec)
         except asyncio.CancelledError:

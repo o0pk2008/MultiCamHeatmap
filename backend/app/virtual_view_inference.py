@@ -530,6 +530,11 @@ class VirtualViewInferenceManager:
         name = self._cls_name_of(cid_int)
         return self._infer_gender_age_from_class_name(name)
 
+    def is_person_detection_class(self, cid: int) -> bool:
+        """与 YOLO 推理线程中 footfall person 过滤一致，供 footfall 等模块复用。"""
+        _g, _a, person_like = self._infer_gender_age_from_cls_id(int(cid))
+        return bool(person_like)
+
     def ensure_running(self, virtual_view_id: int) -> None:
         """
         analyzed 模式：确保后台推理线程在跑，并允许 YOLO inference。

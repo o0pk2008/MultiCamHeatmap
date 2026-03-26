@@ -77,6 +77,9 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
   const poiLastSeenByEntityRef = useRef<Map<string, { tsMs: number; cellKey: string }>>(new Map());
   const poiSourceStaleMs = 900;
   const wsRef = useRef<WebSocket | null>(null);
+  const heatmapWsIntentionalCloseRef = useRef(false);
+  const heatmapReconnectTimerRef = useRef<number | null>(null);
+  const openHeatmapWsLiveRef = useRef<(floorPlanId: number) => void>(() => {});
   const lastSampleByEntityRef = useRef<Map<string, { ts: number; cellKey: string }>>(new Map());
   const lastDecayAtRef = useRef<number | null>(null);
 
@@ -241,6 +244,68 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
     [heatmapDataMode, recomputePoiOverlay],
   );
 
+  const openHeatmapWebSocket = useCallback((floorPlanId: number) => {
+    if (heatmapReconnectTimerRef.current != null) {
+      window.clearTimeout(heatmapReconnectTimerRef.current);
+      heatmapReconnectTimerRef.current = null;
+    }
+    try {
+      wsRef.current?.close();
+    } catch {}
+    wsRef.current = null;
+
+    const ws = new WebSocket(
+      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
+    );
+    ws.onmessage = (ev) => {
+      try {
+        const evt = JSON.parse(ev.data);
+        if (!heatmapUpdatesEnabledRef.current) return;
+        handleHeatmapEvent(evt, floorPlanId);
+        handlePoiOverlayEvent(evt, floorPlanId);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    ws.onclose = () => {
+      wsRef.current = null;
+      if (heatmapWsIntentionalCloseRef.current) {
+        heatmapWsIntentionalCloseRef.current = false;
+        setHeatmapMjpegStreamEpoch((n) => n + 1);
+        return;
+      }
+      heatmapReconnectTimerRef.current = window.setTimeout(() => {
+        heatmapReconnectTimerRef.current = null;
+        void (async () => {
+          try {
+            const r = await fetch(`${API_BASE}/api/heatmap/status?floor_plan_id=${floorPlanId}`);
+            const data = r.ok ? await r.json() : null;
+            if (data?.running) {
+              setAnalyzing(true);
+              openHeatmapWsLiveRef.current(floorPlanId);
+              setHeatmapMjpegStreamEpoch((n) => n + 1);
+            } else {
+              setAnalyzing(false);
+              setHeatmapMjpegStreamEpoch((n) => n + 1);
+            }
+          } catch {
+            setAnalyzing(false);
+          }
+        })();
+      }, 450);
+    };
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch {}
+    };
+    wsRef.current = ws;
+  }, [handleHeatmapEvent, handlePoiOverlayEvent]);
+
+  useEffect(() => {
+    openHeatmapWsLiveRef.current = openHeatmapWebSocket;
+  }, [openHeatmapWebSocket]);
+
   const loadCurrentDwellFromBackend = useCallback(async (floorPlanId: number) => {
     try {
       const res = await fetch(`${API_BASE}/api/heatmap/current-dwell?floor_plan_id=${floorPlanId}`);
@@ -306,32 +371,17 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
         const shouldRun = !!st.running;
         if (shouldRun) {
           if (wsRef.current) return;
+          setAnalyzing(true);
           setHeatmapDataMode("live");
           void loadCurrentDwellFromBackend(fpId);
           lastSampleByEntityRef.current = new Map();
-          const ws = new WebSocket(
-            `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
-          );
-          ws.onmessage = (ev) => {
-            try {
-              const evt = JSON.parse(ev.data);
-              if (!heatmapUpdatesEnabledRef.current) return;
-              handleHeatmapEvent(evt, fpId);
-              handlePoiOverlayEvent(evt, fpId);
-            } catch (e) {
-              console.error(e);
-            }
-          };
-          ws.onclose = () => {
-            wsRef.current = null;
-            setAnalyzing(false);
-            setHeatmapMjpegStreamEpoch((n) => n + 1);
-          };
-          wsRef.current = ws;
-          setAnalyzing(true);
+          heatmapWsIntentionalCloseRef.current = false;
+          openHeatmapWebSocket(fpId);
           setHeatmapMjpegStreamEpoch((n) => n + 1);
         } else {
+          heatmapWsIntentionalCloseRef.current = true;
           wsRef.current?.close();
+          heatmapWsIntentionalCloseRef.current = false;
           wsRef.current = null;
           setAnalyzing(false);
           setHeatmapMjpegStreamEpoch((n) => n + 1);
@@ -341,16 +391,30 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [selectedFloorPlanId, handleHeatmapEvent, handlePoiOverlayEvent, loadCurrentDwellFromBackend]);
+  }, [selectedFloorPlanId, handleHeatmapEvent, handlePoiOverlayEvent, loadCurrentDwellFromBackend, openHeatmapWebSocket]);
 
   useEffect(() => {
     return () => {
+      heatmapWsIntentionalCloseRef.current = true;
+      if (heatmapReconnectTimerRef.current != null) {
+        window.clearTimeout(heatmapReconnectTimerRef.current);
+        heatmapReconnectTimerRef.current = null;
+      }
       try {
         wsRef.current?.close();
       } catch {}
       wsRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (heatmapReconnectTimerRef.current != null) {
+        window.clearTimeout(heatmapReconnectTimerRef.current);
+        heatmapReconnectTimerRef.current = null;
+      }
+    };
+  }, [selectedFloorPlanId]);
 
   useEffect(() => {
     if (selectedFloorPlanId == null) {
@@ -484,34 +548,27 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
                   setHeatmapDataMode("live");
                   setHeatmapCells(new Map());
                   lastSampleByEntityRef.current = new Map();
-                  await fetch(
+                  const startRes = await fetch(
                     `${API_BASE}/api/heatmap/start?floor_plan_id=${selectedFloorPlanId}&record_history=${recordHistory ? "true" : "false"}`,
                     { method: "POST" },
                   );
-                  // 给后台 acquire 推理与首帧缓存一短暂窗口，再切 analyzed MJPEG，减轻 SPA 内黑屏
-                  await new Promise((r) => setTimeout(r, 450));
-                  const ws = new WebSocket(
-                    `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(/:\d+$/, ":18080")}/ws/heatmap-events`,
-                  );
-                  ws.onmessage = (ev) => {
+                  if (startRes.ok) {
                     try {
-                      const evt = JSON.parse(ev.data);
-                      if (!heatmapUpdatesEnabledRef.current) return;
-                      handleHeatmapEvent(evt, selectedFloorPlanId);
-                      handlePoiOverlayEvent(evt, selectedFloorPlanId);
-                    } catch (e) {
-                      console.error(e);
-                    }
-                  };
-                  ws.onclose = () => {
-                    wsRef.current = null;
-                    setAnalyzing(false);
-                    setHeatmapMjpegStreamEpoch((n) => n + 1);
-                  };
-                  wsRef.current = ws;
+                      const st = await startRes.json();
+                      if (typeof st?.record_history === "boolean") setRecordHistory(st.record_history);
+                    } catch {}
+                  }
+                  await new Promise((r) => setTimeout(r, 450));
+                  heatmapWsIntentionalCloseRef.current = false;
+                  openHeatmapWebSocket(selectedFloorPlanId);
                   setAnalyzing(true);
                   setHeatmapMjpegStreamEpoch((n) => n + 1);
                 } else {
+                  heatmapWsIntentionalCloseRef.current = true;
+                  if (heatmapReconnectTimerRef.current != null) {
+                    window.clearTimeout(heatmapReconnectTimerRef.current);
+                    heatmapReconnectTimerRef.current = null;
+                  }
                   await fetch(`${API_BASE}/api/heatmap/stop?floor_plan_id=${selectedFloorPlanId}`, { method: "POST" });
                   wsRef.current?.close();
                   wsRef.current = null;

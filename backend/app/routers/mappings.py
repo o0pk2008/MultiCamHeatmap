@@ -329,16 +329,19 @@ async def start_heatmap_analysis(
 ):
     if not db.query(models.FloorPlan).filter(models.FloorPlan.id == floor_plan_id).first():
         raise HTTPException(status_code=404, detail="Floor plan not found")
-    heatmap_running_floor_plans.add(floor_plan_id)
-    set_recording(floor_plan_id, record_history)
-    reset_current_dwell(floor_plan_id)
-    # 通过 HeatmapAnalyzer 启动/管理后台分析任务
+    fp_id = int(floor_plan_id)
+    was_running = fp_id in heatmap_running_floor_plans
+    heatmap_running_floor_plans.add(fp_id)
+    # 已在运行时：不重置停留/不覆盖录制开关，避免多终端重复「开始」互相清空
+    if not was_running:
+        set_recording(floor_plan_id, record_history)
+        reset_current_dwell(floor_plan_id)
     analyzer.start_for_floor_plan(floor_plan_id)
 
     return {
         "status": "started",
         "floor_plan_id": floor_plan_id,
-        "record_history": record_history,
+        "record_history": is_recording(fp_id),
     }
 
 

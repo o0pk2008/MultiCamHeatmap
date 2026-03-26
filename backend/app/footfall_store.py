@@ -1,7 +1,8 @@
 import asyncio
 import threading
 import time
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy.exc import OperationalError
 
@@ -9,6 +10,8 @@ from .db import SessionLocal
 from . import models
 
 _db_write_lock = threading.Lock()
+_recent_event_lock = threading.Lock()
+_recent_event_keys: Dict[Tuple[int, int, str, int, int], float] = {}
 
 
 def _to_int_or_none(v: Any) -> Optional[int]:
@@ -27,6 +30,104 @@ def _to_float_or_none(v: Any) -> Optional[float]:
         return float(v)
     except Exception:
         return None
+
+
+def _normalize_stats_mode_range(mode: str, date_key: Optional[str]) -> Tuple[float, float]:
+    if mode not in ("realtime", "date"):
+        raise ValueError("invalid mode")
+    if mode == "realtime":
+        now = datetime.now(timezone.utc)
+        start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
+        return float(start.timestamp()), float(end.timestamp())
+    if not date_key:
+        raise ValueError("date_key required for date mode")
+    try:
+        y, m, d = [int(x) for x in str(date_key).split("-", 2)]
+        start = datetime(y, m, d, tzinfo=timezone.utc)
+    except Exception as e:  # pragma: no cover
+        raise ValueError("invalid date_key") from e
+    end = start + timedelta(days=1)
+    return float(start.timestamp()), float(end.timestamp())
+
+
+def get_footfall_stats_sync(
+    floor_plan_id: int,
+    virtual_view_id: int,
+    mode: str = "realtime",
+    date_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    start_ts, end_ts = _normalize_stats_mode_range(mode=mode, date_key=date_key)
+
+    age_buckets = ["0-12", "18-25", "26-35", "36-45", "46-55", "55+"]
+    age_bucket_counts: Dict[str, int] = {k: 0 for k in age_buckets}
+    trend_in = [{"hour": h, "value": 0} for h in range(24)]
+    trend_out = [{"hour": h, "value": 0} for h in range(24)]
+
+    in_count = 0
+    out_count = 0
+    gender_male = 0
+    gender_female = 0
+
+    with SessionLocal() as db:
+        cfg = (
+            db.query(models.FootfallLineConfig)
+            .filter(
+                models.FootfallLineConfig.floor_plan_id == int(floor_plan_id),
+                models.FootfallLineConfig.virtual_view_id == int(virtual_view_id),
+            )
+            .first()
+        )
+        if cfg is None:
+            return {
+                "inCount": 0,
+                "outCount": 0,
+                "genderMale": 0,
+                "genderFemale": 0,
+                "ageBuckets": [{"label": k, "value": 0} for k in age_buckets],
+                "trendIn": trend_in,
+                "trendOut": trend_out,
+            }
+
+        events = (
+            db.query(models.FootfallCrossEvent)
+            .filter(
+                models.FootfallCrossEvent.line_config_id == int(cfg.id),
+                models.FootfallCrossEvent.ts >= float(start_ts),
+                models.FootfallCrossEvent.ts < float(end_ts),
+            )
+            .order_by(models.FootfallCrossEvent.ts.asc())
+            .all()
+        )
+
+        for e in events:
+            try:
+                h = datetime.fromtimestamp(float(e.ts), tz=timezone.utc).hour
+            except Exception:
+                continue
+
+            if e.direction == "in":
+                in_count += 1
+                trend_in[h]["value"] += 1
+                if e.gender == "male":
+                    gender_male += 1
+                elif e.gender == "female":
+                    gender_female += 1
+                if e.age_bucket in age_bucket_counts:
+                    age_bucket_counts[str(e.age_bucket)] += 1
+            else:
+                out_count += 1
+                trend_out[h]["value"] += 1
+
+    return {
+        "inCount": in_count,
+        "outCount": out_count,
+        "genderMale": gender_male,
+        "genderFemale": gender_female,
+        "ageBuckets": [{"label": k, "value": int(age_bucket_counts[k])} for k in age_buckets],
+        "trendIn": trend_in,
+        "trendOut": trend_out,
+    }
 
 
 async def record_footfall_event(event: Dict[str, Any]) -> None:
@@ -66,6 +167,23 @@ def record_footfall_event_sync(event: Dict[str, Any]) -> None:
 
     gender = event.get("gender")
     age_bucket = event.get("age_bucket")
+
+    # 时间窗幂等去重，避免同一事件因重连/重复广播被重复写库
+    # key: (line_config_id, stable_id_or_track_id, direction, ts_ms_bucket, pos_mm_bucket)
+    sid_or_tid = stable_id if stable_id is not None else (track_id if track_id is not None else -1)
+    ts_bucket = int(round(float(ts) * 1000.0))
+    pos_bucket = int(round((float(foot_u or 0.0) * 1000.0))) * 2048 + int(round((float(foot_v or 0.0) * 1000.0)))
+    dedup_key = (int(line_config_id), int(sid_or_tid), str(direction), ts_bucket, int(pos_bucket))
+    now_ts = time.time()
+    dedup_ttl_sec = 2.0
+    with _recent_event_lock:
+        cutoff = float(now_ts) - float(dedup_ttl_sec)
+        for k, seen_ts in list(_recent_event_keys.items()):
+            if float(seen_ts) < cutoff:
+                _recent_event_keys.pop(k, None)
+        if dedup_key in _recent_event_keys:
+            return
+        _recent_event_keys[dedup_key] = float(now_ts)
 
     payload = models.FootfallCrossEvent(
         line_config_id=line_config_id,

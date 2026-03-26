@@ -339,23 +339,15 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [analyzing, setAnalyzing] = useState(false);
   const [drawHint, setDrawHint] = useState("点击画面设置第一个点");
 
-  type HeatmapPersonEvent = {
-    floor_plan_id: number;
-    floor_row: number;
-    floor_col: number;
-    virtual_view_id?: number | null;
-    track_id?: number | null;
-    ts?: number;
-    gender?: string | null;
-    age_bucket?: string | null;
-    foot_u?: number | null;
-    foot_v?: number | null;
-    stable_id?: number | null;
-  };
-
   const wsRef = useRef<WebSocket | null>(null);
-  const statsRef = useRef<FootfallStats>(buildEmptyStats());
-  const pendingCommitTimerRef = useRef<number | null>(null);
+  /** 用户点击停止或卸载页面时置 true，避免 WS 断线后误触发「后台已停」或自动重连 */
+  const footfallWsIntentionalCloseRef = useRef(false);
+  const footfallReconnectTimerRef = useRef<number | null>(null);
+  const connectFootfallWsLiveRef = useRef<() => void>(() => {});
+  const seenEventKeysRef = useRef<Map<string, number>>(new Map());
+  const wsConnectSeqRef = useRef(0);
+  const statsRefreshTimerRef = useRef<number | null>(null);
+  const statsPollTimerRef = useRef<number | null>(null);
   const trackZoneByIdRef = useRef<
     Map<number, { side: -1 | 1; zoneSide: (-1 | 1) | null; lastCrossTs: number }>
   >(new Map());
@@ -368,100 +360,46 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     filterDateKey?: string;
   } | null>(null);
 
-  const commitStatsToReact = useCallback(() => {
-    // 深拷贝，避免把 ref 对象引用直接暴露给 React
-    setStatsData({
-      ...statsRef.current,
-      ageBuckets: statsRef.current.ageBuckets.map((x) => ({ ...x })),
-      trendIn: statsRef.current.trendIn.map((x) => ({ ...x })),
-      trendOut: statsRef.current.trendOut.map((x) => ({ ...x })),
-    });
-  }, []);
-
-  const scheduleCommitStats = useCallback(() => {
-    if (pendingCommitTimerRef.current != null) return;
-    pendingCommitTimerRef.current = window.setTimeout(() => {
-      pendingCommitTimerRef.current = null;
-      commitStatsToReact();
-    }, 150);
-  }, [commitStatsToReact]);
-
   const resetStats = useCallback(() => {
-    if (pendingCommitTimerRef.current != null) {
-      window.clearTimeout(pendingCommitTimerRef.current);
-      pendingCommitTimerRef.current = null;
+    if (statsRefreshTimerRef.current != null) {
+      window.clearTimeout(statsRefreshTimerRef.current);
+      statsRefreshTimerRef.current = null;
     }
-    statsRef.current = buildEmptyStats();
     trackZoneByIdRef.current = new Map();
     setStatsData(buildEmptyStats());
   }, []);
 
-  const computeSignedDistByUv = useCallback((u: number, v: number): number | null => {
-    const cfg = analysisLineRef.current;
-    if (!cfg) return null;
-    const dx = cfg.vvP2.x - cfg.vvP1.x;
-    const dy = cfg.vvP2.y - cfg.vvP1.y;
-    const len = Math.hypot(dx, dy) || 0;
-    if (len <= 1e-12) return null;
-    const cross = dx * (v - cfg.vvP1.y) - dy * (u - cfg.vvP1.x);
-    return cross / len; // 有符号距离（单位：UV 归一化空间长度）
-  }, []);
+  const fetchStatsFromBackend = useCallback(async () => {
+    if (selectedFloorPlanId == null) return;
+    const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    const vvIdNow = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
+    if (vvIdNow == null) return;
+    const mode = statsMode === "realtime" ? "realtime" : "date";
+    const url =
+      `${API_BASE}/api/footfall/stats?floor_plan_id=${selectedFloorPlanId}` +
+      `&virtual_view_id=${vvIdNow}` +
+      `&mode=${mode}` +
+      (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "");
+    try {
+      const r = await fetch(url);
+      if (!r.ok) return;
+      const data = (await r.json()) as FootfallStats;
+      setStatsData(data);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [bindCameraId, bindCameraOptions, selectedFloorPlanId, statsDate, statsMode]);
 
-  const computeSideByUv = useCallback(
-    (u: number, v: number): -1 | 0 | 1 => {
-      const sd = computeSignedDistByUv(u, v);
-      if (sd == null) return 0;
-      const eps = 1e-6;
-      if (sd > eps) return 1;
-      if (sd < -eps) return -1;
-      return 0;
-    },
-    [computeSignedDistByUv],
-  );
+  const scheduleRefreshStats = useCallback(() => {
+    if (statsRefreshTimerRef.current != null) return;
+    statsRefreshTimerRef.current = window.setTimeout(() => {
+      statsRefreshTimerRef.current = null;
+      void fetchStatsFromBackend();
+    }, 120);
+  }, [fetchStatsFromBackend]);
 
-  // 判定线两侧各自延伸出一个“近线矩形区域”（这里在 UV 空间用近线带宽近似）
-  // sd 为 signed distance，只有当点落在 |sd| <= LINE_NEAR_ZONE_W 时才认为进入了近线区域。
+  // UV near-line hysteresis band
   const LINE_NEAR_ZONE_W = 0.05;
-
-  const computeZoneSideByUv = useCallback(
-    (u: number, v: number): (-1 | 1) | null => {
-      const sd = computeSignedDistByUv(u, v);
-      if (sd == null) return null;
-      if (Math.abs(sd) > LINE_NEAR_ZONE_W) return null;
-      return sd > 0 ? 1 : -1;
-    },
-    [computeSignedDistByUv],
-  );
-
-  const commitCrossCounts = useCallback(
-    (dir: "in" | "out", evt: HeatmapPersonEvent) => {
-      const tsSec = Number.isFinite(Number(evt.ts)) ? Number(evt.ts) : Date.now() / 1000;
-      const hour = new Date(tsSec * 1000).getHours();
-      if (dir === "in") {
-        statsRef.current.inCount += 1;
-        if (hour >= 0 && hour <= 23) statsRef.current.trendIn[hour].value += 1;
-      } else {
-        statsRef.current.outCount += 1;
-        if (hour >= 0 && hour <= 23) statsRef.current.trendOut[hour].value += 1;
-      }
-
-      // 性别/年龄统计只在“进入(in)”时累计
-      if (dir === "in") {
-        const gender = evt.gender ?? null;
-        if (gender === "male") statsRef.current.genderMale += 1;
-        if (gender === "female") statsRef.current.genderFemale += 1;
-
-        const ageBucket = evt.age_bucket ?? null;
-        if (ageBucket) {
-          const idx = statsRef.current.ageBuckets.findIndex((b) => b.label === ageBucket);
-          if (idx >= 0) statsRef.current.ageBuckets[idx].value += 1;
-        }
-      }
-
-      scheduleCommitStats();
-    },
-    [scheduleCommitStats],
-  );
 
   const [lineFlash, setLineFlash] = useState<null | { kind: "in" | "out"; untilMs: number }>(null);
 
@@ -497,15 +435,23 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       const dirRaw = evt.direction;
       if (dirRaw !== "in" && dirRaw !== "out") return;
 
-      // 后端已经判定方向和去抖/计数逻辑；前端只负责更新统计和闪烁
-      commitCrossCounts(dirRaw, {
-        ts: evt.ts,
-        gender: evt.gender ?? null,
-        age_bucket: evt.age_bucket ?? null,
-      } as HeatmapPersonEvent);
+      const sid = evt.stable_id != null ? String(evt.stable_id) : "";
+      const tid = evt.track_id != null ? String(evt.track_id) : "";
+      const ts = Number.isFinite(Number(evt.ts)) ? Number(evt.ts).toFixed(3) : "";
+      const dedupKey = `${evt.line_config_id ?? "na"}|${dirRaw}|${sid || tid || "na"}|${ts}`;
+      const seenMap = seenEventKeysRef.current;
+      const nowMs = Date.now();
+      for (const [k, t] of Array.from(seenMap.entries())) {
+        if (nowMs - t > 4000) seenMap.delete(k);
+      }
+      if (seenMap.has(dedupKey)) return;
+      seenMap.set(dedupKey, nowMs);
+
+      // 后端是统计权威源：前端仅触发刷新并做视觉闪烁
+      scheduleRefreshStats();
       flashLine(dirRaw);
     },
-    [commitCrossCounts, flashLine, selectedFloorPlanId],
+    [flashLine, scheduleRefreshStats, selectedFloorPlanId],
   );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
@@ -663,13 +609,24 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     lineEnabled;
 
   const connectFootfallWs = useCallback(() => {
-    // 清理旧连接
+    if (footfallReconnectTimerRef.current != null) {
+      window.clearTimeout(footfallReconnectTimerRef.current);
+      footfallReconnectTimerRef.current = null;
+    }
+    if (wsRef.current) {
+      footfallWsIntentionalCloseRef.current = true;
+    }
     try {
       wsRef.current?.close();
     } catch {}
     wsRef.current = null;
+    wsConnectSeqRef.current += 1;
 
     if (requiredVirtualViewId == null || selectedFloorPlanId == null) return;
+
+    const fpId = selectedFloorPlanId;
+    const vvId = requiredVirtualViewId;
+    const thisSeq = ++wsConnectSeqRef.current;
 
     const ws = new WebSocket(
       `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
@@ -678,6 +635,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       )}/ws/footfall-events`,
     );
     ws.onmessage = (ev) => {
+      if (thisSeq !== wsConnectSeqRef.current || wsRef.current !== ws) return;
       try {
         const data = JSON.parse(ev.data);
         handleHeatmapWsEvent(data);
@@ -686,11 +644,37 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
     };
     ws.onclose = () => {
+      if (thisSeq !== wsConnectSeqRef.current) return;
+      if (wsRef.current === ws) wsRef.current = null;
       wsRef.current = null;
-      setAnalyzing(false);
-      analysisLineRef.current = null;
+      if (footfallWsIntentionalCloseRef.current) {
+        footfallWsIntentionalCloseRef.current = false;
+        return;
+      }
+      footfallReconnectTimerRef.current = window.setTimeout(() => {
+        footfallReconnectTimerRef.current = null;
+        void (async () => {
+          try {
+            const r = await fetch(
+              `${API_BASE}/api/footfall/status?floor_plan_id=${fpId}&virtual_view_id=${vvId}`,
+            );
+            const data = r.ok ? await r.json() : null;
+            if (data?.running) {
+              setAnalyzing(true);
+              connectFootfallWsLiveRef.current();
+            } else {
+              setAnalyzing(false);
+              analysisLineRef.current = null;
+            }
+          } catch {
+            setAnalyzing(false);
+            analysisLineRef.current = null;
+          }
+        })();
+      }, 450);
     };
     ws.onerror = () => {
+      if (thisSeq !== wsConnectSeqRef.current) return;
       try {
         ws.close();
       } catch {}
@@ -698,31 +682,19 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     wsRef.current = ws;
   }, [handleHeatmapWsEvent, requiredVirtualViewId, selectedFloorPlanId]);
 
+  useEffect(() => {
+    connectFootfallWsLiveRef.current = connectFootfallWs;
+  }, [connectFootfallWs]);
+
   // 非分析状态下：从后端加载持久化统计（跨电脑共享）
   useEffect(() => {
     if (analyzing) return;
     if (selectedFloorPlanId == null || requiredVirtualViewId == null) {
-      const empty = buildEmptyStats();
-      statsRef.current = empty;
-      setStatsData(empty);
+      setStatsData(buildEmptyStats());
       return;
     }
-    const mode = statsMode === "realtime" ? "realtime" : "date";
-    const url =
-      `${API_BASE}/api/footfall/stats?floor_plan_id=${selectedFloorPlanId}` +
-      `&virtual_view_id=${requiredVirtualViewId}` +
-      `&mode=${mode}` +
-      (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "");
-
-    fetch(url)
-      .then((r) => (r.ok ? r.json() : Promise.resolve(null)))
-      .then((data) => {
-        if (!data) return;
-        statsRef.current = data as FootfallStats;
-        setStatsData(data as FootfallStats);
-      })
-      .catch((e) => console.error(e));
-  }, [analyzing, selectedFloorPlanId, requiredVirtualViewId, statsMode, statsDate]);
+    void fetchStatsFromBackend();
+  }, [analyzing, fetchStatsFromBackend, requiredVirtualViewId, selectedFloorPlanId]);
 
   // 分析状态同步：若后端已在运行，则本页进入 analyzing，禁止重复 start
   useEffect(() => {
@@ -769,17 +741,6 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const startFootfallAnalysis = useCallback(async () => {
     if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId || !floorLineP1 || !floorLineP2) return;
 
-    // 如果后端已在运行，则避免重复触发“开始”
-    try {
-      const st = await fetch(
-        `${API_BASE}/api/footfall/status?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
-      );
-      if (st.ok) {
-        const data = await st.json();
-        if (data?.running) return;
-      }
-    } catch {}
-
     // 统计使用的判定线固定在启动瞬间，避免用户在分析过程中移动点导致口径变化
     const vvP1 = savedLineP1 ?? lineP1;
     const vvP2 = savedLineP2 ?? lineP2;
@@ -791,15 +752,11 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       filterMode: statsMode,
       filterDateKey: statsMode === "date" ? statsDate : undefined,
     };
-    // 保留后端持久化统计作为初始值；分析期间只增量累加新事件
-    statsRef.current = JSON.parse(JSON.stringify(statsData)) as FootfallStats;
-    setStatsData(JSON.parse(JSON.stringify(statsData)) as FootfallStats);
     trackZoneByIdRef.current = new Map();
     setMjpegStreamEpoch((n) => n + 1);
 
     try {
-      // 先启动后端实时过线统计，再建立 WS，避免丢帧
-      await fetch(`${API_BASE}/api/footfall/start`, {
+      const res = await fetch(`${API_BASE}/api/footfall/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -812,11 +769,11 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           in_label: inLabel,
           out_label: outLabel,
           enabled: lineEnabled,
-          // UV near-line hysteresis band
           zone_w: LINE_NEAR_ZONE_W,
           emit_interval_sec: 0.03,
         }),
       });
+      if (!res.ok) throw new Error("footfall start failed");
     } catch (e) {
       console.error(e);
       alert("开始检测分析失败");
@@ -824,38 +781,8 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       return;
     }
 
-    // 清理旧连接
-    try {
-      wsRef.current?.close();
-    } catch {}
-    wsRef.current = null;
-
-    const ws = new WebSocket(
-      `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host.replace(
-        /:\d+$/,
-        ":18080",
-      )}/ws/footfall-events`,
-    );
-    ws.onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data);
-        handleHeatmapWsEvent(data);
-      } catch (e) {
-        console.error(e);
-      }
-    };
-    ws.onclose = () => {
-      wsRef.current = null;
-      setAnalyzing(false);
-    };
-    ws.onerror = () => {
-      // 出错通常会触发 close，这里兜底把状态清掉
-      try {
-        ws.close();
-      } catch {}
-    };
-
-    wsRef.current = ws;
+    footfallWsIntentionalCloseRef.current = false;
+    connectFootfallWs();
     setAnalyzing(true);
   }, [
     canStartFootfall,
@@ -867,16 +794,19 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     selectedFloorPlan,
     inLabel,
     outLabel,
-    statsData,
     statsMode,
     statsDate,
-    handleHeatmapWsEvent,
+    connectFootfallWs,
   ]);
 
   const stopFootfallAnalysis = useCallback(async () => {
-    if (!selectedFloorPlanId) return;
+    if (!selectedFloorPlanId || !requiredVirtualViewId) return;
+    footfallWsIntentionalCloseRef.current = true;
+    if (footfallReconnectTimerRef.current != null) {
+      window.clearTimeout(footfallReconnectTimerRef.current);
+      footfallReconnectTimerRef.current = null;
+    }
     try {
-      if (!requiredVirtualViewId) return;
       await fetch(
         `${API_BASE}/api/footfall/stop?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
         { method: "POST" },
@@ -888,9 +818,13 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       wsRef.current?.close();
     } catch {}
     wsRef.current = null;
-    if (pendingCommitTimerRef.current != null) {
-      window.clearTimeout(pendingCommitTimerRef.current);
-      pendingCommitTimerRef.current = null;
+    if (statsRefreshTimerRef.current != null) {
+      window.clearTimeout(statsRefreshTimerRef.current);
+      statsRefreshTimerRef.current = null;
+    }
+    if (statsPollTimerRef.current != null) {
+      window.clearInterval(statsPollTimerRef.current);
+      statsPollTimerRef.current = null;
     }
     setMjpegStreamEpoch((n) => n + 1);
     setAnalyzing(false);
@@ -900,21 +834,76 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   useEffect(() => {
     return () => {
+      footfallWsIntentionalCloseRef.current = true;
+      if (footfallReconnectTimerRef.current != null) {
+        window.clearTimeout(footfallReconnectTimerRef.current);
+        footfallReconnectTimerRef.current = null;
+      }
+      if (statsRefreshTimerRef.current != null) {
+        window.clearTimeout(statsRefreshTimerRef.current);
+        statsRefreshTimerRef.current = null;
+      }
+      if (statsPollTimerRef.current != null) {
+        window.clearInterval(statsPollTimerRef.current);
+        statsPollTimerRef.current = null;
+      }
       try {
         wsRef.current?.close();
       } catch {}
       wsRef.current = null;
+      wsConnectSeqRef.current += 1;
     };
   }, []);
 
   useEffect(() => {
+    return () => {
+      if (footfallReconnectTimerRef.current != null) {
+        window.clearTimeout(footfallReconnectTimerRef.current);
+        footfallReconnectTimerRef.current = null;
+      }
+      if (statsRefreshTimerRef.current != null) {
+        window.clearTimeout(statsRefreshTimerRef.current);
+        statsRefreshTimerRef.current = null;
+      }
+      if (statsPollTimerRef.current != null) {
+        window.clearInterval(statsPollTimerRef.current);
+        statsPollTimerRef.current = null;
+      }
+    };
+  }, [selectedFloorPlanId, requiredVirtualViewId]);
+
+  useEffect(() => {
+    if (!analyzing) {
+      if (statsPollTimerRef.current != null) {
+        window.clearInterval(statsPollTimerRef.current);
+        statsPollTimerRef.current = null;
+      }
+      return;
+    }
+    void fetchStatsFromBackend();
+    if (statsPollTimerRef.current != null) {
+      window.clearInterval(statsPollTimerRef.current);
+      statsPollTimerRef.current = null;
+    }
+    statsPollTimerRef.current = window.setInterval(() => {
+      void fetchStatsFromBackend();
+    }, 1200);
+    return () => {
+      if (statsPollTimerRef.current != null) {
+        window.clearInterval(statsPollTimerRef.current);
+        statsPollTimerRef.current = null;
+      }
+    };
+  }, [analyzing, fetchStatsFromBackend]);
+
+  useEffect(() => {
     if (!analyzing) return;
     if (!analysisLineRef.current) return;
-    // 仅更新过滤口径并清空统计，后台任务不必重启
+    // 仅更新过滤口径，统计直接读取后端权威结果
     analysisLineRef.current.filterMode = statsMode;
     analysisLineRef.current.filterDateKey = statsMode === "date" ? statsDate : undefined;
-    resetStats();
-  }, [statsMode, statsDate, analyzing, resetStats]);
+    void fetchStatsFromBackend();
+  }, [statsMode, statsDate, analyzing, fetchStatsFromBackend]);
 
   const displayP1 = savedLineP1 ?? lineP1;
   const displayP2 = savedLineP2 ?? lineP2;
