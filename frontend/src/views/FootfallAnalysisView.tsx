@@ -635,15 +635,39 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
 
   const requiredVirtualViewId = selectedCameraOpt?.kind === "virtual" ? selectedCameraOpt.view.id : null;
+  const activeVirtualLines = useMemo(() => {
+    return Object.entries(allLineCfg)
+      .map(([key, cfg]) => {
+        const m = key.match(/^vv:(\d+)$/);
+        if (!m || !cfg?.p1 || !cfg?.p2) return null;
+        return {
+          key,
+          virtual_view_id: Number(m[1]),
+          p1: cfg.p1,
+          p2: cfg.p2,
+          floor_p1: cfg.floor_p1 ?? cfg.p1,
+          floor_p2: cfg.floor_p2 ?? cfg.p2,
+          in_label: cfg.inLabel || "进入",
+          out_label: cfg.outLabel || "离开",
+          enabled: cfg.enabled !== false,
+        };
+      })
+      .filter((x) => !!x) as Array<{
+      key: string;
+      virtual_view_id: number;
+      p1: Vec2;
+      p2: Vec2;
+      floor_p1: Vec2;
+      floor_p2: Vec2;
+      in_label: string;
+      out_label: string;
+      enabled: boolean;
+    }>;
+  }, [allLineCfg]);
   const canStartFootfall =
     selectedFloorPlanId != null &&
     selectedFloorPlan != null &&
-    requiredVirtualViewId != null &&
-    !!(savedLineP1 ?? lineP1) &&
-    !!(savedLineP2 ?? lineP2) &&
-    !!floorLineP1 &&
-    !!floorLineP2 &&
-    lineEnabled;
+    activeVirtualLines.length > 0;
 
   const connectFootfallWs = useCallback(() => {
     if (footfallReconnectTimerRef.current != null) {
@@ -776,7 +800,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   ]);
 
   const startFootfallAnalysis = useCallback(async () => {
-    if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId || !floorLineP1 || !floorLineP2) return;
+    if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId || activeVirtualLines.length === 0) return;
 
     // 统计使用的判定线固定在启动瞬间，避免用户在分析过程中移动点导致口径变化
     const vvP1 = savedLineP1 ?? lineP1;
@@ -793,24 +817,31 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setMjpegStreamEpoch((n) => n + 1);
 
     try {
-      const res = await fetch(`${API_BASE}/api/footfall/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          floor_plan_id: selectedFloorPlanId,
-          virtual_view_id: requiredVirtualViewId,
-          p1: vvP1,
-          p2: vvP2,
-          floor_p1: floorLineP1,
-          floor_p2: floorLineP2,
-          in_label: inLabel,
-          out_label: outLabel,
-          enabled: lineEnabled,
-          zone_w: LINE_NEAR_ZONE_W,
-          emit_interval_sec: 0.03,
-        }),
-      });
-      if (!res.ok) throw new Error("footfall start failed");
+      const settled = await Promise.allSettled(
+        activeVirtualLines.map((ln) =>
+          fetch(`${API_BASE}/api/footfall/start`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              floor_plan_id: selectedFloorPlanId,
+              virtual_view_id: ln.virtual_view_id,
+              p1: ln.p1,
+              p2: ln.p2,
+              floor_p1: ln.floor_p1,
+              floor_p2: ln.floor_p2,
+              in_label: ln.in_label,
+              out_label: ln.out_label,
+              enabled: ln.enabled,
+              zone_w: LINE_NEAR_ZONE_W,
+              emit_interval_sec: 0.03,
+            }),
+          }),
+        ),
+      );
+      const okCount = settled.filter(
+        (x) => x.status === "fulfilled" && x.value && (x.value as Response).ok,
+      ).length;
+      if (okCount <= 0) throw new Error("footfall start failed");
     } catch (e) {
       console.error(e);
       alert("开始检测分析失败");
@@ -825,28 +856,27 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     canStartFootfall,
     requiredVirtualViewId,
     selectedFloorPlanId,
-    floorLineP1,
-    floorLineP2,
-    lineEnabled,
-    selectedFloorPlan,
-    inLabel,
-    outLabel,
     statsMode,
     statsDate,
     connectFootfallWs,
+    activeVirtualLines,
   ]);
 
   const stopFootfallAnalysis = useCallback(async () => {
-    if (!selectedFloorPlanId || !requiredVirtualViewId) return;
+    if (!selectedFloorPlanId) return;
     footfallWsIntentionalCloseRef.current = true;
     if (footfallReconnectTimerRef.current != null) {
       window.clearTimeout(footfallReconnectTimerRef.current);
       footfallReconnectTimerRef.current = null;
     }
     try {
-      await fetch(
-        `${API_BASE}/api/footfall/stop?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${requiredVirtualViewId}`,
-        { method: "POST" },
+      await Promise.allSettled(
+        activeVirtualLines.map((ln) =>
+          fetch(
+            `${API_BASE}/api/footfall/stop?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${ln.virtual_view_id}`,
+            { method: "POST" },
+          ),
+        ),
       );
     } catch (e) {
       console.error(e);
@@ -871,7 +901,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setAnalyzing(false);
     analysisLineRef.current = null;
     trackZoneByIdRef.current = new Map();
-  }, [requiredVirtualViewId, selectedFloorPlanId]);
+  }, [activeVirtualLines, selectedFloorPlanId]);
 
   useEffect(() => {
     return () => {
