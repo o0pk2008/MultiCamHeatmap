@@ -1563,16 +1563,18 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               <ReactECharts option={genderOption} style={{ height: 190, width: "100%" }} notMerge />
               {analyzing && statsData.genderMale + statsData.genderFemale === 0 ? (
                 <div className="mt-2 text-[11px] text-amber-600">
-                  当前检测不到男/女：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `best_Gender_classification.pt`），并能正确输出 gender（male/female）。
+                  当前检测不到男/女：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），并能正确输出 gender（male/female）。
                 </div>
               ) : null}
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2 lg:col-span-2">
               <div className="mb-2 text-xs font-semibold text-slate-700">年龄分层</div>
               <ReactECharts option={ageOption} style={{ height: 190, width: "100%" }} notMerge />
-              {analyzing && statsData.ageBuckets.reduce((a, b) => a + b.value, 0) === 0 ? (
+              {analyzing &&
+              statsData.inCount + statsData.outCount > 0 &&
+              statsData.ageBuckets.reduce((a, b) => a + b.value, 0) === 0 ? (
                 <div className="mt-2 text-[11px] text-amber-600">
-                  当前检测不到年龄分桶：请确认后端已配置两个二阶段模型：性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `best_Gender_classification.pt`），年龄模型 `YOLO_FACE_AGE_MODEL_PATH`（默认 `yolo11n-face-age.pt`），并能正确输出年龄（会被映射到 `18-25/55+` 等分桶）。
+                  当前检测不到年龄分桶：请确认后端已配置两个二阶段模型：性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），年龄模型 `YOLO_FACE_AGE_MODEL_PATH`（默认 `yolo11n-face-age.pt`），并能正确输出年龄（会被映射到 `18-25/55+` 等分桶）。
                 </div>
               ) : null}
             </div>

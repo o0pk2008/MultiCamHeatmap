@@ -14,6 +14,9 @@ services:
       - TZ=Asia/Shanghai
       - BACKEND_ENV=dev
       - DB_URL=sqlite:////data/app.db
+      - YOLO_GENDER_MODEL_PATH=yolov8n-gender-classification.pt
+      - YOLO_FACE_AGE_MODEL_PATH=yolo11n-face-age.pt
+      - YOLO_FACE_AGE_DEBUG=1
       # NVIDIA GPU (需要宿主机与 Docker 支持 NVIDIA Container Toolkit)
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video

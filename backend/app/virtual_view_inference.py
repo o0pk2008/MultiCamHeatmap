@@ -1,6 +1,7 @@
 import os
 import time
 import threading
+import re
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
@@ -72,13 +73,14 @@ class VirtualViewInferenceManager:
         self._cls_names: Dict[int, str] = {}
         # 前端目前使用的年龄分桶标签（用于匹配模型类别名）
         self._age_bucket_labels: Tuple[str, ...] = ("0-12", "18-25", "26-35", "36-45", "46-55", "55+")
-        # 二阶段模型：基于每个 person 框的裁剪做性别/年龄识别
-        # - 性别模型：best_Gender_classification.pt
+        # 二阶段模型：基于每个 person 框做人脸->年龄/性别识别
+        # - 性别模型：yolov8n-gender-classification.pt（可由 YOLO_GENDER_MODEL_PATH 覆盖）
         # - 年龄模型：yolo11n-face-age.pt（通常基于 face 进行年龄估计；这里直接对 person crop 推理，期望模型内部完成 face 提取/回归）
         self._gender_model = None
         self._age_parse_debug_once = False
+        self._age_model_status_debug_once = False
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        default_gender_model_path = os.path.join(base_dir, "best_Gender_classification.pt")
+        default_gender_model_path = os.path.join(base_dir, "yolov8n-gender-classification.pt")
         gender_model_path = os.environ.get("YOLO_GENDER_MODEL_PATH") or default_gender_model_path
         if not os.path.isabs(gender_model_path) and not os.path.exists(gender_model_path):
             gender_model_path = os.path.join(base_dir, gender_model_path)
@@ -159,6 +161,26 @@ class VirtualViewInferenceManager:
         except Exception:
             self._face_model = None
 
+        if os.environ.get("YOLO_FACE_AGE_DEBUG", "0") == "1" and not self._age_model_status_debug_once:
+            self._age_model_status_debug_once = True
+            try:
+                print(
+                    "[YOLO_FACE_AGE_DEBUG][model_status]",
+                    {
+                        "gender_model_path": self._gender_model_path,
+                        "gender_model_exists": bool(self._gender_model_path and os.path.exists(self._gender_model_path)),
+                        "gender_model_loaded": self._gender_model is not None,
+                        "face_age_model_path": self._face_age_model_path,
+                        "face_age_model_exists": bool(self._face_age_model_path and os.path.exists(self._face_age_model_path)),
+                        "face_age_model_loaded": self._face_age_model is not None,
+                        "face_model_path": self._face_model_path,
+                        "face_model_exists": bool(self._face_model_path and os.path.exists(self._face_model_path)),
+                        "face_model_loaded": self._face_model is not None,
+                    },
+                )
+            except Exception:
+                pass
+
     def _age_to_bucket(self, age: float) -> Optional[str]:
         try:
             a = float(age)
@@ -228,6 +250,29 @@ class VirtualViewInferenceManager:
                 continue
         return None
 
+    def _label_by_index(self, names_attr: Any, idx: Any) -> Optional[str]:
+        """从 names(dict/list) 里按 index 取类别名。"""
+        if names_attr is None or idx is None:
+            return None
+        try:
+            i = int(idx)
+        except Exception:
+            return None
+        try:
+            if isinstance(names_attr, dict):
+                if i in names_attr:
+                    return str(names_attr[i])
+                # 某些导出权重 keys 可能是 str
+                si = str(i)
+                if si in names_attr:
+                    return str(names_attr[si])
+            elif isinstance(names_attr, (list, tuple)):
+                if 0 <= i < len(names_attr):
+                    return str(names_attr[i])
+        except Exception:
+            return None
+        return None
+
     def _normalize_gender(self, gender_str: Optional[str]) -> Optional[str]:
         if not gender_str:
             return None
@@ -245,7 +290,7 @@ class VirtualViewInferenceManager:
     def _infer_gender_age_from_crop(self, crop, now: float) -> Tuple[Optional[str], Optional[str]]:
         """
         运行二阶段性别/年龄模型（如果已配置），并返回 (gender, age_bucket)。
-        - gender 来自 `best_Gender_classification.pt`
+        - gender 来自 `yolov8n-gender-classification.pt`
         - age 来自 `yolo11n-face-age.pt`
         """
         if self._gender_model is None and self._face_age_model is None:
@@ -253,43 +298,14 @@ class VirtualViewInferenceManager:
 
         gender: Optional[str] = None
         age_bucket: Optional[str] = None
+        gender_input = crop
 
         try:
-            # 1) gender
-            if self._gender_model is not None:
-                try:
-                    g_results = self._gender_model(crop, verbose=False)
-                    if g_results:
-                        r0 = g_results[0]
-                        gender_str: Optional[str] = None
-                        names_attr = getattr(r0, "names", None)
-                        probs_attr = getattr(r0, "probs", None)
-                        top1 = getattr(probs_attr, "top1", None) if probs_attr is not None else None
-                        if top1 is not None and names_attr is not None:
-                            try:
-                                top1_i = int(top1)
-                                if isinstance(names_attr, dict):
-                                    if top1_i in names_attr:
-                                        gender_str = str(names_attr[top1_i])
-                                elif isinstance(names_attr, (list, tuple)):
-                                    if 0 <= top1_i < len(names_attr):
-                                        gender_str = str(names_attr[top1_i])
-                            except Exception:
-                                pass
-                        if gender_str is None:
-                            try:
-                                gender_str = str(next(iter(names_attr.values()))) if isinstance(names_attr, dict) else None
-                            except Exception:
-                                gender_str = None
-                        gender = self._normalize_gender(gender_str)
-                except Exception:
-                    gender = None
-
-            # 2) age
+            # 1) age + 人脸框（优先）
             if self._face_age_model is not None:
                 try:
-                    # 先从 person crop 中裁剪 face，再做年龄推理（更符合 yolo11n-face-age 的输入习惯）
                     age_input = crop
+                    # face detector 作为兜底：当 age 模型不出 boxes/ages 时，仍可先裁脸
                     if self._face_model is not None:
                         try:
                             f_results = self._face_model(crop, verbose=False)
@@ -308,23 +324,11 @@ class VirtualViewInferenceManager:
                                             conf_np = conf.cpu().numpy().reshape(-1) if conf is not None else None
                                         except Exception:
                                             conf_np = None
-
                                         n_face = len(xyxy_np) if hasattr(xyxy_np, "__len__") else 0
                                         if n_face > 0:
-                                            # 选择置信度最高；否则选择面积最大
                                             best_i = 0
                                             if conf_np is not None and len(conf_np) == n_face:
                                                 best_i = int(max(range(n_face), key=lambda i: float(conf_np[i])))
-                                            else:
-                                                areas = []
-                                                for i in range(n_face):
-                                                    try:
-                                                        x1, y1, x2, y2 = [float(v) for v in xyxy_np[i]]
-                                                        areas.append(max(0.0, (x2 - x1) * (y2 - y1)))
-                                                    except Exception:
-                                                        areas.append(0.0)
-                                                best_i = int(max(range(n_face), key=lambda i: float(areas[i])))
-
                                             try:
                                                 x1, y1, x2, y2 = [float(v) for v in xyxy_np[best_i]]
                                                 ih, iw = crop.shape[:2]
@@ -335,9 +339,9 @@ class VirtualViewInferenceManager:
                                                 if xi2 > xi1 and yi2 > yi1:
                                                     age_input = crop[yi1:yi2, xi1:xi2]
                                             except Exception:
-                                                age_input = crop
+                                                pass
                         except Exception:
-                            age_input = crop
+                            pass
 
                     a_results = self._face_age_model(age_input, verbose=False)
                     if a_results:
@@ -345,60 +349,55 @@ class VirtualViewInferenceManager:
                         age_val: Optional[float] = self._extract_age_value(r0)
                         if age_val is not None:
                             age_bucket = self._age_to_bucket(age_val)
-                        else:
+
+                        # 尝试用 age 模型输出的人脸框作为 gender 输入
+                        try:
+                            boxes = getattr(r0, "boxes", None)
+                            if boxes is not None:
+                                xyxy = getattr(boxes, "xyxy", None)
+                                conf = getattr(boxes, "conf", None)
+                                if xyxy is not None:
+                                    try:
+                                        xyxy_np = xyxy.cpu().numpy()
+                                    except Exception:
+                                        xyxy_np = xyxy
+                                    try:
+                                        conf_np = conf.cpu().numpy().reshape(-1) if conf is not None else None
+                                    except Exception:
+                                        conf_np = None
+                                    n_face = len(xyxy_np) if hasattr(xyxy_np, "__len__") else 0
+                                    if n_face > 0:
+                                        best_i = 0
+                                        if conf_np is not None and len(conf_np) == n_face:
+                                            best_i = int(max(range(n_face), key=lambda i: float(conf_np[i])))
+                                        x1, y1, x2, y2 = [float(v) for v in xyxy_np[best_i]]
+                                        ih, iw = age_input.shape[:2]
+                                        xi1 = int(max(0, min(iw - 1, x1)))
+                                        yi1 = int(max(0, min(ih - 1, y1)))
+                                        xi2 = int(max(0, min(iw, x2)))
+                                        yi2 = int(max(0, min(ih, y2)))
+                                        if xi2 > xi1 and yi2 > yi1:
+                                            gender_input = age_input[yi1:yi2, xi1:xi2]
+                        except Exception:
+                            pass
+
+                        if age_bucket is None:
                             # 如果模型输出的是 age 类别（例如 18-25），尝试用 class name 解析
                             label: Optional[str] = None
                             names_attr = getattr(r0, "names", None)
                             probs_attr = getattr(r0, "probs", None)
                             top1 = getattr(probs_attr, "top1", None) if probs_attr is not None else None
                             if top1 is not None and names_attr is not None:
+                                label = self._label_by_index(names_attr, top1)
+                            # yolo11n-face-age 常见输出路径：boxes.cls + names
+                            if label is None:
                                 try:
-                                    top1_i = int(top1)
-                                    if isinstance(names_attr, dict):
-                                        if top1_i in names_attr:
-                                            label = str(names_attr[top1_i])
-                                    elif isinstance(names_attr, (list, tuple)):
-                                        if 0 <= top1_i < len(names_attr):
-                                            label = str(names_attr[top1_i])
+                                    boxes = getattr(r0, "boxes", None)
+                                    cls_attr = getattr(boxes, "cls", None) if boxes is not None else None
+                                    cls_i = self._extract_first_float(cls_attr)
+                                    label = self._label_by_index(names_attr, cls_i)
                                 except Exception:
                                     label = None
-
-                            # detector/classifier 兜底：尝试从 r0.boxes 里取最高置信度类别名
-                            if label is None:
-                                boxes = getattr(r0, "boxes", None)
-                                if boxes is not None:
-                                    try:
-                                        cls_t = getattr(boxes, "cls", None)
-                                        conf_t = getattr(boxes, "conf", None)
-                                        cids = None
-                                        confs = None
-                                        if cls_t is not None:
-                                            try:
-                                                cids = cls_t.cpu().numpy().reshape(-1).tolist()
-                                            except Exception:
-                                                cids = cls_t
-                                        if conf_t is not None:
-                                            try:
-                                                confs = conf_t.cpu().numpy().reshape(-1).tolist()
-                                            except Exception:
-                                                confs = conf_t
-                                        if cids and len(cids) > 0:
-                                            best_i = 0
-                                            if confs is not None and hasattr(confs, "__len__") and len(confs) == len(cids):
-                                                best_i = int(max(range(len(cids)), key=lambda i: float(confs[i])))
-                                            cid = cids[best_i]
-                                            if cid is not None and names_attr is not None:
-                                                try:
-                                                    cid_i = int(cid)
-                                                    if isinstance(names_attr, dict) and cid_i in names_attr:
-                                                        label = str(names_attr[cid_i])
-                                                    elif isinstance(names_attr, (list, tuple)) and 0 <= cid_i < len(names_attr):
-                                                        label = str(names_attr[cid_i])
-                                                except Exception:
-                                                    label = None
-                                    except Exception:
-                                        pass
-
                             if label is not None:
                                 _g, ab, _person_like = self._infer_gender_age_from_class_name(label)
                                 age_bucket = ab
@@ -418,12 +417,49 @@ class VirtualViewInferenceManager:
                                     "has_boxes": hasattr(r0, "boxes"),
                                     "has_pred": hasattr(r0, "pred"),
                                     "names_type": type(getattr(r0, "names", None)).__name__,
+                                    "names": getattr(r0, "names", None),
+                                    "top1": getattr(getattr(r0, "probs", None), "top1", None),
                                 }
+                                try:
+                                    boxes = getattr(r0, "boxes", None)
+                                    cls_attr = getattr(boxes, "cls", None) if boxes is not None else None
+                                    attrs["first_box_cls"] = self._extract_first_float(cls_attr)
+                                except Exception:
+                                    attrs["first_box_cls"] = None
                                 print("[YOLO_FACE_AGE_DEBUG]", attrs)
                             except Exception:
                                 pass
                 except Exception:
                     age_bucket = None
+
+            # 2) gender（优先使用 face crop）
+            if self._gender_model is not None:
+                try:
+                    g_results = self._gender_model(gender_input, verbose=False)
+                    if g_results:
+                        r0 = g_results[0]
+                        gender_str: Optional[str] = None
+                        names_attr = getattr(r0, "names", None)
+                        probs_attr = getattr(r0, "probs", None)
+                        top1 = getattr(probs_attr, "top1", None) if probs_attr is not None else None
+                        if top1 is not None and names_attr is not None:
+                            gender_str = self._label_by_index(names_attr, top1)
+                        if gender_str is None:
+                            try:
+                                boxes = getattr(r0, "boxes", None)
+                                cls_attr = getattr(boxes, "cls", None) if boxes is not None else None
+                                cls_i = self._extract_first_float(cls_attr)
+                                gender_str = self._label_by_index(names_attr, cls_i)
+                            except Exception:
+                                gender_str = None
+                        if gender_str is None and isinstance(names_attr, dict):
+                            try:
+                                gender_str = str(next(iter(names_attr.values())))
+                            except Exception:
+                                gender_str = None
+                        gender = self._normalize_gender(gender_str)
+                except Exception:
+                    gender = None
 
             return gender, age_bucket
         except Exception:
@@ -494,26 +530,47 @@ class VirtualViewInferenceManager:
             gender = "female" if gender is None else gender
 
         age_bucket: Optional[str] = None
+        # 1) 先尝试命中项目原生分桶标签
         for label in self._age_bucket_labels:
             if label.endswith("+"):
                 base = label[:-1]  # e.g. "55"
                 if f"{base}+" in norm or f"{base}plus" in norm:
                     age_bucket = label
                     break
-            else:
-                if label in norm:
-                    age_bucket = label
-                    break
+            elif label in norm:
+                age_bucket = label
+                break
 
-        # 兜底：从字符串中提取明确范围（比较保守）
+        # 2) 通用年龄区间标签，如 20-29 / 20~29 / 20_29
         if age_bucket is None:
-            for label in self._age_bucket_labels:
-                if "-" not in label:
-                    continue
-                a, b = label.split("-", 1)
-                if a and b and a in norm and b in norm:
-                    age_bucket = label
-                    break
+            try:
+                m = re.search(r"(\d{1,3})\s*[-~_]\s*(\d{1,3})", norm)
+                if m:
+                    a = float(m.group(1))
+                    b = float(m.group(2))
+                    if b < a:
+                        a, b = b, a
+                    age_bucket = self._age_to_bucket((a + b) * 0.5)
+            except Exception:
+                pass
+
+        # 3) 处理 60+ 这类标签
+        if age_bucket is None:
+            try:
+                m = re.search(r"(\d{1,3})\s*\+", norm)
+                if m:
+                    age_bucket = self._age_to_bucket(float(m.group(1)) + 1.0)
+            except Exception:
+                pass
+
+        # 4) 处理单值年龄，如 age25 / 25y
+        if age_bucket is None:
+            try:
+                m = re.search(r"(\d{1,3})", norm)
+                if m:
+                    age_bucket = self._age_to_bucket(float(m.group(1)))
+            except Exception:
+                pass
 
         # 是否像人：命中 gender/age，或明确包含 person 关键词
         person_like = "person" in norm or gender is not None or age_bucket is not None or "people" in norm
