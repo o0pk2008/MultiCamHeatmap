@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import re
+import base64
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
@@ -104,6 +105,16 @@ class VirtualViewInferenceManager:
         # track_id -> (gender, age_bucket, ts)
         self._ag_cache: Dict[int, Tuple[Optional[str], Optional[str], float]] = {}
         self._ag_cache_ttl_sec: float = float(os.environ.get("YOLO_AGE_GENDER_CACHE_TTL_SEC", "3.0"))
+        # 最近人脸抓拍（供前端可视化）
+        self._face_captures_by_vv: Dict[int, list[Dict[str, Any]]] = {}
+        self._face_capture_seq: int = 0
+        self._face_capture_max: int = int(os.environ.get("YOLO_FACE_CAPTURE_MAX", "18"))
+        self._face_capture_min_interval_sec: float = float(os.environ.get("YOLO_FACE_CAPTURE_MIN_INTERVAL_SEC", "1.2"))
+        self._face_capture_last_ts: Dict[Tuple[int, int], float] = {}
+        # (virtual_view_id, track_id) -> latest person crop + attrs
+        self._track_attr_latest: Dict[Tuple[int, int], Dict[str, Any]] = {}
+        # 去重：每次进入只抓拍一次（按稳定ID）
+        self._enter_capture_seen: Dict[Tuple[int, int], float] = {}
 
         # 当前在后端用于 footfall 判定的直线（用于在 YOLO 画面里可视化对齐）
         # vv_id -> ((p1_u,p1_v),(p2_u,p2_v))
@@ -286,6 +297,175 @@ class VirtualViewInferenceManager:
         if s in ("女",):
             return "female"
         return None
+
+    def _extract_face_crop_for_capture(self, person_crop):
+        """
+        抓拍用人脸裁剪：
+        1) 优先用 face 模型检测人脸
+        2) 无 face 模型时，用 person crop 上半区域作为兜底
+        """
+        if person_crop is None or getattr(person_crop, "size", 0) == 0:
+            return None
+        try:
+            h, w = person_crop.shape[:2]
+            if h <= 2 or w <= 2:
+                return None
+        except Exception:
+            return None
+
+        # 优先 face detector
+        if self._face_model is not None:
+            try:
+                fr = self._face_model(person_crop, verbose=False)
+                if fr:
+                    r0 = fr[0]
+                    boxes = getattr(r0, "boxes", None)
+                    if boxes is not None:
+                        xyxy = getattr(boxes, "xyxy", None)
+                        conf = getattr(boxes, "conf", None)
+                        if xyxy is not None:
+                            try:
+                                xyxy_np = xyxy.cpu().numpy()
+                            except Exception:
+                                xyxy_np = xyxy
+                            try:
+                                conf_np = conf.cpu().numpy().reshape(-1) if conf is not None else None
+                            except Exception:
+                                conf_np = None
+                            n = len(xyxy_np) if hasattr(xyxy_np, "__len__") else 0
+                            if n > 0:
+                                best_i = 0
+                                if conf_np is not None and len(conf_np) == n:
+                                    best_i = int(max(range(n), key=lambda i: float(conf_np[i])))
+                                x1, y1, x2, y2 = [float(v) for v in xyxy_np[best_i]]
+                                ih, iw = person_crop.shape[:2]
+                                xi1 = int(max(0, min(iw - 1, x1)))
+                                yi1 = int(max(0, min(ih - 1, y1)))
+                                xi2 = int(max(0, min(iw, x2)))
+                                yi2 = int(max(0, min(ih, y2)))
+                                if xi2 > xi1 and yi2 > yi1:
+                                    return person_crop[yi1:yi2, xi1:xi2]
+            except Exception:
+                pass
+
+        # 兜底：上半区域
+        try:
+            ih, iw = person_crop.shape[:2]
+            x_pad = int(0.15 * iw)
+            y2 = int(0.58 * ih)
+            xi1 = max(0, x_pad)
+            xi2 = max(xi1 + 1, iw - x_pad)
+            yi1 = 0
+            yi2 = max(yi1 + 1, min(ih, y2))
+            return person_crop[yi1:yi2, xi1:xi2]
+        except Exception:
+            return None
+
+    def _push_face_capture(
+        self,
+        virtual_view_id: int,
+        track_id: int,
+        ts: float,
+        gender: Optional[str],
+        age_bucket: Optional[str],
+        person_crop,
+    ) -> None:
+        # 没有任何属性时不抓拍，避免噪声
+        if not gender and not age_bucket:
+            return
+        key = (int(virtual_view_id), int(track_id))
+        last_ts = self._face_capture_last_ts.get(key)
+        if last_ts is not None and (float(ts) - float(last_ts)) < self._face_capture_min_interval_sec:
+            return
+        face_crop = self._extract_face_crop_for_capture(person_crop)
+        if face_crop is None or getattr(face_crop, "size", 0) == 0:
+            return
+        try:
+            ok, jpg = cv2.imencode(".jpg", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            if not ok:
+                return
+            b64 = base64.b64encode(jpg.tobytes()).decode("ascii")
+        except Exception:
+            return
+        self._face_capture_last_ts[key] = float(ts)
+        with self._lock:
+            self._face_capture_seq += 1
+            row = {
+                "id": int(self._face_capture_seq),
+                "track_id": int(track_id),
+                "ts": float(ts),
+                "gender": gender,
+                "age_bucket": age_bucket,
+                "image_base64": b64,
+            }
+            arr = self._face_captures_by_vv.setdefault(int(virtual_view_id), [])
+            arr.insert(0, row)
+            if len(arr) > self._face_capture_max:
+                del arr[self._face_capture_max :]
+
+    def get_face_captures(self, virtual_view_id: int, limit: int = 12) -> list[Dict[str, Any]]:
+        lim = max(1, min(int(limit), 36))
+        with self._lock:
+            arr = self._face_captures_by_vv.get(int(virtual_view_id), [])
+            return [dict(x) for x in arr[:lim]]
+
+    def note_track_attr(
+        self,
+        virtual_view_id: int,
+        track_id: int,
+        ts: float,
+        gender: Optional[str],
+        age_bucket: Optional[str],
+        person_crop,
+    ) -> None:
+        if track_id is None or int(track_id) < 0:
+            return
+        if person_crop is None or getattr(person_crop, "size", 0) == 0:
+            return
+        key = (int(virtual_view_id), int(track_id))
+        with self._lock:
+            self._track_attr_latest[key] = {
+                "ts": float(ts),
+                "gender": gender,
+                "age_bucket": age_bucket,
+                "crop": person_crop.copy(),
+            }
+            # 清理过旧缓存，避免长期增长
+            cutoff = float(ts) - 6.0
+            old_keys = [k for k, v in self._track_attr_latest.items() if float(v.get("ts", 0.0)) < cutoff]
+            for k in old_keys:
+                self._track_attr_latest.pop(k, None)
+
+    def capture_enter_face_once(
+        self,
+        virtual_view_id: int,
+        track_id: int,
+        stable_id: int,
+        ts: float,
+    ) -> None:
+        vv = int(virtual_view_id)
+        sid = int(stable_id)
+        tid = int(track_id)
+        if sid < 0 or tid < 0:
+            return
+        seen_key = (vv, sid)
+        with self._lock:
+            last_seen = self._enter_capture_seen.get(seen_key)
+            if last_seen is not None and (float(ts) - float(last_seen)) < 1.5:
+                return
+            sample = self._track_attr_latest.get((vv, tid))
+        if not sample:
+            return
+        self._push_face_capture(
+            virtual_view_id=vv,
+            track_id=tid,
+            ts=float(ts),
+            gender=sample.get("gender"),
+            age_bucket=sample.get("age_bucket"),
+            person_crop=sample.get("crop"),
+        )
+        with self._lock:
+            self._enter_capture_seen[seen_key] = float(ts)
 
     def _infer_gender_age_from_crop(self, crop, now: float) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -1068,6 +1248,14 @@ class VirtualViewInferenceManager:
                                                     genders[i] = gender_pred
                                                     age_buckets[i] = age_bucket_pred
                                                     self._ag_cache[tid] = (gender_pred, age_bucket_pred, now)
+                                                    self.note_track_attr(
+                                                        virtual_view_id=int(virtual_view_id),
+                                                        track_id=int(tid),
+                                                        ts=float(now),
+                                                        gender=gender_pred,
+                                                        age_bucket=age_bucket_pred,
+                                                        person_crop=crop,
+                                                    )
                                         except Exception:
                                             pass
                                         last_ids = ids

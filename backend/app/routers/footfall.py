@@ -8,6 +8,7 @@ from ..db import SessionLocal
 from .. import models
 from ..footfall_analysis import analyzer, FootfallLine
 from ..footfall_store import get_footfall_stats_sync
+from ..virtual_view_inference import manager
 
 router = APIRouter(prefix="/api/footfall", tags=["footfall"])
 
@@ -59,6 +60,15 @@ class FootfallStartRequest(BaseModel):
     enabled: Optional[bool] = True
     zone_w: float = 0.05
     emit_interval_sec: float = 0.03
+
+
+class FaceCaptureOut(BaseModel):
+    id: int
+    track_id: int
+    ts: float
+    gender: Optional[str] = None
+    age_bucket: Optional[str] = None
+    image_base64: str
 
 
 @router.post("/start")
@@ -269,6 +279,27 @@ async def footfall_status(
         "virtual_view_id": int(virtual_view_id),
         "running": analyzer.is_running(int(floor_plan_id), int(virtual_view_id)),
     }
+
+
+@router.get("/face-captures", response_model=List[FaceCaptureOut])
+async def footfall_face_captures(virtual_view_id: int, limit: int = 12):
+    rows = manager.get_face_captures(int(virtual_view_id), int(limit))
+    out: List[FaceCaptureOut] = []
+    for r in rows:
+        try:
+            out.append(
+                FaceCaptureOut(
+                    id=int(r.get("id", 0)),
+                    track_id=int(r.get("track_id", -1)),
+                    ts=float(r.get("ts", 0.0)),
+                    gender=(str(r["gender"]) if r.get("gender") is not None else None),
+                    age_bucket=(str(r["age_bucket"]) if r.get("age_bucket") is not None else None),
+                    image_base64=str(r.get("image_base64", "")),
+                )
+            )
+        except Exception:
+            continue
+    return out
 
 
 @router.post("/stop")

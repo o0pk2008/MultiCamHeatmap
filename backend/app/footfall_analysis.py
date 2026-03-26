@@ -449,6 +449,17 @@ class FootfallAnalyzer:
                             await self._broadcast(event)
                         except Exception:
                             pass
+                        # 仅对进入方向抓拍，并且每个稳定ID每次进入只抓拍一次
+                        if counted_dir == "in":
+                            try:
+                                manager.capture_enter_face_once(
+                                    virtual_view_id=int(virtual_view_id),
+                                    track_id=int(tid),
+                                    stable_id=int(sid),
+                                    ts=float(det_ts),
+                                )
+                            except Exception:
+                                pass
 
                         recent_crosses.append((float(foot_u), float(foot_v), float(det_ts), counted_dir))
 

@@ -54,6 +54,15 @@ type FootfallStats = {
   trendOut: { hour: number; value: number }[];
 };
 
+type FaceCaptureItem = {
+  id: number;
+  track_id: number;
+  ts: number;
+  gender?: string | null;
+  age_bucket?: string | null;
+  image_base64: string;
+};
+
 const storageKey = "footfall_line_configs_v1";
 
 const readAllLineCfg = (): Record<string, LineCfg> => {
@@ -337,6 +346,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [statsDate, setStatsDate] = useState<string>(() => toUTCDateInputValue(new Date()));
   const [statsData, setStatsData] = useState<FootfallStats>(() => buildEmptyStats());
   const [analyzing, setAnalyzing] = useState(false);
+  const [faceCaptures, setFaceCaptures] = useState<FaceCaptureItem[]>([]);
   const [drawHint, setDrawHint] = useState("点击画面设置第一个点");
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -348,6 +358,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const wsConnectSeqRef = useRef(0);
   const statsRefreshTimerRef = useRef<number | null>(null);
   const statsPollTimerRef = useRef<number | null>(null);
+  const faceCapturePollTimerRef = useRef<number | null>(null);
   const trackZoneByIdRef = useRef<
     Map<number, { side: -1 | 1; zoneSide: (-1 | 1) | null; lastCrossTs: number }>
   >(new Map());
@@ -397,6 +408,25 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       void fetchStatsFromBackend();
     }, 120);
   }, [fetchStatsFromBackend]);
+
+  const fetchFaceCaptures = useCallback(async () => {
+    const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+    const vvIdNow = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
+    if (vvIdNow == null) {
+      setFaceCaptures([]);
+      return;
+    }
+    try {
+      const r = await fetch(
+        `${API_BASE}/api/footfall/face-captures?virtual_view_id=${vvIdNow}&limit=12`,
+      );
+      if (!r.ok) return;
+      const data = (await r.json()) as FaceCaptureItem[];
+      setFaceCaptures(Array.isArray(data) ? data : []);
+    } catch {
+      // ignore transient network errors
+    }
+  }, [bindCameraId, bindCameraOptions]);
 
   // UV near-line hysteresis band
   const LINE_NEAR_ZONE_W = 0.05;
@@ -826,6 +856,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       window.clearInterval(statsPollTimerRef.current);
       statsPollTimerRef.current = null;
     }
+    if (faceCapturePollTimerRef.current != null) {
+      window.clearInterval(faceCapturePollTimerRef.current);
+      faceCapturePollTimerRef.current = null;
+    }
     setMjpegStreamEpoch((n) => n + 1);
     setAnalyzing(false);
     analysisLineRef.current = null;
@@ -846,6 +880,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       if (statsPollTimerRef.current != null) {
         window.clearInterval(statsPollTimerRef.current);
         statsPollTimerRef.current = null;
+      }
+      if (faceCapturePollTimerRef.current != null) {
+        window.clearInterval(faceCapturePollTimerRef.current);
+        faceCapturePollTimerRef.current = null;
       }
       try {
         wsRef.current?.close();
@@ -868,6 +906,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       if (statsPollTimerRef.current != null) {
         window.clearInterval(statsPollTimerRef.current);
         statsPollTimerRef.current = null;
+      }
+      if (faceCapturePollTimerRef.current != null) {
+        window.clearInterval(faceCapturePollTimerRef.current);
+        faceCapturePollTimerRef.current = null;
       }
     };
   }, [selectedFloorPlanId, requiredVirtualViewId]);
@@ -895,6 +937,30 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
     };
   }, [analyzing, fetchStatsFromBackend]);
+
+  useEffect(() => {
+    if (!analyzing || requiredVirtualViewId == null) {
+      if (faceCapturePollTimerRef.current != null) {
+        window.clearInterval(faceCapturePollTimerRef.current);
+        faceCapturePollTimerRef.current = null;
+      }
+      return;
+    }
+    void fetchFaceCaptures();
+    if (faceCapturePollTimerRef.current != null) {
+      window.clearInterval(faceCapturePollTimerRef.current);
+      faceCapturePollTimerRef.current = null;
+    }
+    faceCapturePollTimerRef.current = window.setInterval(() => {
+      void fetchFaceCaptures();
+    }, 1200);
+    return () => {
+      if (faceCapturePollTimerRef.current != null) {
+        window.clearInterval(faceCapturePollTimerRef.current);
+        faceCapturePollTimerRef.current = null;
+      }
+    };
+  }, [analyzing, fetchFaceCaptures, requiredVirtualViewId]);
 
   useEffect(() => {
     if (!analyzing) return;
@@ -1445,8 +1511,8 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
 
   return (
-    <div className="grid h-[calc(100vh-220px)] min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,3fr,1fr]">
-      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="grid h-[calc(100vh-220px)] min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,1fr,3fr] md:grid-rows-[4fr,2fr]">
+      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-1 md:row-start-1 md:row-span-2">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-sm font-semibold text-slate-800">平面图选择</span>
           <select
@@ -1470,7 +1536,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             显示网格
           </label>
         </div>
-        <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="order-1 relative flex min-h-0 flex-[2] items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
           {floorPlanImageUrlStr && selectedFloorPlan ? (
             <PanZoomViewport
               className="h-full w-full"
@@ -1506,7 +1572,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             <span className="text-xs text-slate-400">当前无平面图配置，请在“映射管理”中上传或选择平面图。</span>
           )}
         </div>
-        <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+        <div className="order-2 mt-3 flex-[3] min-h-0 rounded-lg border border-slate-200 bg-white p-3 flex flex-col">
           <div className="mb-3 flex items-center justify-between">
             <div className="text-sm font-semibold text-slate-800">数据统计</div>
             <div className="flex items-center gap-2 text-[11px] text-slate-600">
@@ -1557,19 +1623,23 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             </div>
           </div>
 
-          <div className="mb-3 grid grid-cols-1 gap-3 lg:grid-cols-3">
-            <div className="rounded border border-slate-200 bg-slate-50 p-2 lg:col-span-1">
+          <div className="mb-3 flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
+            <div className="flex min-h-0 flex-col rounded border border-slate-200 bg-slate-50 p-2 lg:w-[34%]">
               <div className="mb-2 text-xs font-semibold text-slate-700">性别分布（男 / 女）</div>
-              <ReactECharts option={genderOption} style={{ height: 190, width: "100%" }} notMerge />
+              <div className="min-h-0 flex-1">
+                <ReactECharts option={genderOption} style={{ height: "100%", width: "100%" }} notMerge />
+              </div>
               {analyzing && statsData.genderMale + statsData.genderFemale === 0 ? (
                 <div className="mt-2 text-[11px] text-amber-600">
                   当前检测不到男/女：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），并能正确输出 gender（male/female）。
                 </div>
               ) : null}
             </div>
-            <div className="rounded border border-slate-200 bg-slate-50 p-2 lg:col-span-2">
+            <div className="flex min-h-0 flex-1 flex-col rounded border border-slate-200 bg-slate-50 p-2">
               <div className="mb-2 text-xs font-semibold text-slate-700">年龄分层</div>
-              <ReactECharts option={ageOption} style={{ height: 190, width: "100%" }} notMerge />
+              <div className="min-h-0 flex-1">
+                <ReactECharts option={ageOption} style={{ height: "100%", width: "100%" }} notMerge />
+              </div>
               {analyzing &&
               statsData.inCount + statsData.outCount > 0 &&
               statsData.ageBuckets.reduce((a, b) => a + b.value, 0) === 0 ? (
@@ -1580,14 +1650,16 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             </div>
           </div>
 
-          <div className="rounded border border-slate-200 bg-slate-50 p-2">
+          <div className="min-h-0 flex-1 rounded border border-slate-200 bg-slate-50 p-2">
             <div className="mb-2 text-xs font-semibold text-slate-700">时段流量趋势（按小时）</div>
-            <ReactECharts option={trendOption} style={{ height: 170, width: "100%" }} notMerge />
+            <div className="min-h-0 flex-1">
+              <ReactECharts option={trendOption} style={{ height: "100%", width: "100%" }} notMerge />
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-3 md:row-start-1">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-sm font-semibold text-slate-800">摄像头选择</span>
           <select
@@ -1785,57 +1857,89 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 text-sm font-semibold text-slate-800">进出判定线配置</div>
-        <div className="space-y-3">
-          {lineCfgRows.length === 0 ? (
-            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
-              暂无已保存线段，请先在摄像头画面中绘制并保存。
+      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-2 md:row-start-1 md:row-span-2">
+        <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍（进入方向）</div>
+        <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+          {faceCaptures.length === 0 ? (
+            <div className="rounded border border-dashed border-slate-300 bg-slate-50 p-3 text-xs text-slate-500">
+              暂无抓拍记录（仅显示经过判定线“进入”方向的人脸）
             </div>
           ) : (
-            lineCfgRows.map((row) => (
-              <div key={row.key} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">线段编号</span>
-                  <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
-                </div>
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">绑定摄像头</span>
-                  <span className="max-w-[170px] truncate rounded bg-white px-2 py-0.5 text-xs text-slate-700" title={row.label}>
-                    {row.label}
-                  </span>
-                </div>
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="text-xs font-semibold text-slate-700">摄像头编号</span>
-                  <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.cameraId}</span>
-                </div>
-                <div className="rounded border border-slate-200 bg-white p-2 text-xs text-slate-700">
-                  <div className="mb-1 font-medium text-slate-600">线段坐标</div>
-                  <div>A[{`${row.cfg.p1.x.toFixed(3)}, ${row.cfg.p1.y.toFixed(3)}`}]</div>
-                  <div>B[{`${row.cfg.p2.x.toFixed(3)}, ${row.cfg.p2.y.toFixed(3)}`}]</div>
-                </div>
-                <div className="mt-2 flex items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
-                    onClick={() => {
-                      setBindCameraId(row.key);
-                      setDrawHint("已切换到该线段绑定摄像头");
-                    }}
-                  >
-                    查看
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
-                    onClick={() => deleteLineByKey(row.key)}
-                  >
-                    删除
-                  </button>
+            faceCaptures.map((it) => (
+              <div key={it.id} className="flex flex-row gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
+                <img
+                  src={`data:image/jpeg;base64,${it.image_base64}`}
+                  alt={`face-${it.id}`}
+                  className="h-16 w-16 flex-shrink-0 rounded object-cover"
+                />
+                <div className="flex flex-col justify-center">
+                  <div className="text-xs text-slate-700">
+                    性别：{it.gender === "male" ? "男" : it.gender === "female" ? "女" : "未知"}
+                  </div>
+                  <div className="mt-1 text-xs text-slate-700">年龄：{it.age_bucket || "未知"}</div>
                 </div>
               </div>
             ))
           )}
+        </div>
+      </div>
+
+      <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-3 md:row-start-2">
+        <div className="mb-3 text-sm font-semibold text-slate-800">进出判定线配置</div>
+        <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
+          <div className="flex flex-row gap-2 overflow-x-auto pb-1">
+            {lineCfgRows.length === 0 ? (
+              <div className="flex-shrink-0 min-w-[220px] rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs text-slate-500">
+                暂无已保存线段，请先在摄像头画面中绘制并保存。
+              </div>
+            ) : (
+              lineCfgRows.map((row) => (
+                <div key={row.key} className="flex-shrink-0 min-w-[220px] rounded-lg border border-slate-200 bg-slate-50 p-2">
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-700">线段编号</span>
+                    <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
+                  </div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-700">绑定摄像头</span>
+                    <span
+                      className="max-w-[170px] truncate rounded bg-white px-2 py-0.5 text-xs text-slate-700"
+                      title={row.label}
+                    >
+                      {row.label}
+                    </span>
+                  </div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span className="text-[11px] font-semibold text-slate-700">摄像头编号</span>
+                    <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.cameraId}</span>
+                  </div>
+                  <div className="rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-700">
+                    <div className="mb-0.5 font-medium text-slate-600">线段坐标</div>
+                    <div>A[{`${row.cfg.p1.x.toFixed(3)}, ${row.cfg.p1.y.toFixed(3)}`}]</div>
+                    <div>B[{`${row.cfg.p2.x.toFixed(3)}, ${row.cfg.p2.y.toFixed(3)}`}]</div>
+                  </div>
+                  <div className="mt-2 flex items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                      onClick={() => {
+                        setBindCameraId(row.key);
+                        setDrawHint("已切换到该线段绑定摄像头");
+                      }}
+                    >
+                      查看
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
+                      onClick={() => deleteLineByKey(row.key)}
+                    >
+                      删除
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
           {displayP1 && displayP2 ? (
             <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
               当前预览为已选摄像头绑定线段
