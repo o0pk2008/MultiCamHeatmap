@@ -417,8 +417,15 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       return;
     }
     try {
+      const mode = statsMode === "realtime" ? "realtime" : "date";
+      const tzOffsetMin = new Date().getTimezoneOffset();
       const r = await fetch(
-        `${API_BASE}/api/footfall/face-captures?virtual_view_id=${vvIdNow}&limit=12`,
+        `${API_BASE}/api/footfall/face-captures?virtual_view_id=${vvIdNow}` +
+          `&floor_plan_id=${selectedFloorPlanId ?? ""}` +
+          `&mode=${mode}` +
+          (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "") +
+          `&tz_offset_minutes=${encodeURIComponent(String(tzOffsetMin))}` +
+          `&limit=12`,
       );
       if (!r.ok) return;
       const data = (await r.json()) as FaceCaptureItem[];
@@ -426,7 +433,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     } catch {
       // ignore transient network errors
     }
-  }, [bindCameraId, bindCameraOptions]);
+  }, [bindCameraId, bindCameraOptions, selectedFloorPlanId, statsDate, statsMode]);
 
   // UV near-line hysteresis band
   const LINE_NEAR_ZONE_W = 0.05;
@@ -1877,6 +1884,9 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                     性别：{it.gender === "male" ? "男" : it.gender === "female" ? "女" : "未知"}
                   </div>
                   <div className="mt-1 text-xs text-slate-700">年龄：{it.age_bucket || "未知"}</div>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    时间：{Number.isFinite(Number(it.ts)) ? new Date(Number(it.ts) * 1000).toLocaleString() : "-"}
+                  </div>
                 </div>
               </div>
             ))

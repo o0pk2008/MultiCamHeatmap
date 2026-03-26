@@ -1,6 +1,6 @@
 import os
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +17,10 @@ router = APIRouter(prefix="/api/admin", tags=["admin"])
 class PurgeByFloorPlanRequest(BaseModel):
     floor_plan_id: int
     confirm_text: str
+    purge_mode: str = "all"  # all | range
+    start_date: Optional[str] = None  # YYYY-MM-DD (local date with tz_offset_minutes)
+    end_date: Optional[str] = None    # YYYY-MM-DD
+    tz_offset_minutes: Optional[int] = None
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -104,33 +108,73 @@ def _validate_confirm_text(v: str) -> None:
         raise HTTPException(status_code=400, detail="confirm_text must be DELETE")
 
 
+def _range_from_req(req: PurgeByFloorPlanRequest) -> tuple[Optional[float], Optional[float]]:
+    mode = str(req.purge_mode or "all").strip().lower()
+    if mode == "all":
+        return None, None
+    if mode != "range":
+        raise HTTPException(status_code=400, detail="purge_mode must be all or range")
+    if not req.start_date or not req.end_date:
+        raise HTTPException(status_code=400, detail="start_date and end_date are required when purge_mode=range")
+    try:
+        y1, m1, d1 = [int(x) for x in str(req.start_date).split("-", 2)]
+        y2, m2, d2 = [int(x) for x in str(req.end_date).split("-", 2)]
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid date format, expected YYYY-MM-DD")
+    tz = timezone(-timedelta(minutes=int(req.tz_offset_minutes or 0)))
+    start_dt = datetime(y1, m1, d1, tzinfo=tz)
+    end_dt = datetime(y2, m2, d2, tzinfo=tz) + timedelta(days=1)
+    if end_dt <= start_dt:
+        raise HTTPException(status_code=400, detail="end_date must be on/after start_date")
+    return float(start_dt.timestamp()), float(end_dt.timestamp())
+
+
 @router.post("/purge-heatmap-events")
 async def admin_purge_heatmap_events(req: PurgeByFloorPlanRequest):
     _validate_confirm_text(req.confirm_text)
     fp_id = int(req.floor_plan_id)
+    start_ts, end_ts = _range_from_req(req)
     with SessionLocal() as db:
         if not db.query(models.FloorPlan).filter(models.FloorPlan.id == fp_id).first():
             raise HTTPException(status_code=404, detail="floor plan not found")
-        deleted_count = (
-            db.query(models.HeatmapEvent)
-            .filter(models.HeatmapEvent.floor_plan_id == fp_id)
-            .delete(synchronize_session=False)
-        )
+        q = db.query(models.HeatmapEvent).filter(models.HeatmapEvent.floor_plan_id == fp_id)
+        if start_ts is not None and end_ts is not None:
+            q = q.filter(models.HeatmapEvent.ts >= float(start_ts), models.HeatmapEvent.ts < float(end_ts))
+        deleted_count = q.delete(synchronize_session=False)
         db.commit()
-    return {"status": "ok", "deleted_count": int(deleted_count or 0), "floor_plan_id": fp_id}
+    return {
+        "status": "ok",
+        "deleted_count": int(deleted_count or 0),
+        "floor_plan_id": fp_id,
+        "purge_mode": req.purge_mode,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+    }
 
 
 @router.post("/purge-footfall-events")
 async def admin_purge_footfall_events(req: PurgeByFloorPlanRequest):
     _validate_confirm_text(req.confirm_text)
     fp_id = int(req.floor_plan_id)
+    start_ts, end_ts = _range_from_req(req)
     with SessionLocal() as db:
         if not db.query(models.FloorPlan).filter(models.FloorPlan.id == fp_id).first():
             raise HTTPException(status_code=404, detail="floor plan not found")
-        deleted_count = (
-            db.query(models.FootfallCrossEvent)
-            .filter(models.FootfallCrossEvent.floor_plan_id == fp_id)
-            .delete(synchronize_session=False)
-        )
+        q_cross = db.query(models.FootfallCrossEvent).filter(models.FootfallCrossEvent.floor_plan_id == fp_id)
+        q_face = db.query(models.FootfallFaceCapture).filter(models.FootfallFaceCapture.floor_plan_id == fp_id)
+        if start_ts is not None and end_ts is not None:
+            q_cross = q_cross.filter(models.FootfallCrossEvent.ts >= float(start_ts), models.FootfallCrossEvent.ts < float(end_ts))
+            q_face = q_face.filter(models.FootfallFaceCapture.ts >= float(start_ts), models.FootfallFaceCapture.ts < float(end_ts))
+        deleted_cross = q_cross.delete(synchronize_session=False)
+        deleted_faces = q_face.delete(synchronize_session=False)
         db.commit()
-    return {"status": "ok", "deleted_count": int(deleted_count or 0), "floor_plan_id": fp_id}
+    return {
+        "status": "ok",
+        "deleted_count": int((deleted_cross or 0) + (deleted_faces or 0)),
+        "deleted_cross_events": int(deleted_cross or 0),
+        "deleted_face_captures": int(deleted_faces or 0),
+        "floor_plan_id": fp_id,
+        "purge_mode": req.purge_mode,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+    }

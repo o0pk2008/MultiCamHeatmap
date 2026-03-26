@@ -66,6 +66,9 @@ const SystemSettingsView: React.FC = () => {
   const [downloading, setDownloading] = useState(false);
   const [purgingHeatmap, setPurgingHeatmap] = useState(false);
   const [purgingFootfall, setPurgingFootfall] = useState(false);
+  const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
+  const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [purgeEndDate, setPurgeEndDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
 
   useEffect(() => {
     const load = async () => {
@@ -148,12 +151,23 @@ const SystemSettingsView: React.FC = () => {
   const purgeHeatmap = useCallback(async () => {
     if (selectedFloorPlanId === "") return;
     if (!confirmDelete(`将清理平面图 [${selectedFloorPlanName}] 的热力历史数据`)) return;
+    if (purgeMode === "range" && (!purgeStartDate || !purgeEndDate)) {
+      alert("请选择起始日期和结束日期。");
+      return;
+    }
     setPurgingHeatmap(true);
     try {
       const res = await fetch(`${API_BASE}/api/admin/purge-heatmap-events`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ floor_plan_id: Number(selectedFloorPlanId), confirm_text: "DELETE" }),
+        body: JSON.stringify({
+          floor_plan_id: Number(selectedFloorPlanId),
+          confirm_text: "DELETE",
+          purge_mode: purgeMode,
+          start_date: purgeMode === "range" ? purgeStartDate : null,
+          end_date: purgeMode === "range" ? purgeEndDate : null,
+          tz_offset_minutes: new Date().getTimezoneOffset(),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -168,24 +182,39 @@ const SystemSettingsView: React.FC = () => {
     } finally {
       setPurgingHeatmap(false);
     }
-  }, [confirmDelete, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
+  }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
 
   const purgeFootfall = useCallback(async () => {
     if (selectedFloorPlanId === "") return;
     if (!confirmDelete(`将清理平面图 [${selectedFloorPlanName}] 的人流量历史数据`)) return;
+    if (purgeMode === "range" && (!purgeStartDate || !purgeEndDate)) {
+      alert("请选择起始日期和结束日期。");
+      return;
+    }
     setPurgingFootfall(true);
     try {
       const res = await fetch(`${API_BASE}/api/admin/purge-footfall-events`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ floor_plan_id: Number(selectedFloorPlanId), confirm_text: "DELETE" }),
+        body: JSON.stringify({
+          floor_plan_id: Number(selectedFloorPlanId),
+          confirm_text: "DELETE",
+          purge_mode: purgeMode,
+          start_date: purgeMode === "range" ? purgeStartDate : null,
+          end_date: purgeMode === "range" ? purgeEndDate : null,
+          tz_offset_minutes: new Date().getTimezoneOffset(),
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         alert(`清理失败: ${data?.detail || res.status}`);
         return;
       }
-      alert(`清理完成，删除 ${Number(data?.deleted_count || 0)} 条人流量记录。`);
+      alert(
+        `清理完成，删除 ${Number(data?.deleted_count || 0)} 条人流量相关记录（事件 ${Number(
+          data?.deleted_cross_events || 0,
+        )} 条，抓拍头像 ${Number(data?.deleted_face_captures || 0)} 条）。`,
+      );
       void refreshStats();
     } catch (e) {
       console.error(e);
@@ -193,7 +222,7 @@ const SystemSettingsView: React.FC = () => {
     } finally {
       setPurgingFootfall(false);
     }
-  }, [confirmDelete, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
+  }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
 
   return (
     <div className="space-y-4">
@@ -283,6 +312,34 @@ const SystemSettingsView: React.FC = () => {
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
           <div className="mb-2 text-sm font-semibold text-amber-900">清理热力图历史数据</div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-amber-900">
+            <span>清理范围</span>
+            <select
+              className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
+              value={purgeMode}
+              onChange={(e) => setPurgeMode((e.target.value as "all" | "range") || "all")}
+            >
+              <option value="all">全部数据</option>
+              <option value="range">按日期范围</option>
+            </select>
+            {purgeMode === "range" ? (
+              <>
+                <input
+                  type="date"
+                  className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
+                  value={purgeStartDate}
+                  onChange={(e) => setPurgeStartDate(e.target.value)}
+                />
+                <span>至</span>
+                <input
+                  type="date"
+                  className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
+                  value={purgeEndDate}
+                  onChange={(e) => setPurgeEndDate(e.target.value)}
+                />
+              </>
+            ) : null}
+          </div>
           <p className="mb-3 text-xs text-amber-800">
             按平面图全量清理 `heatmap_events`。目标平面图：{selectedFloorPlanName || "-"}。
           </p>
@@ -297,8 +354,37 @@ const SystemSettingsView: React.FC = () => {
 
         <div className="rounded-xl border border-rose-300 bg-rose-50 p-4 shadow-sm">
           <div className="mb-2 text-sm font-semibold text-rose-900">清理人流量历史数据</div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-rose-900">
+            <span>清理范围</span>
+            <select
+              className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
+              value={purgeMode}
+              onChange={(e) => setPurgeMode((e.target.value as "all" | "range") || "all")}
+            >
+              <option value="all">全部数据</option>
+              <option value="range">按日期范围</option>
+            </select>
+            {purgeMode === "range" ? (
+              <>
+                <input
+                  type="date"
+                  className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
+                  value={purgeStartDate}
+                  onChange={(e) => setPurgeStartDate(e.target.value)}
+                />
+                <span>至</span>
+                <input
+                  type="date"
+                  className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
+                  value={purgeEndDate}
+                  onChange={(e) => setPurgeEndDate(e.target.value)}
+                />
+              </>
+            ) : null}
+          </div>
           <p className="mb-3 text-xs text-rose-800">
-            按平面图全量清理 `footfall_cross_events`。目标平面图：{selectedFloorPlanName || "-"}。
+            清理 `footfall_cross_events` 与 `footfall_face_captures`（base64 抓拍头像）。目标平面图：
+            {selectedFloorPlanName || "-"}。
           </p>
           <button
             className="rounded bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-60"

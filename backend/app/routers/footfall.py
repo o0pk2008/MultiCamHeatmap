@@ -1,4 +1,5 @@
 from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from fastapi import HTTPException
@@ -8,7 +9,6 @@ from ..db import SessionLocal
 from .. import models
 from ..footfall_analysis import analyzer, FootfallLine
 from ..footfall_store import get_footfall_stats_sync
-from ..virtual_view_inference import manager
 
 router = APIRouter(prefix="/api/footfall", tags=["footfall"])
 
@@ -282,19 +282,68 @@ async def footfall_status(
 
 
 @router.get("/face-captures", response_model=List[FaceCaptureOut])
-async def footfall_face_captures(virtual_view_id: int, limit: int = 12):
-    rows = manager.get_face_captures(int(virtual_view_id), int(limit))
+async def footfall_face_captures(
+    virtual_view_id: int,
+    floor_plan_id: Optional[int] = None,
+    mode: str = "realtime",  # realtime | date
+    date_key: Optional[str] = None,  # YYYY-MM-DD
+    tz_offset_minutes: Optional[int] = None,
+    limit: int = 12,
+):
+    lim = max(1, min(int(limit), 36))
+
+    def _tz_from_offset_minutes(tz_min: Optional[int]) -> timezone:
+        if tz_min is None:
+            local_dt = datetime.now().astimezone()
+            tzinfo = local_dt.tzinfo
+            if isinstance(tzinfo, timezone):
+                return tzinfo
+            offset = local_dt.utcoffset() or timedelta(0)
+            return timezone(offset)
+        return timezone(-timedelta(minutes=int(tz_min)))
+
+    def _range_ts(_mode: str, _date_key: Optional[str], _tz_min: Optional[int]) -> tuple[float, float]:
+        tz = _tz_from_offset_minutes(_tz_min)
+        if _mode == "realtime":
+            now = datetime.now(tz)
+            start = datetime(now.year, now.month, now.day, tzinfo=tz)
+            end = start + timedelta(days=1)
+            return float(start.timestamp()), float(end.timestamp())
+        if _mode != "date":
+            raise HTTPException(status_code=400, detail="invalid mode")
+        if not _date_key:
+            raise HTTPException(status_code=400, detail="date_key required for date mode")
+        try:
+            y, m, d = [int(x) for x in str(_date_key).split("-", 2)]
+            start = datetime(y, m, d, tzinfo=tz)
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid date_key")
+        end = start + timedelta(days=1)
+        return float(start.timestamp()), float(end.timestamp())
+
+    start_ts, end_ts = _range_ts(str(mode), date_key, tz_offset_minutes)
+
+    with SessionLocal() as db:
+        q = db.query(models.FootfallFaceCapture).filter(
+            models.FootfallFaceCapture.virtual_view_id == int(virtual_view_id),
+            models.FootfallFaceCapture.ts >= float(start_ts),
+            models.FootfallFaceCapture.ts < float(end_ts),
+        )
+        if floor_plan_id is not None:
+            q = q.filter(models.FootfallFaceCapture.floor_plan_id == int(floor_plan_id))
+        rows = q.order_by(models.FootfallFaceCapture.ts.desc()).limit(lim).all()
+
     out: List[FaceCaptureOut] = []
     for r in rows:
         try:
             out.append(
                 FaceCaptureOut(
-                    id=int(r.get("id", 0)),
-                    track_id=int(r.get("track_id", -1)),
-                    ts=float(r.get("ts", 0.0)),
-                    gender=(str(r["gender"]) if r.get("gender") is not None else None),
-                    age_bucket=(str(r["age_bucket"]) if r.get("age_bucket") is not None else None),
-                    image_base64=str(r.get("image_base64", "")),
+                    id=int(r.id),
+                    track_id=int(r.track_id if r.track_id is not None else -1),
+                    ts=float(r.ts),
+                    gender=(str(r.gender) if r.gender is not None else None),
+                    age_bucket=(str(r.age_bucket) if r.age_bucket is not None else None),
+                    image_base64=str(r.image_base64),
                 )
             )
         except Exception:

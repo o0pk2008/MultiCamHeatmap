@@ -270,3 +270,29 @@ class FootfallCrossEvent(Base):
     gender = Column(String(16), nullable=True)
     age_bucket = Column(String(16), nullable=True)
 
+
+class FootfallFaceCapture(Base):
+    """
+    人脸抓拍落库（仅进入方向）。
+    用于按日期查询并在前端展示抓拍图 + 性别/年龄。
+    """
+
+    __tablename__ = "footfall_face_captures"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    line_config_id = Column(
+        Integer, ForeignKey("footfall_line_configs.id"), nullable=False, index=True
+    )
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True
+    )
+
+    ts = Column(Float, nullable=False, index=True)
+    track_id = Column(Integer, nullable=True, index=True)
+    stable_id = Column(Integer, nullable=True, index=True)
+    gender = Column(String(16), nullable=True)
+    age_bucket = Column(String(16), nullable=True)
+    image_base64 = Column(Text, nullable=False)
+

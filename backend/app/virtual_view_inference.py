@@ -369,24 +369,24 @@ class VirtualViewInferenceManager:
         gender: Optional[str],
         age_bucket: Optional[str],
         person_crop,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         # 没有任何属性时不抓拍，避免噪声
         if not gender and not age_bucket:
-            return
+            return None
         key = (int(virtual_view_id), int(track_id))
         last_ts = self._face_capture_last_ts.get(key)
         if last_ts is not None and (float(ts) - float(last_ts)) < self._face_capture_min_interval_sec:
-            return
+            return None
         face_crop = self._extract_face_crop_for_capture(person_crop)
         if face_crop is None or getattr(face_crop, "size", 0) == 0:
-            return
+            return None
         try:
             ok, jpg = cv2.imencode(".jpg", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
             if not ok:
                 return
             b64 = base64.b64encode(jpg.tobytes()).decode("ascii")
         except Exception:
-            return
+            return None
         self._face_capture_last_ts[key] = float(ts)
         with self._lock:
             self._face_capture_seq += 1
@@ -402,6 +402,7 @@ class VirtualViewInferenceManager:
             arr.insert(0, row)
             if len(arr) > self._face_capture_max:
                 del arr[self._face_capture_max :]
+            return dict(row)
 
     def get_face_captures(self, virtual_view_id: int, limit: int = 12) -> list[Dict[str, Any]]:
         lim = max(1, min(int(limit), 36))
@@ -438,6 +439,8 @@ class VirtualViewInferenceManager:
 
     def capture_enter_face_once(
         self,
+        floor_plan_id: int,
+        line_config_id: int,
         virtual_view_id: int,
         track_id: int,
         stable_id: int,
@@ -456,7 +459,7 @@ class VirtualViewInferenceManager:
             sample = self._track_attr_latest.get((vv, tid))
         if not sample:
             return
-        self._push_face_capture(
+        row = self._push_face_capture(
             virtual_view_id=vv,
             track_id=tid,
             ts=float(ts),
@@ -464,8 +467,57 @@ class VirtualViewInferenceManager:
             age_bucket=sample.get("age_bucket"),
             person_crop=sample.get("crop"),
         )
+        if row is None:
+            return
+        # 持久化到数据库：支持按日期加载抓拍记录
+        try:
+            self._persist_face_capture(
+                floor_plan_id=int(floor_plan_id),
+                line_config_id=int(line_config_id),
+                virtual_view_id=vv,
+                track_id=tid,
+                stable_id=sid,
+                ts=float(ts),
+                gender=sample.get("gender"),
+                age_bucket=sample.get("age_bucket"),
+                image_base64=str(row.get("image_base64", "")),
+            )
+        except Exception:
+            pass
         with self._lock:
             self._enter_capture_seen[seen_key] = float(ts)
+
+    def _persist_face_capture(
+        self,
+        floor_plan_id: int,
+        line_config_id: int,
+        virtual_view_id: int,
+        track_id: int,
+        stable_id: int,
+        ts: float,
+        gender: Optional[str],
+        age_bucket: Optional[str],
+        image_base64: str,
+    ) -> None:
+        if not image_base64:
+            return
+        try:
+            with SessionLocal() as db:
+                row = models.FootfallFaceCapture(
+                    line_config_id=int(line_config_id),
+                    floor_plan_id=int(floor_plan_id),
+                    virtual_view_id=int(virtual_view_id),
+                    ts=float(ts),
+                    track_id=int(track_id),
+                    stable_id=int(stable_id),
+                    gender=(str(gender) if gender is not None else None),
+                    age_bucket=(str(age_bucket) if age_bucket is not None else None),
+                    image_base64=str(image_base64),
+                )
+                db.add(row)
+                db.commit()
+        except Exception:
+            return
 
     def _infer_gender_age_from_crop(self, crop, now: float) -> Tuple[Optional[str], Optional[str]]:
         """

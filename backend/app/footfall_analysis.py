@@ -453,6 +453,8 @@ class FootfallAnalyzer:
                         if counted_dir == "in":
                             try:
                                 manager.capture_enter_face_once(
+                                    floor_plan_id=int(floor_plan_id),
+                                    line_config_id=int(line_config_id),
                                     virtual_view_id=int(virtual_view_id),
                                     track_id=int(tid),
                                     stable_id=int(sid),
