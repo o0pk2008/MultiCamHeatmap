@@ -32,19 +32,38 @@ def _to_float_or_none(v: Any) -> Optional[float]:
         return None
 
 
-def _normalize_stats_mode_range(mode: str, date_key: Optional[str]) -> Tuple[float, float]:
+def _tz_from_offset_minutes(tz_offset_minutes: Optional[int]) -> timezone:
+    # JS Date.getTimezoneOffset(): local = UTC - offset_minutes
+    # e.g. Asia/Shanghai => -480 => timezone(+08:00)
+    if tz_offset_minutes is None:
+        # 默认使用容器本地时区（docker TZ）
+        local_dt = datetime.now().astimezone()
+        tzinfo = local_dt.tzinfo
+        if isinstance(tzinfo, timezone):
+            return tzinfo
+        offset = local_dt.utcoffset() or timedelta(0)
+        return timezone(offset)
+    return timezone(-timedelta(minutes=int(tz_offset_minutes)))
+
+
+def _normalize_stats_mode_range(
+    mode: str,
+    date_key: Optional[str],
+    tz_offset_minutes: Optional[int] = None,
+) -> Tuple[float, float]:
+    tz = _tz_from_offset_minutes(tz_offset_minutes)
     if mode not in ("realtime", "date"):
         raise ValueError("invalid mode")
     if mode == "realtime":
-        now = datetime.now(timezone.utc)
-        start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+        now = datetime.now(tz)
+        start = datetime(now.year, now.month, now.day, tzinfo=tz)
         end = start + timedelta(days=1)
         return float(start.timestamp()), float(end.timestamp())
     if not date_key:
         raise ValueError("date_key required for date mode")
     try:
         y, m, d = [int(x) for x in str(date_key).split("-", 2)]
-        start = datetime(y, m, d, tzinfo=timezone.utc)
+        start = datetime(y, m, d, tzinfo=tz)
     except Exception as e:  # pragma: no cover
         raise ValueError("invalid date_key") from e
     end = start + timedelta(days=1)
@@ -56,8 +75,14 @@ def get_footfall_stats_sync(
     virtual_view_id: int,
     mode: str = "realtime",
     date_key: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
 ) -> Dict[str, Any]:
-    start_ts, end_ts = _normalize_stats_mode_range(mode=mode, date_key=date_key)
+    tz = _tz_from_offset_minutes(tz_offset_minutes)
+    start_ts, end_ts = _normalize_stats_mode_range(
+        mode=mode,
+        date_key=date_key,
+        tz_offset_minutes=tz_offset_minutes,
+    )
 
     age_buckets = ["0-12", "18-25", "26-35", "36-45", "46-55", "55+"]
     age_bucket_counts: Dict[str, int] = {k: 0 for k in age_buckets}
@@ -102,7 +127,7 @@ def get_footfall_stats_sync(
 
         for e in events:
             try:
-                h = datetime.fromtimestamp(float(e.ts), tz=timezone.utc).hour
+                h = datetime.fromtimestamp(float(e.ts), tz=tz).hour
             except Exception:
                 continue
 

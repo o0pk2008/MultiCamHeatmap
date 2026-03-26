@@ -13,6 +13,7 @@ import HeatmapViewPage from "./views/HeatmapView";
 import MappedCamerasGrid from "./views/heatmap/MappedCamerasGrid";
 import FloorPlanCanvas from "./components/canvas/FloorPlanCanvas";
 import FootfallAnalysisView from "./views/FootfallAnalysisView";
+import SystemSettingsView from "./views/SystemSettingsView";
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
@@ -103,6 +104,12 @@ const App: React.FC = () => {
               activeTab={activeTab}
               onChange={setActiveTab}
             />
+            <SidebarTabButton
+              label="系统设置"
+              tab="settings"
+              activeTab={activeTab}
+              onChange={setActiveTab}
+            />
           </nav>
         </aside>
 
@@ -128,6 +135,7 @@ const App: React.FC = () => {
             />
           )}
           {activeTab === "mapping" && <MappingView />}
+          {activeTab === "settings" && <SystemSettingsView />}
         </main>
       </div>
     </div>

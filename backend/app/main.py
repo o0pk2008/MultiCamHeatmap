@@ -63,8 +63,10 @@ app.include_router(cameras_router)
 app.include_router(mappings_router)
 app.include_router(discovery_router)
 from .routers.footfall import router as footfall_router
+from .routers.admin import router as admin_router
 
 app.include_router(footfall_router)
+app.include_router(admin_router)
 
 
 @app.get("/", response_class=HTMLResponse)

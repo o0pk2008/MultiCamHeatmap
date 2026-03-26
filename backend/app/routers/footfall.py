@@ -245,6 +245,7 @@ async def footfall_stats(
     virtual_view_id: int,
     mode: str = "realtime",  # realtime | date
     date_key: Optional[str] = None,  # YYYY-MM-DD in UTC
+    tz_offset_minutes: Optional[int] = None,  # JS Date.getTimezoneOffset()
 ):
     try:
         return get_footfall_stats_sync(
@@ -252,6 +253,7 @@ async def footfall_stats(
             virtual_view_id=int(virtual_view_id),
             mode=str(mode),
             date_key=date_key,
+            tz_offset_minutes=(int(tz_offset_minutes) if tz_offset_minutes is not None else None),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
