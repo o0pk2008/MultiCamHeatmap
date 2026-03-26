@@ -34,6 +34,7 @@ class CameraOut(CameraBase):
 class CameraVirtualViewBase(BaseModel):
     name: str = "View"
     enabled: bool = True
+    view_mode: str = "panorama_perspective"  # panorama_perspective | native_resize
     yaw_deg: float = 0.0
     pitch_deg: float = 0.0
     fov_deg: float = 90.0
@@ -48,6 +49,7 @@ class CameraVirtualViewCreate(CameraVirtualViewBase):
 class CameraVirtualViewUpdate(BaseModel):
     name: Optional[str] = None
     enabled: Optional[bool] = None
+    view_mode: Optional[str] = None
     yaw_deg: Optional[float] = None
     pitch_deg: Optional[float] = None
     fov_deg: Optional[float] = None

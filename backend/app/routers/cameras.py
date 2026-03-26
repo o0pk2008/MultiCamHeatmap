@@ -72,6 +72,7 @@ def list_all_virtual_views(db: Session = Depends(get_db)) -> List[dict]:
                 "camera_name": camera_name,
                 "name": view.name,
                 "enabled": view.enabled,
+                "view_mode": str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective"),
                 "yaw_deg": view.yaw_deg,
                 "pitch_deg": view.pitch_deg,
                 "fov_deg": view.fov_deg,
@@ -198,6 +199,7 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
         # 定期热加载最新参数（避免前端必须强制重连才能看到保存后的画面）
         last_reload = 0.0
         enabled = view.enabled
+        view_mode = str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective")
         yaw_deg = view.yaw_deg
         pitch_deg = view.pitch_deg
         fov_deg = view.fov_deg
@@ -220,6 +222,7 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                             )
                             if v2 is not None:
                                 enabled = bool(v2.enabled)
+                                view_mode = str(getattr(v2, "view_mode", "panorama_perspective") or "panorama_perspective")
                                 yaw_deg = float(v2.yaw_deg)
                                 pitch_deg = float(v2.pitch_deg)
                                 fov_deg = float(v2.fov_deg)
@@ -239,14 +242,20 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                 if not enabled:
                     persp = frame
                 else:
-                    persp = equirect_to_perspective(
-                        frame,
-                        yaw_deg=yaw_deg,
-                        pitch_deg=pitch_deg,
-                        fov_deg=fov_deg,
-                        out_w=out_w,
-                        out_h=out_h,
-                    )
+                    if view_mode == "native_resize":
+                        try:
+                            persp = cv2.resize(frame, (int(max(1, out_w)), int(max(1, out_h))))
+                        except Exception:
+                            persp = frame
+                    else:
+                        persp = equirect_to_perspective(
+                            frame,
+                            yaw_deg=yaw_deg,
+                            pitch_deg=pitch_deg,
+                            fov_deg=fov_deg,
+                            out_w=out_w,
+                            out_h=out_h,
+                        )
 
                 ok2, jpg = cv2.imencode(".jpg", persp, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if not ok2:

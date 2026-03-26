@@ -43,6 +43,7 @@ export interface CameraVirtualView {
   camera_id: number;
   name: string;
   enabled: boolean;
+  view_mode: "panorama_perspective" | "native_resize";
   yaw_deg: number;
   pitch_deg: number;
   fov_deg: number;

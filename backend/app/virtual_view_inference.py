@@ -992,7 +992,7 @@ class VirtualViewInferenceManager:
 
     def _reload_view_params(self, virtual_view_id: int) -> Optional[Tuple[str, dict]]:
         """
-        热加载 view 参数：用于不中断流的情况下应用最新 yaw/pitch/fov/out_w/out_h/enabled。
+        热加载 view 参数：用于不中断流的情况下应用最新 view_mode/yaw/pitch/fov/out_w/out_h/enabled。
         返回 (rtsp_url, params_dict)。
         """
         with SessionLocal() as db:
@@ -1008,6 +1008,7 @@ class VirtualViewInferenceManager:
                 return None
             return cam.rtsp_url, {
                 "enabled": bool(view.enabled),
+                "view_mode": str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective"),
                 "yaw_deg": float(view.yaw_deg),
                 "pitch_deg": float(view.pitch_deg),
                 "fov_deg": float(view.fov_deg),
@@ -1037,6 +1038,7 @@ class VirtualViewInferenceManager:
             return
         rtsp_url, view = loaded
         enabled = bool(view.enabled)
+        view_mode = str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective")
         yaw_deg = float(view.yaw_deg)
         pitch_deg = float(view.pitch_deg)
         fov_deg = float(view.fov_deg)
@@ -1060,6 +1062,7 @@ class VirtualViewInferenceManager:
                         if reloaded is not None:
                             new_rtsp, p = reloaded
                             enabled = bool(p["enabled"])
+                            view_mode = str(p.get("view_mode", "panorama_perspective"))
                             yaw_deg = float(p["yaw_deg"])
                             pitch_deg = float(p["pitch_deg"])
                             fov_deg = float(p["fov_deg"])
@@ -1123,14 +1126,20 @@ class VirtualViewInferenceManager:
                 if not enabled:
                     persp = frame
                 else:
-                    persp = equirect_to_perspective(
-                        frame,
-                        yaw_deg=yaw_deg,
-                        pitch_deg=pitch_deg,
-                        fov_deg=fov_deg,
-                        out_w=out_w,
-                        out_h=out_h,
-                    )
+                    if view_mode == "native_resize":
+                        try:
+                            persp = cv2.resize(frame, (int(max(1, out_w)), int(max(1, out_h))))
+                        except Exception:
+                            persp = frame
+                    else:
+                        persp = equirect_to_perspective(
+                            frame,
+                            yaw_deg=yaw_deg,
+                            pitch_deg=pitch_deg,
+                            fov_deg=fov_deg,
+                            out_w=out_w,
+                            out_h=out_h,
+                        )
 
                 now = time.time()
                 # plain 版本（不带框）

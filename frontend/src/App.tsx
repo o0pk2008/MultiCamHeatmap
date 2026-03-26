@@ -2357,7 +2357,12 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
     try {
       const res = await fetch(`${API_BASE}/api/cameras/virtual-views/all`);
       const data: (CameraVirtualView & { camera_name?: string })[] = await res.json();
-      setViews(data);
+      setViews(
+        (data || []).map((v) => ({
+          ...v,
+          view_mode: v.view_mode || "panorama_perspective",
+        })),
+      );
       // 默认只读：新加载的视窗默认不可编辑
       setEditMode((old) => {
         const next: Record<number, boolean> = { ...old };
@@ -2497,6 +2502,7 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
           camera_id: cameraId,
           name: `View ${existingCount + 1}`,
           enabled: true,
+          view_mode: "panorama_perspective",
           yaw_deg: 0,
           pitch_deg: 0,
           fov_deg: 90,
@@ -2525,6 +2531,7 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
       body: JSON.stringify({
         name: v.name,
         enabled: v.enabled,
+        view_mode: v.view_mode || "panorama_perspective",
         yaw_deg: v.yaw_deg,
         pitch_deg: v.pitch_deg,
         fov_deg: v.fov_deg,
@@ -2619,7 +2626,7 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
           </div>
         </div>
         <div className="mt-2 text-[11px] text-slate-500">
-          说明：此页面用于 360 全景相机的 virtual PTZ 透视视窗配置。预览使用 MJPEG 流（后续可替换为 WebRTC）。
+          说明：支持两种视窗模式：全景透视（yaw/pitch/fov）和原生缩放（适配 PTZ 相机，仅控制输出宽高）。
         </div>
       </div>
 
@@ -2780,34 +2787,62 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
                     </div>
 
                     <div className="grid grid-cols-2 gap-2 text-xs">
-                      <label className="text-slate-600">
-                        Yaw(°)
-                        <input
-                          type="number"
+                      <label className="col-span-2 text-slate-600">
+                        视窗模式
+                        <select
                           className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                          value={v.yaw_deg}
+                          value={v.view_mode || "panorama_perspective"}
                           disabled={!canEdit}
                           onChange={(e) =>
                             setViews((old) =>
-                              old.map((x) => (x.id === v.id ? { ...x, yaw_deg: Number(e.target.value) } : x)),
+                              old.map((x) =>
+                                x.id === v.id
+                                  ? {
+                                      ...x,
+                                      view_mode:
+                                        e.target.value === "native_resize" ? "native_resize" : "panorama_perspective",
+                                    }
+                                  : x,
+                              ),
                             )
                           }
-                        />
+                        >
+                          <option value="panorama_perspective">全景透视（Panorama）</option>
+                          <option value="native_resize">原生缩放（PTZ）</option>
+                        </select>
                       </label>
-                      <label className="text-slate-600">
-                        Pitch(°)
-                        <input
-                          type="number"
-                          className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                          value={v.pitch_deg}
-                          disabled={!canEdit}
-                          onChange={(e) =>
-                            setViews((old) =>
-                              old.map((x) => (x.id === v.id ? { ...x, pitch_deg: Number(e.target.value) } : x)),
-                            )
-                          }
-                        />
-                      </label>
+                      {(v.view_mode || "panorama_perspective") === "panorama_perspective" ? (
+                        <>
+                          <label className="text-slate-600">
+                            Yaw(°)
+                            <input
+                              type="number"
+                              className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                              value={v.yaw_deg}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                setViews((old) =>
+                                  old.map((x) => (x.id === v.id ? { ...x, yaw_deg: Number(e.target.value) } : x)),
+                                )
+                              }
+                            />
+                          </label>
+                          <label className="text-slate-600">
+                            Pitch(°)
+                            <input
+                              type="number"
+                              className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                              value={v.pitch_deg}
+                              disabled={!canEdit}
+                              onChange={(e) =>
+                                setViews((old) =>
+                                  old.map((x) => (x.id === v.id ? { ...x, pitch_deg: Number(e.target.value) } : x)),
+                                )
+                              }
+                            />
+                          </label>
+                        </>
+                      ) : null}
                       <label className="col-span-2 text-slate-600">
                         输出(w×h)
                         <div className="mt-0.5 flex gap-1">
@@ -2835,20 +2870,22 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
                           />
                         </div>
                       </label>
-                      <label className="col-span-2 text-slate-600">
-                        FOV(°)
-                        <input
-                          type="number"
-                          className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
-                          value={v.fov_deg}
-                          disabled={!canEdit}
-                          onChange={(e) =>
-                            setViews((old) =>
-                              old.map((x) => (x.id === v.id ? { ...x, fov_deg: Number(e.target.value) } : x)),
-                            )
-                          }
-                        />
-                      </label>
+                      {(v.view_mode || "panorama_perspective") === "panorama_perspective" ? (
+                        <label className="col-span-2 text-slate-600">
+                          FOV(°)
+                          <input
+                            type="number"
+                            className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1"
+                            value={v.fov_deg}
+                            disabled={!canEdit}
+                            onChange={(e) =>
+                              setViews((old) =>
+                                old.map((x) => (x.id === v.id ? { ...x, fov_deg: Number(e.target.value) } : x)),
+                              )
+                            }
+                          />
+                        </label>
+                      ) : null}
                     </div>
 
                     <div className="mt-2 flex gap-2">

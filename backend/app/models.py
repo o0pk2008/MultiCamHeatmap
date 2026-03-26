@@ -51,6 +51,10 @@ class CameraVirtualView(Base):
     # 输出分辨率
     out_w = Column(Integer, nullable=False, default=960)
     out_h = Column(Integer, nullable=False, default=540)
+    # 视窗模式：
+    # - panorama_perspective: 全景透视（yaw/pitch/fov 生效）
+    # - native_resize: 直接使用原始画面，仅按 out_w/out_h 缩放
+    view_mode = Column(String(32), nullable=False, default="panorama_perspective")
 
     camera = relationship("Camera", back_populates="virtual_views")
     grid_config = relationship(

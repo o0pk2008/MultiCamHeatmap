@@ -1,6 +1,7 @@
 import os
 import asyncio
 import json
+from sqlalchemy import inspect, text
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,27 @@ app.add_middleware(
 
 # 创建数据库表
 Base.metadata.create_all(bind=engine)
+
+
+def _ensure_schema_columns() -> None:
+    """轻量兼容迁移：为旧库补充新增列。"""
+    try:
+        insp = inspect(engine)
+        cols = {c.get("name") for c in insp.get_columns("camera_virtual_views")}
+        if "view_mode" not in cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE camera_virtual_views "
+                        "ADD COLUMN view_mode VARCHAR(32) NOT NULL DEFAULT 'panorama_perspective'"
+                    )
+                )
+    except Exception:
+        # 避免迁移失败阻断服务启动
+        pass
+
+
+_ensure_schema_columns()
 
 # 静态目录挂载：用于访问上传的平面图图片（/maps/xxx.png）
 # 设置较长缓存时间，避免切换页面时反复请求导致排队/等待（尤其在同时存在 MJPEG 长连接时）。
