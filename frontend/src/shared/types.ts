@@ -49,6 +49,10 @@ export interface CameraVirtualView {
   fov_deg: number;
   out_w: number;
   out_h: number;
+  crop_x1?: number | null;
+  crop_y1?: number | null;
+  crop_x2?: number | null;
+  crop_y2?: number | null;
 }
 
 export interface VirtualViewCellMapping {

@@ -55,6 +55,11 @@ class CameraVirtualView(Base):
     # - panorama_perspective: 全景透视（yaw/pitch/fov 生效）
     # - native_resize: 直接使用原始画面，仅按 out_w/out_h 缩放
     view_mode = Column(String(32), nullable=False, default="panorama_perspective")
+    # native_resize 下可选裁剪区域（像素坐标，基于原始输入帧）
+    crop_x1 = Column(Integer, nullable=True)
+    crop_y1 = Column(Integer, nullable=True)
+    crop_x2 = Column(Integer, nullable=True)
+    crop_y2 = Column(Integer, nullable=True)
 
     camera = relationship("Camera", back_populates="virtual_views")
     grid_config = relationship(

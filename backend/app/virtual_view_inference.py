@@ -151,6 +151,8 @@ class VirtualViewInferenceManager:
         self._yolo_foot_point_enabled: bool = False
         self._yolo_foot_point_style: str = "circle"  # circle | square
         self._yolo_foot_point_color: str = "green"  # green | blue | white
+        # 监控画面映射网格颜色（系统设置）
+        self._mapped_cam_grid_color: str = "white"  # white | green | blue
 
     def set_footfall_line_uv(
         self, virtual_view_id: int, p1_uv: Tuple[float, float], p2_uv: Tuple[float, float]
@@ -177,6 +179,7 @@ class VirtualViewInferenceManager:
         foot_point_enabled: Optional[bool] = None,
         foot_point_style: Optional[str] = None,
         foot_point_color: Optional[str] = None,
+        mapped_cam_grid_color: Optional[str] = None,
     ) -> None:
         with self._lock:
             if box_style is not None:
@@ -197,6 +200,10 @@ class VirtualViewInferenceManager:
                 c = str(foot_point_color).strip().lower()
                 if c in ("green", "blue", "white"):
                     self._yolo_foot_point_color = c
+            if mapped_cam_grid_color is not None:
+                c = str(mapped_cam_grid_color).strip().lower()
+                if c in ("white", "green", "blue"):
+                    self._mapped_cam_grid_color = c
 
     def get_yolo_draw_config(self) -> Dict[str, Any]:
         with self._lock:
@@ -206,6 +213,7 @@ class VirtualViewInferenceManager:
                 "foot_point_enabled": bool(self._yolo_foot_point_enabled),
                 "foot_point_style": str(self._yolo_foot_point_style),
                 "foot_point_color": str(self._yolo_foot_point_color),
+                "mapped_cam_grid_color": str(self._mapped_cam_grid_color),
             }
 
     @staticmethod
@@ -1287,6 +1295,10 @@ class VirtualViewInferenceManager:
                 "fov_deg": float(view.fov_deg),
                 "out_w": int(view.out_w),
                 "out_h": int(view.out_h),
+                "crop_x1": getattr(view, "crop_x1", None),
+                "crop_y1": getattr(view, "crop_y1", None),
+                "crop_x2": getattr(view, "crop_x2", None),
+                "crop_y2": getattr(view, "crop_y2", None),
             }
 
     def _run_view_loop(self, virtual_view_id: int, stop_event: threading.Event) -> None:
@@ -1317,6 +1329,10 @@ class VirtualViewInferenceManager:
         fov_deg = float(view.fov_deg)
         out_w = int(view.out_w)
         out_h = int(view.out_h)
+        crop_x1 = getattr(view, "crop_x1", None)
+        crop_y1 = getattr(view, "crop_y1", None)
+        crop_x2 = getattr(view, "crop_x2", None)
+        crop_y2 = getattr(view, "crop_y2", None)
         last_reload = 0.0
         last_infer_enabled_check = 0.0
         with self._lock:
@@ -1341,6 +1357,10 @@ class VirtualViewInferenceManager:
                             fov_deg = float(p["fov_deg"])
                             out_w = int(p["out_w"])
                             out_h = int(p["out_h"])
+                            crop_x1 = p.get("crop_x1")
+                            crop_y1 = p.get("crop_y1")
+                            crop_x2 = p.get("crop_x2")
+                            crop_y2 = p.get("crop_y2")
                             if new_rtsp and new_rtsp != rtsp_url:
                                 rtsp_url = new_rtsp
                                 try:
@@ -1401,7 +1421,19 @@ class VirtualViewInferenceManager:
                 else:
                     if view_mode == "native_resize":
                         try:
-                            persp = cv2.resize(frame, (int(max(1, out_w)), int(max(1, out_h))))
+                            h0, w0 = frame.shape[:2]
+                            x1 = int(crop_x1 or 0)
+                            y1 = int(crop_y1 or 0)
+                            x2 = int(crop_x2) if crop_x2 is not None else int(w0)
+                            y2 = int(crop_y2) if crop_y2 is not None else int(h0)
+                            x1 = max(0, min(x1, w0 - 1))
+                            y1 = max(0, min(y1, h0 - 1))
+                            x2 = max(x1 + 1, min(x2, w0))
+                            y2 = max(y1 + 1, min(y2, h0))
+                            src = frame[y1:y2, x1:x2]
+                            if src is None or getattr(src, "size", 0) == 0:
+                                src = frame
+                            persp = cv2.resize(src, (int(max(1, out_w)), int(max(1, out_h))))
                         except Exception:
                             persp = frame
                     else:

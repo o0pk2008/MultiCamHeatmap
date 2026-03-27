@@ -26,6 +26,30 @@ _MJPEG_NO_CACHE_HEADERS = {
 }
 
 
+def _apply_native_crop(frame, crop_x1=None, crop_y1=None, crop_x2=None, crop_y2=None) -> any:
+    try:
+        h, w = frame.shape[:2]
+    except Exception:
+        return frame
+    x1 = int(crop_x1 or 0)
+    y1 = int(crop_y1 or 0)
+    x2_raw = crop_x2
+    y2_raw = crop_y2
+    x2 = int(x2_raw) if x2_raw is not None else w
+    y2 = int(y2_raw) if y2_raw is not None else h
+    x1 = max(0, min(x1, w - 1))
+    y1 = max(0, min(y1, h - 1))
+    x2 = max(x1 + 1, min(x2, w))
+    y2 = max(y1 + 1, min(y2, h))
+    try:
+        crop = frame[y1:y2, x1:x2]
+        if crop is None or getattr(crop, "size", 0) == 0:
+            return frame
+        return crop
+    except Exception:
+        return frame
+
+
 #
 # NOTE
 # - equirect->perspective 逻辑已提取到 app/panorama.py，便于复用到后台推理任务中。
@@ -78,6 +102,10 @@ def list_all_virtual_views(db: Session = Depends(get_db)) -> List[dict]:
                 "fov_deg": view.fov_deg,
                 "out_w": view.out_w,
                 "out_h": view.out_h,
+                "crop_x1": view.crop_x1,
+                "crop_y1": view.crop_y1,
+                "crop_x2": view.crop_x2,
+                "crop_y2": view.crop_y2,
             }
         )
     return out
@@ -205,6 +233,10 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
         fov_deg = view.fov_deg
         out_w = view.out_w
         out_h = view.out_h
+        crop_x1 = getattr(view, "crop_x1", None)
+        crop_y1 = getattr(view, "crop_y1", None)
+        crop_x2 = getattr(view, "crop_x2", None)
+        crop_y2 = getattr(view, "crop_y2", None)
         try:
             while True:
                 now = time.time()
@@ -228,6 +260,10 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                                 fov_deg = float(v2.fov_deg)
                                 out_w = int(v2.out_w)
                                 out_h = int(v2.out_h)
+                                crop_x1 = getattr(v2, "crop_x1", None)
+                                crop_y1 = getattr(v2, "crop_y1", None)
+                                crop_x2 = getattr(v2, "crop_x2", None)
+                                crop_y2 = getattr(v2, "crop_y2", None)
                     except Exception:
                         pass
                 ok, frame = cap.read()
@@ -244,7 +280,8 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                 else:
                     if view_mode == "native_resize":
                         try:
-                            persp = cv2.resize(frame, (int(max(1, out_w)), int(max(1, out_h))))
+                            src = _apply_native_crop(frame, crop_x1, crop_y1, crop_x2, crop_y2)
+                            persp = cv2.resize(src, (int(max(1, out_w)), int(max(1, out_h))))
                         except Exception:
                             persp = frame
                     else:
@@ -361,6 +398,47 @@ def snapshot_virtual_view(camera_id: int, view_id: int, db: Session = Depends(ge
     if not jpg:
         return Response(status_code=204)
     return Response(content=jpg, media_type="image/jpeg")
+
+
+@router.get("/{camera_id}/virtual-views/{view_id}/source-size")
+def get_virtual_view_source_size(camera_id: int, view_id: int, db: Session = Depends(get_db)):
+    """
+    返回原始 RTSP 输入帧尺寸（未做 virtual PTZ 处理）。
+    用于前端把点选坐标回投到原始画面坐标系。
+    """
+    cam = db.query(models.Camera).filter(models.Camera.id == camera_id).first()
+    if not cam:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    view = (
+        db.query(models.CameraVirtualView)
+        .filter(models.CameraVirtualView.id == view_id, models.CameraVirtualView.camera_id == camera_id)
+        .first()
+    )
+    if not view:
+        raise HTTPException(status_code=404, detail="Virtual view not found")
+
+    cap = cv2.VideoCapture(cam.rtsp_url)
+    try:
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            h, w = frame.shape[:2]
+            return {"width": int(w), "height": int(h)}
+
+        # 读帧失败时，尝试从 CAP_PROP 取尺寸
+        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        if w > 0 and h > 0:
+            return {"width": w, "height": h}
+        raise HTTPException(status_code=502, detail="Failed to read source frame size")
+    finally:
+        try:
+            cap.release()
+        except Exception:
+            pass
 
 
 @router.get("/{camera_id}/virtual-views/{view_id}/analyzed.mjpeg")

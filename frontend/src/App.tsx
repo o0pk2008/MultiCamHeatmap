@@ -97,12 +97,12 @@ const App: React.FC = () => {
       <div className="flex min-h-screen">
         {/* 左侧侧边栏 */}
         <aside
-          className={`flex shrink-0 flex-col border-r border-slate-200 bg-white py-4 shadow-sm transition-[width] duration-200 ${
+          className={`flex shrink-0 flex-col border-r bg-white py-4 shadow-sm transition-[width] duration-200 ${
             sidebarCollapsed ? "w-20 px-2" : "w-60 px-3"
           }`}
         >
-          <div className={`mb-4 flex items-center rounded-xl border border-slate-200 bg-slate-50 py-3 ${sidebarCollapsed ? "justify-center px-2" : "gap-3 px-3"}`}>
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900/5 shadow-inner">
+          <div className={`mb-4 flex items-center rounded-xl py-3 ${sidebarCollapsed ? "justify-center px-2" : "gap-3 px-3"}`}>
+            <div className="flex h-10 w-10 items-center justify-center">
               <svg
                 viewBox="0 0 1024 1024"
                 xmlns="http://www.w3.org/2000/svg"
@@ -126,10 +126,10 @@ const App: React.FC = () => {
             {!sidebarCollapsed && (
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold text-slate-900">
-                  MultiCam Heatmap
+                  Spatial Analytics
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  多路摄像头热力图解决方案
+                  空间定位分析
                 </div>
               </div>
             )}
@@ -2433,6 +2433,8 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
   const previewRefreshTimersRef = useRef<Record<number, number>>({});
   const snapshotPollIdxRef = useRef(0);
   const snapshotInFlightRef = useRef<Record<number, boolean>>({});
+  const [pickTarget, setPickTarget] = useState<{ viewId: number; corner: "tl" | "br" } | null>(null);
+  const [sourceSizeByView, setSourceSizeByView] = useState<Record<number, { w: number; h: number }>>({});
 
   const loadCameras = useCallback(async () => {
     const res = await fetch(`${API_BASE}/api/cameras/`);
@@ -2479,6 +2481,18 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
   useEffect(() => {
     loadViews();
   }, [loadViews]);
+
+  useEffect(() => {
+    if (!pickTarget) return;
+    const v = views.find((x) => x.id === pickTarget.viewId);
+    if (!v) {
+      setPickTarget(null);
+      return;
+    }
+    if ((v.view_mode || "panorama_perspective") !== "native_resize") {
+      setPickTarget(null);
+    }
+  }, [pickTarget, views]);
 
   const refreshSnapshot = useCallback(
     async (v: CameraVirtualView) => {
@@ -2579,6 +2593,76 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
     previewRefreshTimersRef.current[viewId] = t;
   };
 
+  const updateCropCorner = useCallback(
+    (viewId: number, corner: "tl" | "br", x: number, y: number) => {
+      setViews((old) =>
+        old.map((it) => {
+          if (it.id !== viewId) return it;
+          if (corner === "tl") return { ...it, crop_x1: x, crop_y1: y };
+          return { ...it, crop_x2: x, crop_y2: y };
+        }),
+      );
+    },
+    [],
+  );
+
+  const ensureSourceSize = useCallback(
+    async (view: CameraVirtualView & { camera_name?: string }) => {
+      if (sourceSizeByView[view.id]) return true;
+      try {
+        const res = await fetch(`${API_BASE}/api/cameras/${view.camera_id}/virtual-views/${view.id}/source-size`);
+        if (!res.ok) return false;
+        const data = await res.json();
+        const w = Number(data?.width);
+        const h = Number(data?.height);
+        if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return false;
+        setSourceSizeByView((old) => ({ ...old, [view.id]: { w: Number(w), h: Number(h) } }));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [sourceSizeByView],
+  );
+
+  const onPickPointFromPreview = useCallback(
+    (e: React.MouseEvent<HTMLImageElement>, view: CameraVirtualView & { camera_name?: string }) => {
+      if (!pickTarget || pickTarget.viewId !== view.id) return;
+      const img = e.currentTarget;
+      const rect = img.getBoundingClientRect();
+      const boxW = rect.width;
+      const boxH = rect.height;
+      if (boxW <= 1 || boxH <= 1) return;
+      const outW = Math.max(1, Number(view.out_w) || 1);
+      const outH = Math.max(1, Number(view.out_h) || 1);
+      const scale = Math.min(boxW / outW, boxH / outH);
+      const renderW = outW * scale;
+      const renderH = outH * scale;
+      const offX = (boxW - renderW) / 2;
+      const offY = (boxH - renderH) / 2;
+      const px = e.clientX - rect.left;
+      const py = e.clientY - rect.top;
+      const relX = Math.max(0, Math.min(renderW - 1, px - offX));
+      const relY = Math.max(0, Math.min(renderH - 1, py - offY));
+      const u = renderW > 1 ? relX / (renderW - 1) : 0;
+      const v = renderH > 1 ? relY / (renderH - 1) : 0;
+      const raw = sourceSizeByView[view.id];
+      const rawW = Math.max(1, Number(raw?.w || 1));
+      const rawH = Math.max(1, Number(raw?.h || 1));
+      const cx1 = Math.max(0, Math.min(rawW - 1, Number(view.crop_x1 ?? 0) || 0));
+      const cy1 = Math.max(0, Math.min(rawH - 1, Number(view.crop_y1 ?? 0) || 0));
+      const cx2 = Math.max(cx1 + 1, Math.min(rawW, Number(view.crop_x2 ?? rawW) || rawW));
+      const cy2 = Math.max(cy1 + 1, Math.min(rawH, Number(view.crop_y2 ?? rawH) || rawH));
+      const cropW = Math.max(1, cx2 - cx1);
+      const cropH = Math.max(1, cy2 - cy1);
+      const srcX = Math.max(0, Math.min(rawW - 1, Math.round(cx1 + u * (cropW - 1))));
+      const srcY = Math.max(0, Math.min(rawH - 1, Math.round(cy1 + v * (cropH - 1))));
+      updateCropCorner(view.id, pickTarget.corner, srcX, srcY);
+      setPickTarget(null);
+    },
+    [pickTarget, sourceSizeByView, updateCropCorner],
+  );
+
   const createView = async () => {
     if (cameraId === "") return;
     setCreating(true);
@@ -2626,6 +2710,10 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
         fov_deg: v.fov_deg,
         out_w: v.out_w,
         out_h: v.out_h,
+        crop_x1: v.crop_x1 ?? null,
+        crop_y1: v.crop_y1 ?? null,
+        crop_x2: v.crop_x2 ?? null,
+        crop_y2: v.crop_y2 ?? null,
       }),
     });
     if (!res.ok) {
@@ -2715,7 +2803,7 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
           </div>
         </div>
         <div className="mt-2 text-[11px] text-slate-500">
-          说明：支持两种视窗模式：全景透视（yaw/pitch/fov）和原生缩放（适配 PTZ 相机，仅控制输出宽高）。
+          说明：支持两种视窗模式：全景透视（yaw/pitch/fov）和原生缩放（适配 PTZ 相机，可设置输出宽高与裁剪区域）。
         </div>
       </div>
 
@@ -2831,8 +2919,11 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
                         key={`${v.id}-${nonce}`}
                         src={previewUrlWithNonce}
                         alt={`virtual-view-${v.id}`}
-                        className="h-48 w-full object-contain"
+                        className={`h-48 w-full object-contain ${
+                          canEdit && pickTarget?.viewId === v.id ? "cursor-crosshair" : ""
+                        }`}
                         draggable={false}
+                        onClick={(e) => onPickPointFromPreview(e, v)}
                       />
                       ) : (
                         <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
@@ -2845,8 +2936,11 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
                           key={`${v.id}-snap`}
                           src={snapObj}
                           alt={`virtual-view-snap-${v.id}`}
-                          className="h-48 w-full object-contain"
+                          className={`h-48 w-full object-contain ${
+                            canEdit && pickTarget?.viewId === v.id ? "cursor-crosshair" : ""
+                          }`}
                           draggable={false}
+                          onClick={(e) => onPickPointFromPreview(e, v)}
                         />
                       ) : (
                         <div className="flex h-48 items-center justify-center text-[11px] text-slate-500">
@@ -2959,6 +3053,132 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
                           />
                         </div>
                       </label>
+                      {(v.view_mode || "panorama_perspective") === "native_resize" ? (
+                        <>
+                          <label className="col-span-2 text-slate-600">
+                            裁剪左上坐标 (x1, y1)
+                            <div className="mt-0.5 flex gap-1">
+                              <input
+                                type="number"
+                                className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                                value={v.crop_x1 ?? ""}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  setViews((old) =>
+                                    old.map((x) =>
+                                      x.id === v.id ? { ...x, crop_x1: e.target.value === "" ? null : Number(e.target.value) } : x,
+                                    ),
+                                  )
+                                }
+                              />
+                              <input
+                                type="number"
+                                className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                                value={v.crop_y1 ?? ""}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  setViews((old) =>
+                                    old.map((x) =>
+                                      x.id === v.id ? { ...x, crop_y1: e.target.value === "" ? null : Number(e.target.value) } : x,
+                                    ),
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                className={`rounded border px-2 py-1 ${
+                                  pickTarget?.viewId === v.id && pickTarget.corner === "tl"
+                                    ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                                    : "border-slate-300 bg-white text-slate-700"
+                                }`}
+                                disabled={!canEdit}
+                                onClick={() => {
+                                  void (async () => {
+                                    const nextIsActive = !(pickTarget?.viewId === v.id && pickTarget?.corner === "tl");
+                                    if (nextIsActive) {
+                                      const ok = await ensureSourceSize(v);
+                                      if (!ok) {
+                                        alert("无法获取原始画面尺寸，请稍后重试。");
+                                        return;
+                                      }
+                                    }
+                                    setPickTarget((old) =>
+                                      old?.viewId === v.id && old?.corner === "tl" ? null : { viewId: v.id, corner: "tl" },
+                                    );
+                                  })();
+                                }}
+                                title="从左侧画面点击采集左上坐标"
+                              >
+                                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
+                                  <path d="M12 21s7-4.3 7-10a7 7 0 1 0-14 0c0 5.7 7 10 7 10Z" stroke="currentColor" strokeWidth="1.6" />
+                                  <circle cx="12" cy="11" r="2.5" fill="currentColor" />
+                                </svg>
+                              </button>
+                            </div>
+                          </label>
+                          <label className="col-span-2 text-slate-600">
+                            裁剪右下坐标 (x2, y2)
+                            <div className="mt-0.5 flex gap-1">
+                              <input
+                                type="number"
+                                className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                                value={v.crop_x2 ?? ""}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  setViews((old) =>
+                                    old.map((x) =>
+                                      x.id === v.id ? { ...x, crop_x2: e.target.value === "" ? null : Number(e.target.value) } : x,
+                                    ),
+                                  )
+                                }
+                              />
+                              <input
+                                type="number"
+                                className="w-1/2 rounded border border-slate-300 px-2 py-1"
+                                value={v.crop_y2 ?? ""}
+                                disabled={!canEdit}
+                                onChange={(e) =>
+                                  setViews((old) =>
+                                    old.map((x) =>
+                                      x.id === v.id ? { ...x, crop_y2: e.target.value === "" ? null : Number(e.target.value) } : x,
+                                    ),
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                className={`rounded border px-2 py-1 ${
+                                  pickTarget?.viewId === v.id && pickTarget.corner === "br"
+                                    ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                                    : "border-slate-300 bg-white text-slate-700"
+                                }`}
+                                disabled={!canEdit}
+                                onClick={() => {
+                                  void (async () => {
+                                    const nextIsActive = !(pickTarget?.viewId === v.id && pickTarget?.corner === "br");
+                                    if (nextIsActive) {
+                                      const ok = await ensureSourceSize(v);
+                                      if (!ok) {
+                                        alert("无法获取原始画面尺寸，请稍后重试。");
+                                        return;
+                                      }
+                                    }
+                                    setPickTarget((old) =>
+                                      old?.viewId === v.id && old?.corner === "br" ? null : { viewId: v.id, corner: "br" },
+                                    );
+                                  })();
+                                }}
+                                title="从左侧画面点击采集右下坐标"
+                              >
+                                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
+                                  <path d="M12 21s7-4.3 7-10a7 7 0 1 0-14 0c0 5.7 7 10 7 10Z" stroke="currentColor" strokeWidth="1.6" />
+                                  <circle cx="12" cy="11" r="2.5" fill="currentColor" />
+                                </svg>
+                              </button>
+                            </div>
+                          </label>
+                        </>
+                      ) : null}
                       {(v.view_mode || "panorama_perspective") === "panorama_perspective" ? (
                         <label className="col-span-2 text-slate-600">
                           FOV(°)

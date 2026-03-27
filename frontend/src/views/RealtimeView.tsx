@@ -26,19 +26,19 @@ const RealtimeView: React.FC = () => {
   }
 
   return (
-    <div className="space-y-3">
-      <h2 className="text-xl font-semibold text-slate-800">实时画面（最多 9 路）</h2>
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+    <div className="flex h-[calc(100vh-5.5rem)] min-h-0 flex-col gap-3 overflow-hidden">
+      <h2 className="shrink-0 text-xl font-semibold text-slate-800">实时监控画面</h2>
+      <div className="grid min-h-0 flex-1 grid-cols-3 grid-rows-3 gap-3 overflow-hidden">
         {display.map((cam) => (
           <div
             key={cam.id}
-            className="overflow-hidden rounded-lg border border-slate-200 bg-black shadow-sm"
+            className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-black shadow-sm"
           >
-            <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
+            <div className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-slate-50 px-2 py-1 text-xs text-slate-700">
               <span className="font-semibold">{cam.name}</span>
               <span className="text-slate-400">ID: {cam.id}</span>
             </div>
-            <div className="aspect-video w-full bg-black">
+            <div className="min-h-0 flex-1 bg-black">
               {cam.webrtc_url ? (
                 <iframe
                   src={cam.webrtc_url}

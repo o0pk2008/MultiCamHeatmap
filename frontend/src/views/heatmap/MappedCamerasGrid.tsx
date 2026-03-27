@@ -7,7 +7,8 @@ const VirtualViewGridOverlay: React.FC<{
   view: CameraVirtualView;
   cfg: { polygon: Pt[]; grid_rows: number; grid_cols: number };
   highlightCells?: Footfall[] | null;
-}> = ({ view, cfg, highlightCells = null }) => {
+  gridColor?: "white" | "green" | "blue";
+}> = ({ view, cfg, highlightCells = null, gridColor = "white" }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 0, h: 0 });
@@ -103,7 +104,19 @@ const VirtualViewGridOverlay: React.FC<{
       });
     }
 
-    ctx.strokeStyle = "rgba(14,165,233,1.0)";
+    const edgeColor =
+      gridColor === "green"
+        ? "rgba(34,197,94,1.0)"
+        : gridColor === "blue"
+          ? "rgba(14,165,233,1.0)"
+          : "rgba(255,255,255,1.0)";
+    const lineColor =
+      gridColor === "green"
+        ? "rgba(34,197,94,0.55)"
+        : gridColor === "blue"
+          ? "rgba(14,165,233,0.55)"
+          : "rgba(255,255,255,0.55)";
+    ctx.strokeStyle = edgeColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(quadScreen[0].x, quadScreen[0].y);
@@ -113,7 +126,7 @@ const VirtualViewGridOverlay: React.FC<{
     ctx.closePath();
     ctx.stroke();
 
-    ctx.strokeStyle = "rgba(14,165,233,0.55)";
+    ctx.strokeStyle = lineColor;
     ctx.lineWidth = 1;
     for (let r = 1; r < rows; r++) {
       const v = r / rows;
@@ -133,7 +146,7 @@ const VirtualViewGridOverlay: React.FC<{
       ctx.lineTo(p1.x, p1.y);
       ctx.stroke();
     }
-  }, [size, view, cfg, tick, highlightCells]);
+  }, [size, view, cfg, tick, highlightCells, gridColor]);
 
   return (
     <div ref={containerRef} className="pointer-events-none absolute inset-0">
@@ -263,6 +276,7 @@ const MappedCamerasGrid: React.FC<{
   const thumbInFlightRef = useRef<Record<number, boolean>>({});
   const [showMappedCamGrid, setShowMappedCamGrid] = useState(false);
   const [showFootfallOnCamGrid, setShowFootfallOnCamGrid] = useState(false);
+  const [mappedCamGridColor, setMappedCamGridColor] = useState<"white" | "green" | "blue">("white");
   const [allVirtualViews, setAllVirtualViews] = useState<(CameraVirtualView & { camera_name?: string })[]>(
     [],
   );
@@ -296,6 +310,17 @@ const MappedCamerasGrid: React.FC<{
       .then((r) => (r.ok ? r.json() : Promise.resolve([])))
       .then((items) => setAllVirtualViews(items))
       .catch((e) => console.error(e));
+  }, []);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/api/admin/footfall-overlay-config`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (!cfg) return;
+        const c = cfg?.mapped_cam_grid_color === "green" ? "green" : cfg?.mapped_cam_grid_color === "blue" ? "blue" : "white";
+        setMappedCamGridColor(c);
+      })
+      .catch(() => {});
   }, []);
 
   const vvMetaById = useMemo(() => {
@@ -515,6 +540,7 @@ const MappedCamerasGrid: React.FC<{
                                     view={vvMetaById.get(src.virtual_view_id)!}
                                     cfg={vvGridConfigs[src.virtual_view_id]}
                                     highlightCells={showFootfallOnCamGrid ? vvFootfalls[src.virtual_view_id] ?? null : null}
+                                    gridColor={mappedCamGridColor}
                                   />
                                 ) : null
                               }

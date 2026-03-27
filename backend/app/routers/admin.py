@@ -31,6 +31,7 @@ class FootfallOverlayConfigRequest(BaseModel):
     yolo_foot_point_enabled: Optional[bool] = None
     yolo_foot_point_style: Optional[str] = None  # circle | square
     yolo_foot_point_color: Optional[str] = None  # green | blue | white
+    mapped_cam_grid_color: Optional[str] = None  # white | green | blue
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -200,6 +201,7 @@ async def admin_get_footfall_overlay_config():
         "yolo_foot_point_enabled": bool(cfg.get("foot_point_enabled", False)),
         "yolo_foot_point_style": str(cfg.get("foot_point_style", "circle")),
         "yolo_foot_point_color": str(cfg.get("foot_point_color", "green")),
+        "mapped_cam_grid_color": str(cfg.get("mapped_cam_grid_color", "white")),
     }
 
 
@@ -212,6 +214,7 @@ async def admin_set_footfall_overlay_config(req: FootfallOverlayConfigRequest):
         foot_point_enabled=req.yolo_foot_point_enabled,
         foot_point_style=req.yolo_foot_point_style,
         foot_point_color=req.yolo_foot_point_color,
+        mapped_cam_grid_color=req.mapped_cam_grid_color,
     )
     cfg = manager.get_yolo_draw_config()
     return {
@@ -222,4 +225,5 @@ async def admin_set_footfall_overlay_config(req: FootfallOverlayConfigRequest):
         "yolo_foot_point_enabled": bool(cfg.get("foot_point_enabled", False)),
         "yolo_foot_point_style": str(cfg.get("foot_point_style", "circle")),
         "yolo_foot_point_color": str(cfg.get("foot_point_color", "green")),
+        "mapped_cam_grid_color": str(cfg.get("mapped_cam_grid_color", "white")),
     }

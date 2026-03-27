@@ -74,6 +74,7 @@ const SystemSettingsView: React.FC = () => {
   const [yoloFootPointEnabled, setYoloFootPointEnabled] = useState(false);
   const [yoloFootPointStyle, setYoloFootPointStyle] = useState<"circle" | "square">("circle");
   const [yoloFootPointColor, setYoloFootPointColor] = useState<"green" | "blue" | "white">("green");
+  const [mappedCamGridColor, setMappedCamGridColor] = useState<"white" | "green" | "blue">("white");
   const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
   const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [purgeEndDate, setPurgeEndDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -105,6 +106,13 @@ const SystemSettingsView: React.FC = () => {
         setYoloFootPointStyle(data?.yolo_foot_point_style === "square" ? "square" : "circle");
         setYoloFootPointColor(
           data?.yolo_foot_point_color === "blue" ? "blue" : data?.yolo_foot_point_color === "white" ? "white" : "green",
+        );
+        setMappedCamGridColor(
+          data?.mapped_cam_grid_color === "green"
+            ? "green"
+            : data?.mapped_cam_grid_color === "blue"
+              ? "blue"
+              : "white",
         );
       } catch (e) {
         console.error(e);
@@ -303,6 +311,7 @@ const SystemSettingsView: React.FC = () => {
       yolo_foot_point_enabled?: boolean;
       yolo_foot_point_style?: "circle" | "square";
       yolo_foot_point_color?: "green" | "blue" | "white";
+      mapped_cam_grid_color?: "white" | "green" | "blue";
     }) => {
       setSavingFootfallOverlay(true);
       try {
@@ -316,6 +325,7 @@ const SystemSettingsView: React.FC = () => {
             yolo_foot_point_enabled: next.yolo_foot_point_enabled ?? yoloFootPointEnabled,
             yolo_foot_point_style: next.yolo_foot_point_style ?? yoloFootPointStyle,
             yolo_foot_point_color: next.yolo_foot_point_color ?? yoloFootPointColor,
+            mapped_cam_grid_color: next.mapped_cam_grid_color ?? mappedCamGridColor,
           }),
         });
         if (!r.ok) throw new Error("save failed");
@@ -328,6 +338,13 @@ const SystemSettingsView: React.FC = () => {
         setYoloFootPointColor(
           data?.yolo_foot_point_color === "blue" ? "blue" : data?.yolo_foot_point_color === "white" ? "white" : "green",
         );
+        setMappedCamGridColor(
+          data?.mapped_cam_grid_color === "green"
+            ? "green"
+            : data?.mapped_cam_grid_color === "blue"
+              ? "blue"
+              : "white",
+        );
       } catch (e) {
         console.error(e);
         alert("保存失败，请稍后重试。");
@@ -335,7 +352,15 @@ const SystemSettingsView: React.FC = () => {
         setSavingFootfallOverlay(false);
       }
     },
-    [drawFootfallLineOverlay, yoloBoxColor, yoloBoxStyle, yoloFootPointColor, yoloFootPointEnabled, yoloFootPointStyle],
+    [
+      drawFootfallLineOverlay,
+      mappedCamGridColor,
+      yoloBoxColor,
+      yoloBoxStyle,
+      yoloFootPointColor,
+      yoloFootPointEnabled,
+      yoloFootPointStyle,
+    ],
   );
 
   const toggleFootfallOverlay = useCallback(async (checked: boolean) => {
@@ -526,6 +551,24 @@ const SystemSettingsView: React.FC = () => {
               <option value="green">绿色（默认）</option>
               <option value="blue">蓝色</option>
               <option value="white">白色</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="shrink-0">映射网格颜色</span>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1"
+              value={mappedCamGridColor}
+              disabled={savingFootfallOverlay}
+              onChange={(e) => {
+                const v = e.target.value === "green" ? "green" : e.target.value === "blue" ? "blue" : "white";
+                setMappedCamGridColor(v);
+                void saveOverlayConfig({ mapped_cam_grid_color: v });
+              }}
+            >
+              <option value="white">白色（默认）</option>
+              <option value="green">绿色</option>
+              <option value="blue">蓝色</option>
             </select>
           </div>
         </div>

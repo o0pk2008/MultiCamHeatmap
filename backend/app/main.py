@@ -51,6 +51,15 @@ def _ensure_schema_columns() -> None:
                         "ADD COLUMN view_mode VARCHAR(32) NOT NULL DEFAULT 'panorama_perspective'"
                     )
                 )
+        with engine.begin() as conn:
+            if "crop_x1" not in cols:
+                conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_x1 INTEGER"))
+            if "crop_y1" not in cols:
+                conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_y1 INTEGER"))
+            if "crop_x2" not in cols:
+                conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_x2 INTEGER"))
+            if "crop_y2" not in cols:
+                conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_y2 INTEGER"))
     except Exception:
         # 避免迁移失败阻断服务启动
         pass

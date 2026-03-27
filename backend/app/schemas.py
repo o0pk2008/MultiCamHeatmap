@@ -40,6 +40,10 @@ class CameraVirtualViewBase(BaseModel):
     fov_deg: float = 90.0
     out_w: int = 960
     out_h: int = 540
+    crop_x1: Optional[int] = None
+    crop_y1: Optional[int] = None
+    crop_x2: Optional[int] = None
+    crop_y2: Optional[int] = None
 
 
 class CameraVirtualViewCreate(CameraVirtualViewBase):
@@ -55,6 +59,10 @@ class CameraVirtualViewUpdate(BaseModel):
     fov_deg: Optional[float] = None
     out_w: Optional[int] = None
     out_h: Optional[int] = None
+    crop_x1: Optional[int] = None
+    crop_y1: Optional[int] = None
+    crop_x2: Optional[int] = None
+    crop_y2: Optional[int] = None
 
 
 class CameraVirtualViewOut(CameraVirtualViewBase):
