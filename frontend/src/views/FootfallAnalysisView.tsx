@@ -112,6 +112,58 @@ const buildEmptyStats = (): FootfallStats => {
   };
 };
 
+const RollingNumber: React.FC<{ value: number; className?: string; durationMs?: number }> = ({
+  value,
+  className = "",
+  durationMs = 260,
+}) => {
+  const [prev, setPrev] = useState<number>(value);
+  const [animating, setAnimating] = useState(false);
+  const [active, setActive] = useState(false);
+
+  useEffect(() => {
+    if (value === prev) return;
+    setAnimating(true);
+    setActive(false);
+    const raf = window.requestAnimationFrame(() => setActive(true));
+    const t = window.setTimeout(() => {
+      setAnimating(false);
+      setPrev(value);
+      setActive(false);
+    }, durationMs + 30);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.clearTimeout(t);
+    };
+  }, [value, prev, durationMs]);
+
+  if (!animating) return <div className={className}>{value}</div>;
+
+  return (
+    <div className={`relative overflow-hidden ${className}`} style={{ lineHeight: 1.15 }}>
+      <div
+        style={{
+          transform: `translateY(${active ? "100%" : "0%"})`,
+          opacity: active ? 0 : 1,
+          transition: `transform ${durationMs}ms ease, opacity ${durationMs}ms ease`,
+        }}
+      >
+        {prev}
+      </div>
+      <div
+        className="absolute left-0 top-0"
+        style={{
+          transform: `translateY(${active ? "0%" : "-100%"})`,
+          opacity: active ? 1 : 0,
+          transition: `transform ${durationMs}ms ease, opacity ${durationMs}ms ease`,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+};
+
 const VirtualViewMjpeg: React.FC<{
   mjpegUrl: string;
   title: string;
@@ -1123,7 +1175,8 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           radius: ["38%", "62%"],
           avoidLabelOverlap: false,
           itemStyle: { borderRadius: 4, borderColor: "#fff", borderWidth: 2 },
-          label: { show: true, formatter: "{b}: {c}", fontSize: 10 },
+          label: { show: false },
+          labelLine: { show: false },
           data: [
             { value: statsData.genderMale, name: "男", itemStyle: { color: "#3B82F6" } },
             { value: statsData.genderFemale, name: "女", itemStyle: { color: "#EC4899" } },
@@ -1626,7 +1679,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
 
   return (
-    <div className="grid h-[calc(100vh-220px)] min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,1fr,3fr] md:grid-rows-[4fr,2fr]">
+    <div className="grid h-full min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,1fr,3fr] md:grid-rows-[4fr,2fr]">
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-1 md:row-start-1 md:row-span-2">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-sm font-semibold text-slate-800">平面图选择</span>
@@ -1730,11 +1783,11 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           <div className="mb-3 grid grid-cols-2 gap-2">
             <div className="rounded border border-emerald-200 bg-emerald-50 p-2">
               <div className="text-[11px] text-emerald-800">{`${statsTitleDate} 累计进入`}</div>
-              <div className="text-lg font-semibold text-emerald-700">{statsData.inCount}</div>
+              <RollingNumber value={statsData.inCount} className="text-lg font-semibold text-emerald-700" />
             </div>
             <div className="rounded border border-orange-200 bg-orange-50 p-2">
               <div className="text-[11px] text-orange-800">{`${statsTitleDate} 累计离开`}</div>
-              <div className="text-lg font-semibold text-orange-700">{statsData.outCount}</div>
+              <RollingNumber value={statsData.outCount} className="text-lg font-semibold text-orange-700" />
             </div>
           </div>
 
@@ -1765,7 +1818,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 rounded border border-slate-200 bg-slate-50 p-2">
+          <div className="min-h-0 flex flex-1 flex-col rounded border border-slate-200 bg-slate-50 p-2">
             <div className="mb-2 text-xs font-semibold text-slate-700">时段流量趋势（按小时）</div>
             <div className="min-h-0 flex-1">
               <ReactECharts option={trendOption} style={{ height: "100%", width: "100%" }} notMerge />
@@ -2106,13 +2159,15 @@ const FootfallAnalysisView: React.FC<FootfallAnalysisViewProps> = ({
   MappedCamerasGridComponent,
 }) => {
   return (
-    <div className="space-y-4">
+    <div className="flex h-[calc(100vh-96px)] min-h-0 flex-col gap-4">
       <h2 className="text-xl font-semibold text-slate-800">人流量分析</h2>
       <p className="text-xs text-slate-500">配置摄像头进出判定线，并同步校准平面图对应线段。</p>
-      <FootfallAnalysisConfigView
-        FloorPlanCanvasComponent={FloorPlanCanvasComponent}
-        MappedCamerasGridComponent={MappedCamerasGridComponent}
-      />
+      <div className="min-h-0 flex-1">
+        <FootfallAnalysisConfigView
+          FloorPlanCanvasComponent={FloorPlanCanvasComponent}
+          MappedCamerasGridComponent={MappedCamerasGridComponent}
+        />
+      </div>
     </div>
   );
 };
