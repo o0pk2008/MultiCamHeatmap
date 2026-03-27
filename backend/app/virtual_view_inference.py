@@ -1545,11 +1545,13 @@ class VirtualViewInferenceManager:
                             gender = last_genders[i]
                         if last_age_buckets is not None and i < len(last_age_buckets):
                             age_bucket = last_age_buckets[i]
+                        # 注意：cv2.putText 默认字体不支持中文，"男/女" 会显示成 "???"
+                        # 这里使用 ASCII 文本，避免出现乱码占位符。
                         gender_cn = None
                         if gender == "male":
-                            gender_cn = "男"
+                            gender_cn = "M"
                         elif gender == "female":
-                            gender_cn = "女"
+                            gender_cn = "F"
 
                         label = "person"
                         try:
@@ -1558,10 +1560,11 @@ class VirtualViewInferenceManager:
                         except Exception:
                             label = "person"
 
-                        if gender_cn:
+                        if gender_cn and "?" not in str(gender_cn) and "？" not in str(gender_cn):
                             label = f"{label} {gender_cn}"
-                        if age_bucket:
-                            label = f"{label} {age_bucket}"
+                        age_text = str(age_bucket).strip() if age_bucket is not None else ""
+                        if age_text and "?" not in age_text and "？" not in age_text:
+                            label = f"{label} {age_text}"
                         cv2.putText(
                             annotated_img,
                             label,

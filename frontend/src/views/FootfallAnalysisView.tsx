@@ -380,7 +380,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [allLineCfg, setAllLineCfg] = useState<Record<string, LineCfg>>(() => readAllLineCfg());
   const [selectedFloorPlanId, setSelectedFloorPlanId] = useState<number | null>(null);
   const [heatmapSources, setHeatmapSources] = useState<HeatmapSource[]>([]);
-  const [showGrid, setShowGrid] = useState(true);
+  const [showGrid, setShowGrid] = useState(false);
   const [lineP1, setLineP1] = useState<Vec2 | null>(null);
   const [lineP2, setLineP2] = useState<Vec2 | null>(null);
   const [savedLineP1, setSavedLineP1] = useState<Vec2 | null>(null);
@@ -1427,13 +1427,16 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             ctx.strokeStyle = flashColor;
             ctx.lineWidth = 6;
           } else {
-            ctx.strokeStyle = "#38BDF8";
+            // 判定线常态：白色
+            ctx.strokeStyle = "#FFFFFF";
             ctx.lineWidth = 3;
           }
+          ctx.setLineDash([8, 6]);
           ctx.beginPath();
           ctx.moveTo(p1.x, p1.y);
           ctx.lineTo(p2.x, p2.y);
           ctx.stroke();
+          ctx.setLineDash([]);
           const dx = p2.x - p1.x;
           const dy = p2.y - p1.y;
           const len = Math.hypot(dx, dy);
@@ -1443,13 +1446,15 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             const mx = (p1.x + p2.x) / 2;
             const my = (p1.y + p2.y) / 2;
             const d = 26;
-            const drawArrow = (from: Vec2, to: Vec2, color: string) => {
-              ctx.strokeStyle = color;
+            const drawArrow = (from: Vec2, to: Vec2) => {
+              ctx.strokeStyle = "#FFFFFF";
               ctx.lineWidth = 2.5;
+              ctx.setLineDash([6, 5]);
               ctx.beginPath();
               ctx.moveTo(from.x, from.y);
               ctx.lineTo(to.x, to.y);
               ctx.stroke();
+              ctx.setLineDash([]);
               const adx = to.x - from.x;
               const ady = to.y - from.y;
               const al = Math.hypot(adx, ady) || 1;
@@ -1459,7 +1464,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               const py = ux;
               const head = 9;
               const wing = 5;
-              ctx.fillStyle = color;
+              ctx.fillStyle = "#FFFFFF";
               ctx.beginPath();
               ctx.moveTo(to.x, to.y);
               ctx.lineTo(to.x - ux * head + px * wing, to.y - uy * head + py * wing);
@@ -1471,15 +1476,28 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             const inTo = { x: mx + nx * d, y: my + ny * d };
             const outFrom = { x: mx, y: my };
             const outTo = { x: mx - nx * d, y: my - ny * d };
-            drawArrow(inFrom, inTo, "#10B981");
-            drawArrow(outFrom, outTo, "#F97316");
+            drawArrow(inFrom, inTo);
+            drawArrow(outFrom, outTo);
             ctx.font = "12px sans-serif";
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillStyle = "#10B981";
-            ctx.fillText(inLabel, mx + nx * (d + 16), my + ny * (d + 16));
-            ctx.fillStyle = "#F97316";
-            ctx.fillText(outLabel, mx - nx * (d + 16), my - ny * (d + 16));
+            const drawLabelWithBg = (text: string, x: number, y: number) => {
+              const padX = 6;
+              const padY = 3;
+              const m = ctx.measureText(text || "");
+              const tw = Math.ceil(m.width);
+              const th = 14;
+              const rx = x - tw / 2 - padX;
+              const ry = y - th / 2 - padY;
+              const rw = tw + padX * 2;
+              const rh = th + padY * 2;
+              ctx.fillStyle = "rgba(0,0,0,0.55)";
+              ctx.fillRect(rx, ry, rw, rh);
+              ctx.fillStyle = "#FFFFFF";
+              ctx.fillText(text, x, y);
+            };
+            drawLabelWithBg(inLabel, mx + nx * (d + 16), my + ny * (d + 16));
+            drawLabelWithBg(outLabel, mx - nx * (d + 16), my - ny * (d + 16));
           }
         } else {
           ctx.strokeStyle = "#94A3B8";
@@ -1491,8 +1509,9 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           ctx.stroke();
           ctx.setLineDash([]);
         }
-        ctx.fillStyle = "#ffffff";
-        ctx.strokeStyle = "#0EA5E9";
+        // 端点：白色描边 + 不透明白色填充
+        ctx.fillStyle = "#FFFFFF";
+        ctx.strokeStyle = "#FFFFFF";
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(p1.x, p1.y, 5, 0, Math.PI * 2);
@@ -2097,7 +2116,14 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               </div>
             ) : (
               lineCfgRows.map((row) => (
-                <div key={row.key} className="flex-shrink-0 min-w-[220px] rounded-lg border border-slate-200 bg-slate-50 p-2">
+                <div
+                  key={row.key}
+                  className={`flex-shrink-0 min-w-[220px] rounded-lg border p-2 transition-opacity ${
+                    bindCameraId === row.key
+                      ? "border-slate-200 bg-slate-50 opacity-100"
+                      : "border-slate-200 bg-slate-50 opacity-50"
+                  }`}
+                >
                   <div className="mb-1 flex items-center justify-between">
                     <span className="text-[11px] font-semibold text-slate-700">线段编号</span>
                     <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
@@ -2143,11 +2169,6 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               ))
             )}
           </div>
-          {displayP1 && displayP2 ? (
-            <div className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] text-emerald-700">
-              当前预览为已选摄像头绑定线段
-            </div>
-          ) : null}
         </div>
       </div>
     </div>
