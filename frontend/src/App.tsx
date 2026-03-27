@@ -17,6 +17,7 @@ import SystemSettingsView from "./views/SystemSettingsView";
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("realtime");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [shareRoute, setShareRoute] = useState<ShareRoute>(() => parseShareRoute(window.location.hash));
 
   useEffect(() => {
@@ -36,12 +37,71 @@ const App: React.FC = () => {
     return <SharePeoplePage params={shareRoute.params} FloorPlanCanvasComponent={FloorPlanCanvas} />;
   }
 
+  const renderTabIcon = (tab: TabKey) => {
+    const cls = "h-4 w-4";
+    switch (tab) {
+      case "realtime":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.8" />
+            <circle cx="8.5" cy="10" r="1.4" fill="currentColor" />
+            <path d="M7 15l3.2-2.8L13 14.7 16.5 11l2.5 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+        );
+      case "heatmap":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <circle cx="7" cy="7" r="2" fill="currentColor" />
+            <circle cx="16" cy="8" r="3" fill="currentColor" opacity="0.8" />
+            <circle cx="10" cy="15" r="3" fill="currentColor" opacity="0.55" />
+            <circle cx="17" cy="16" r="2" fill="currentColor" opacity="0.4" />
+          </svg>
+        );
+      case "people":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <circle cx="9" cy="8" r="3" stroke="currentColor" strokeWidth="1.8" />
+            <circle cx="17" cy="9" r="2.5" stroke="currentColor" strokeWidth="1.8" />
+            <path d="M4.5 19c.4-3 2.4-4.5 4.5-4.5h.2c2 0 4.1 1.5 4.5 4.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M14 19c.3-2.1 1.7-3.1 3.1-3.1h.1c1.4 0 2.8 1 3.1 3.1" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+        );
+      case "footfall":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <path d="M5 6v12M19 6v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M8 9h8M8 15h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M11 7l-3 2 3 2M13 17l3-2-3-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        );
+      case "mapping":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2V6z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+            <path d="M9 4v14M15 6v14" stroke="currentColor" strokeWidth="1.8" />
+          </svg>
+        );
+      case "settings":
+      default:
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <path d="M12 8.5A3.5 3.5 0 1 1 12 15.5A3.5 3.5 0 0 1 12 8.5Z" stroke="currentColor" strokeWidth="1.8" />
+            <path d="M19.4 13.5a7.8 7.8 0 0 0 .1-1.5 7.8 7.8 0 0 0-.1-1.5l2-1.6-2-3.5-2.4 1a7.5 7.5 0 0 0-2.6-1.5L14 2h-4l-.4 2.4a7.5 7.5 0 0 0-2.6 1.5l-2.4-1-2 3.5 2 1.6A7.8 7.8 0 0 0 4.5 12c0 .5 0 1 .1 1.5l-2 1.6 2 3.5 2.4-1a7.5 7.5 0 0 0 2.6 1.5L10 22h4l.4-2.4a7.5 7.5 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.6Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+          </svg>
+        );
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900">
       <div className="flex min-h-screen">
         {/* 左侧侧边栏 */}
-        <aside className="w-60 shrink-0 border-r border-slate-200 bg-white px-3 py-4 shadow-sm">
-          <div className="mb-4 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-3">
+        <aside
+          className={`flex shrink-0 flex-col border-r border-slate-200 bg-white py-4 shadow-sm transition-[width] duration-200 ${
+            sidebarCollapsed ? "w-20 px-2" : "w-60 px-3"
+          }`}
+        >
+          <div className={`mb-4 flex items-center rounded-xl border border-slate-200 bg-slate-50 py-3 ${sidebarCollapsed ? "justify-center px-2" : "gap-3 px-3"}`}>
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-slate-900/5 shadow-inner">
               <svg
                 viewBox="0 0 1024 1024"
@@ -63,54 +123,86 @@ const App: React.FC = () => {
                 <path d="M754.688 629.76h240.128v240.64h-240.128z" fill="#A08FFB"></path>
               </svg>
             </div>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-semibold text-slate-900">
-                MultiCam Heatmap
+            {!sidebarCollapsed && (
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold text-slate-900">
+                  MultiCam Heatmap
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  多路摄像头热力图解决方案
+                </div>
               </div>
-              <div className="text-[11px] text-slate-500">
-                多路摄像头热力图解决方案
-              </div>
-            </div>
+            )}
           </div>
 
-          <nav className="space-y-2">
+          <nav className="flex-1 space-y-2">
             <SidebarTabButton
               label="实时画面"
+              icon={renderTabIcon("realtime")}
               tab="realtime"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
             <SidebarTabButton
               label="热力图"
+              icon={renderTabIcon("heatmap")}
               tab="heatmap"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
             <SidebarTabButton
               label="人员位置"
+              icon={renderTabIcon("people")}
               tab="people"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
             <SidebarTabButton
               label="人流量分析"
+              icon={renderTabIcon("footfall")}
               tab="footfall"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
             <SidebarTabButton
               label="映射管理"
+              icon={renderTabIcon("mapping")}
               tab="mapping"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
             <SidebarTabButton
               label="系统设置"
+              icon={renderTabIcon("settings")}
               tab="settings"
               activeTab={activeTab}
+              collapsed={sidebarCollapsed}
               onChange={setActiveTab}
             />
           </nav>
+
+          <div className="mt-3 border-t border-slate-200 pt-3">
+            <button
+              type="button"
+              className={`flex w-full items-center rounded-lg border border-slate-200 bg-white py-2 text-sm text-slate-700 transition hover:bg-slate-50 ${sidebarCollapsed ? "justify-center px-2" : "gap-2 px-3"}`}
+              onClick={() => setSidebarCollapsed((v) => !v)}
+              title={sidebarCollapsed ? "展开菜单" : "收起菜单"}
+            >
+              <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" aria-hidden="true">
+                {sidebarCollapsed ? (
+                  <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                ) : (
+                  <path d="M15 6l-6 6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                )}
+              </svg>
+              {!sidebarCollapsed && <span>收起菜单</span>}
+            </button>
+          </div>
         </aside>
 
         {/* 右侧内容区 */}

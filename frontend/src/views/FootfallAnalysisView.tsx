@@ -1767,13 +1767,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         const my = (p1.y + p2.y) / 2;
         const d = 20;
 
-        ctx.strokeStyle = row.active ? "#38BDF8" : row.enabled ? "#60A5FA" : "rgba(148,163,184,0.7)";
-        ctx.lineWidth = row.active ? 3.5 : 2.2;
+        const mainStroke = row.active ? "#38BDF8" : row.enabled ? "#60A5FA" : "rgba(148,163,184,0.9)";
+        // 先画一层深色描边，保证在浅色/亮色平面图上也清晰可见
+        ctx.strokeStyle = "rgba(15,23,42,0.65)";
+        ctx.lineWidth = row.active ? 5.2 : 3.8;
         if (!row.enabled) {
           ctx.setLineDash([6, 4]);
         } else {
           ctx.setLineDash([]);
         }
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+        // 再画主线
+        ctx.strokeStyle = mainStroke;
+        ctx.lineWidth = row.active ? 3.5 : 2.4;
         ctx.beginPath();
         ctx.moveTo(p1.x, p1.y);
         ctx.lineTo(p2.x, p2.y);
