@@ -428,25 +428,25 @@ const MappedCamerasGrid: React.FC<{
   }, [showMappedCamGrid, sources, vvGridConfigs]);
 
   return (
-    <div className="flex min-h-0 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+    <div className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-sm font-semibold text-slate-800">映射摄像头画面</span>
+        <span className="text-sm font-semibold text-slate-800">监控画面</span>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-1 text-[11px] text-slate-600">
             <input type="checkbox" checked={showMappedCamGrid} onChange={(e) => setShowMappedCamGrid(e.target.checked)} />
-            显示映射网格
+            映射网格
           </label>
           <label className="flex items-center gap-1 text-[11px] text-slate-600">
             <input type="checkbox" checked={showFootfallOnCamGrid} onChange={(e) => setShowFootfallOnCamGrid(e.target.checked)} disabled={!analyzing} />
-            显示落脚点
+            落点分布
           </label>
           <span className="text-[11px] text-slate-400">用于检查映射坐标</span>
         </div>
       </div>
       {sources.length === 0 ? (
-        <p className="text-xs text-slate-500">暂无可用摄像头，请先在“摄像头管理”中添加并启用，后续在“映射管理”中关联到平面图。</p>
+        <p className="text-xs text-slate-500">暂无可用监控画面，请先在“设备管理”中添加并启用，后续在“映射管理”中关联到平面图。</p>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col gap-3">
+        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
           <div className="grid auto-rows-max grid-cols-1 items-start gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {Array.from({ length: slotCount }).map((_, slotIdx) => {
               const key = pinnedSlots[slotIdx] || "";
@@ -490,7 +490,7 @@ const MappedCamerasGrid: React.FC<{
                     <span className="truncate">{src ? (src.kind === "virtual" ? `${src.camera_name} / ${src.virtual_view_name}` : src.camera_name) : `槽位 ${slotIdx + 1}`}</span>
                     <span className="text-slate-400">{src ? (src.kind === "virtual" ? `VV:${src.virtual_view_id}` : `ID:${src.camera_id}`) : "拖拽替换"}</span>
                   </div>
-                  <div className="aspect-[4/3] w-full bg-black">
+                  <div className="aspect-square w-full bg-black">
                     {src ? (
                       src.kind === "virtual" && src.virtual_view_id ? (
                         (() => {
@@ -571,7 +571,7 @@ const MappedCamerasGrid: React.FC<{
                             <span className="truncate">{s.kind === "virtual" ? `${s.camera_name} / ${s.virtual_view_name}` : s.camera_name}</span>
                             <span className="text-slate-400">{s.kind === "virtual" ? `VV:${s.virtual_view_id}` : `ID:${s.camera_id}`}</span>
                           </div>
-                          <div className="aspect-[4/3] w-full bg-black">
+                          <div className="aspect-square w-full bg-black">
                             {s.kind === "virtual" && vvId ? (
                               snap ? <img src={snap} className="h-full w-full object-contain" alt={`thumb-vv-${vvId}`} draggable={false} /> : <div className="flex h-full w-full items-center justify-center text-[11px] text-slate-200">暂无缩略图</div>
                             ) : (

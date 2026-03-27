@@ -1938,7 +1938,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               ) : null}
             </div>
             <div className="flex min-h-0 flex-1 flex-col rounded border border-slate-200 bg-slate-50 p-2">
-              <div className="mb-2 text-xs font-semibold text-slate-700">年龄分层</div>
+              <div className="mb-2 text-xs font-semibold text-slate-700">年龄分布</div>
               <div className="min-h-0 flex-1">
                 <ReactECharts option={ageOption} style={{ height: "100%", width: "100%" }} notMerge />
               </div>
@@ -1963,7 +1963,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-3 md:row-start-1">
         <div className="mb-2 flex items-center justify-between">
-          <span className="text-sm font-semibold text-slate-800">摄像头选择</span>
+          <span className="text-sm font-semibold text-slate-800">监控画面选择</span>
           <select
             className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
             value={bindCameraId}
@@ -1972,7 +1972,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               setBindCameraId(e.target.value);
             }}
           >
-            {bindCameraOptions.length === 0 && <option value="">无摄像头</option>}
+            {bindCameraOptions.length === 0 && <option value="">无监控画面</option>}
             {bindCameraOptions.map((it) => (
               <option key={it.key} value={it.key}>
                 {it.label}
@@ -1982,7 +1982,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         </div>
 
         <div className="mb-2 text-[11px] text-slate-500">
-          参考映射绑定交互：先选摄像头，再在画面上两次点击绘制进出判定线。
+          参考映射绑定交互：先选监控画面，再在画面上两次点击绘制进出判定线。
         </div>
         <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
           {selectedCameraOpt ? (
@@ -2160,7 +2160,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       </div>
 
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-2 md:row-start-1 md:row-span-2">
-        <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍（进入方向）</div>
+        <div className="mb-2 text-sm font-semibold text-slate-800">人脸分析记录</div>
         <div
           ref={faceCaptureContainerRef}
           className="flex min-h-0 flex-1 flex-col overflow-y-auto pr-1"
@@ -2222,12 +2222,12 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       </div>
 
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-3 md:row-start-2">
-        <div className="mb-3 text-sm font-semibold text-slate-800">进出判定线配置</div>
+        <div className="mb-3 text-sm font-semibold text-slate-800">判定线配置</div>
         <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
           <div className="flex flex-row gap-2 overflow-x-auto pb-1">
             {lineCfgRows.length === 0 ? (
               <div className="flex-shrink-0 min-w-[220px] rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs text-slate-500">
-                暂无已保存线段，请先在摄像头画面中绘制并保存。
+                暂无已保存线段，请先在监控画面中绘制并保存。
               </div>
             ) : (
               lineCfgRows.map((row) => (
@@ -2244,7 +2244,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                     <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
                   </div>
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-700">绑定摄像头</span>
+                    <span className="text-[11px] font-semibold text-slate-700">绑定设备</span>
                     <span
                       className="max-w-[170px] truncate rounded bg-white px-2 py-0.5 text-xs text-slate-700"
                       title={row.label}
@@ -2253,7 +2253,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                     </span>
                   </div>
                   <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-700">摄像头编号</span>
+                    <span className="text-[11px] font-semibold text-slate-700">设备编号</span>
                     <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.cameraId}</span>
                   </div>
                   <div className="rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-700">
@@ -2267,7 +2267,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                       className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
                       onClick={() => {
                         setBindCameraId(row.key);
-                        setDrawHint("已切换到该线段绑定摄像头");
+                        setDrawHint("已切换到该线段绑定设备");
                       }}
                     >
                       查看

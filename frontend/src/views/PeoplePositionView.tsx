@@ -291,9 +291,9 @@ const PeoplePositionView: React.FC<PeoplePositionViewProps> = ({
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold text-slate-800">人员位置与映射摄像头</h2>
+      <h2 className="text-xl font-semibold text-slate-800">人员位置监控</h2>
       <p className="text-xs text-slate-500">
-        左侧显示平面图网格内的人员 POI（由 YOLO 落脚点映射得到），右侧展示参与映射的摄像头画面用于核对。
+        左侧显示平面图网格内的人员 POI，右侧展示参与映射监控画面用于核对。
       </p>
 
       <div className="mb-2 flex items-center justify-between">

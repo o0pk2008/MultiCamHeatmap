@@ -1031,7 +1031,7 @@ const MappingView: React.FC = () => {
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-slate-800">映射管理</h2>
       <p className="text-xs text-slate-500">
-        管理热力图底图（平面图）、摄像头以及它们之间的映射绑定关系。
+        管理热力图底图（平面图）、监控设备以及它们之间的映射绑定关系。
       </p>
 
       {/* 子标签页切换 */}
@@ -1052,7 +1052,7 @@ const MappingView: React.FC = () => {
           className={subTabClass("cameras")}
           onClick={() => setMappingTab("cameras")}
         >
-          摄像头管理
+          设备管理
         </button>
         <button
           className={subTabClass("floorPlans")}
@@ -1164,7 +1164,7 @@ const MappingView: React.FC = () => {
                   </div>
                 ) : null}
 
-                <div className="text-[11px] font-semibold text-slate-700">摄像头绑定列表</div>
+                <div className="text-[11px] font-semibold text-slate-700">设备绑定列表</div>
                 <div className="max-h-28 overflow-y-auto rounded border border-slate-200 bg-slate-50 p-2">
                   {bindSourceList.length === 0 ? (
                     <div className="text-[11px] text-slate-400">暂无绑定关系</div>
@@ -1234,7 +1234,7 @@ const MappingView: React.FC = () => {
           {/* 右侧：选择摄像头并预览 */}
           <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 flex items-center justify-between">
-              <span className="text-sm font-semibold text-slate-800">摄像头选择</span>
+              <span className="text-sm font-semibold text-slate-800">监控画面选择</span>
               <select
                 className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
                 value={bindCameraId}
@@ -1803,15 +1803,12 @@ const MappingView: React.FC = () => {
           {/* 摄像头预览右侧：映射数据列表（独立面板） */}
           <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-white p-0 shadow-sm">
             <div className="border-b border-slate-200 bg-slate-50 px-3 py-3">
-              <div className="text-sm font-semibold text-slate-800">映射数据列表</div>
-              <div className="mt-0.5 text-[11px] text-slate-500">
-                平面图网格ID ↔ 摄像头画面网格ID
-              </div>
+              <div className="text-sm font-semibold text-slate-800">空间数据映射</div>
             </div>
             <div className="border-b border-slate-200 p-3">
               <div className="text-[11px] text-slate-600">
                 <div>
-                  摄像头格子：
+                  映射网格：
                   <span className="ml-1 font-mono text-slate-800">
                     {vpSelectedCell
                       ? `${vpSelectedCell.row * Math.max(1, Number(vpCols) || 1) + vpSelectedCell.col} (${vpSelectedCell.row}-${vpSelectedCell.col})`
@@ -1819,7 +1816,7 @@ const MappingView: React.FC = () => {
                   </span>
                 </div>
                 <div className="mt-1">
-                  平面图格子：
+                  平面图网格：
                   <span className="ml-1 font-mono text-slate-800">
                     {fpSelectedCell && bindFloorPlanId !== "" && typeof bindFloorPlanId === "number"
                       ? `${fpSelectedCell.row * (Math.max(1, Number(bindGridCols) || 1)) + fpSelectedCell.col} (${fpSelectedCell.row}-${fpSelectedCell.col})`
@@ -2073,7 +2070,7 @@ const MappingView: React.FC = () => {
                 <div className="text-xs text-slate-500">加载中…</div>
               ) : cellMappings.length === 0 ? (
                 <div className="rounded border border-dashed border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-500">
-                  暂无映射关系。先在右侧画面点选一个摄像头格子，再在左侧点选一个平面图格子，点击“绑定”。
+                  暂无映射关系。先在右侧画面点选一个映射网格，再在左侧点选一个平面图网格，点击“绑定”。
                 </div>
               ) : (
                 <div className="space-y-2">
@@ -3179,7 +3176,7 @@ const CameraManageView: React.FC = () => {
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold text-slate-800">摄像头管理</h2>
+      <h2 className="text-xl font-semibold text-slate-800">设备管理</h2>
 
       {/* 上方：左右两栏 */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

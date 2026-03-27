@@ -480,9 +480,9 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
 
   return (
     <div className="space-y-4">
-      <h2 className="text-xl font-semibold text-slate-800">热力图与映射摄像头</h2>
+      <h2 className="text-xl font-semibold text-slate-800">热力图监控</h2>
       <p className="text-xs text-slate-500">
-        左侧显示当前选择的平面图热力图，右侧以宫格形式展示参与该热力图的摄像头画面。映射关系和底图上传将在“映射管理”模块中配置。
+        左侧显示当前选择的平面图热力图，右侧以宫格形式展示参与该热力图的监控画面。映射关系和底图上传将在“映射管理”模块中配置。
       </p>
       <div className="mb-2 flex items-center justify-between">
         <div />
@@ -597,7 +597,7 @@ const HeatmapView: React.FC<HeatmapViewProps> = ({
               <label className="flex items-center gap-1 text-[11px] text-slate-600"><input type="checkbox" checked={showHeatmapGrid} onChange={(e) => setShowHeatmapGrid(e.target.checked)} />显示网格</label>
               <label className="flex items-center gap-1 text-[11px] text-slate-600"><input type="checkbox" checked={showHeatmapLegend} onChange={(e) => setShowHeatmapLegend(e.target.checked)} />显示色标</label>
               <label className="flex items-center gap-1 text-[11px] text-slate-600"><input type="checkbox" checked={heatmapRecentMode} onChange={(e) => setHeatmapRecentMode(e.target.checked)} />最近热度</label>
-              <label className="flex items-center gap-1 text-[11px] text-slate-600"><input type="checkbox" checked={showPeopleOverlay} onChange={(e) => setShowPeopleOverlay(e.target.checked)} disabled={heatmapDataMode !== "live"} />显示人员位置</label>
+              <label className="flex items-center gap-1 text-[11px] text-slate-600"><input type="checkbox" checked={showPeopleOverlay} onChange={(e) => setShowPeopleOverlay(e.target.checked)} disabled={heatmapDataMode !== "live"} />人员位置</label>
               <select className="rounded border border-slate-300 bg-white px-2 py-1 text-xs" value={heatmapScale} onChange={(e) => setHeatmapScale(e.target.value as any)}><option value="log">对数</option><option value="linear">线性</option></select>
               <select className="rounded border border-slate-300 bg-white px-2 py-1 text-xs" value={heatmapAlphaMode} onChange={(e) => setHeatmapAlphaMode(e.target.value as any)}><option value="byValue">随强度</option><option value="fixed">固定</option></select>
               <span className="text-[11px] text-slate-500">选择平面图：</span>
