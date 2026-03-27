@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from .. import models
 from ..db import DB_URL, SessionLocal
+from ..virtual_view_inference import manager
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -21,6 +22,15 @@ class PurgeByFloorPlanRequest(BaseModel):
     start_date: Optional[str] = None  # YYYY-MM-DD (local date with tz_offset_minutes)
     end_date: Optional[str] = None    # YYYY-MM-DD
     tz_offset_minutes: Optional[int] = None
+
+
+class FootfallOverlayConfigRequest(BaseModel):
+    draw_footfall_line_overlay: bool
+    yolo_box_style: Optional[str] = None  # rect | corners_rounded
+    yolo_box_color: Optional[str] = None  # green | blue | white
+    yolo_foot_point_enabled: Optional[bool] = None
+    yolo_foot_point_style: Optional[str] = None  # circle | square
+    yolo_foot_point_color: Optional[str] = None  # green | blue | white
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -177,4 +187,39 @@ async def admin_purge_footfall_events(req: PurgeByFloorPlanRequest):
         "purge_mode": req.purge_mode,
         "start_ts": start_ts,
         "end_ts": end_ts,
+    }
+
+
+@router.get("/footfall-overlay-config")
+async def admin_get_footfall_overlay_config():
+    cfg = manager.get_yolo_draw_config()
+    return {
+        "draw_footfall_line_overlay": bool(manager.get_draw_footfall_line_overlay()),
+        "yolo_box_style": str(cfg.get("box_style", "corners_rounded")),
+        "yolo_box_color": str(cfg.get("box_color", "white")),
+        "yolo_foot_point_enabled": bool(cfg.get("foot_point_enabled", False)),
+        "yolo_foot_point_style": str(cfg.get("foot_point_style", "circle")),
+        "yolo_foot_point_color": str(cfg.get("foot_point_color", "green")),
+    }
+
+
+@router.post("/footfall-overlay-config")
+async def admin_set_footfall_overlay_config(req: FootfallOverlayConfigRequest):
+    manager.set_draw_footfall_line_overlay(bool(req.draw_footfall_line_overlay))
+    manager.set_yolo_draw_config(
+        box_style=req.yolo_box_style,
+        box_color=req.yolo_box_color,
+        foot_point_enabled=req.yolo_foot_point_enabled,
+        foot_point_style=req.yolo_foot_point_style,
+        foot_point_color=req.yolo_foot_point_color,
+    )
+    cfg = manager.get_yolo_draw_config()
+    return {
+        "status": "ok",
+        "draw_footfall_line_overlay": bool(manager.get_draw_footfall_line_overlay()),
+        "yolo_box_style": str(cfg.get("box_style", "corners_rounded")),
+        "yolo_box_color": str(cfg.get("box_color", "white")),
+        "yolo_foot_point_enabled": bool(cfg.get("foot_point_enabled", False)),
+        "yolo_foot_point_style": str(cfg.get("foot_point_style", "circle")),
+        "yolo_foot_point_color": str(cfg.get("foot_point_color", "green")),
     }

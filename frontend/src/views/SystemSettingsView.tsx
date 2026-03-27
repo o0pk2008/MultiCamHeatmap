@@ -66,6 +66,13 @@ const SystemSettingsView: React.FC = () => {
   const [downloading, setDownloading] = useState(false);
   const [purgingHeatmap, setPurgingHeatmap] = useState(false);
   const [purgingFootfall, setPurgingFootfall] = useState(false);
+  const [drawFootfallLineOverlay, setDrawFootfallLineOverlay] = useState(false);
+  const [savingFootfallOverlay, setSavingFootfallOverlay] = useState(false);
+  const [yoloBoxStyle, setYoloBoxStyle] = useState<"rect" | "corners_rounded">("corners_rounded");
+  const [yoloBoxColor, setYoloBoxColor] = useState<"green" | "blue" | "white">("white");
+  const [yoloFootPointEnabled, setYoloFootPointEnabled] = useState(false);
+  const [yoloFootPointStyle, setYoloFootPointStyle] = useState<"circle" | "square">("circle");
+  const [yoloFootPointColor, setYoloFootPointColor] = useState<"green" | "blue" | "white">("green");
   const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
   const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [purgeEndDate, setPurgeEndDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -82,6 +89,27 @@ const SystemSettingsView: React.FC = () => {
       }
     };
     void load();
+  }, []);
+
+  useEffect(() => {
+    const loadOverlayConfig = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/footfall-overlay-config`);
+        if (!r.ok) return;
+        const data = await r.json();
+        setDrawFootfallLineOverlay(Boolean(data?.draw_footfall_line_overlay));
+        setYoloBoxStyle(data?.yolo_box_style === "rect" ? "rect" : "corners_rounded");
+        setYoloBoxColor(data?.yolo_box_color === "green" ? "green" : data?.yolo_box_color === "blue" ? "blue" : "white");
+        setYoloFootPointEnabled(Boolean(data?.yolo_foot_point_enabled ?? false));
+        setYoloFootPointStyle(data?.yolo_foot_point_style === "square" ? "square" : "circle");
+        setYoloFootPointColor(
+          data?.yolo_foot_point_color === "blue" ? "blue" : data?.yolo_foot_point_color === "white" ? "white" : "green",
+        );
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadOverlayConfig();
   }, []);
 
   const refreshStats = useCallback(async () => {
@@ -224,6 +252,54 @@ const SystemSettingsView: React.FC = () => {
     }
   }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
 
+  const saveOverlayConfig = useCallback(
+    async (next: {
+      draw_footfall_line_overlay?: boolean;
+      yolo_box_style?: "rect" | "corners_rounded";
+      yolo_box_color?: "green" | "blue" | "white";
+      yolo_foot_point_enabled?: boolean;
+      yolo_foot_point_style?: "circle" | "square";
+      yolo_foot_point_color?: "green" | "blue" | "white";
+    }) => {
+      setSavingFootfallOverlay(true);
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/footfall-overlay-config`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            draw_footfall_line_overlay: next.draw_footfall_line_overlay ?? drawFootfallLineOverlay,
+            yolo_box_style: next.yolo_box_style ?? yoloBoxStyle,
+            yolo_box_color: next.yolo_box_color ?? yoloBoxColor,
+            yolo_foot_point_enabled: next.yolo_foot_point_enabled ?? yoloFootPointEnabled,
+            yolo_foot_point_style: next.yolo_foot_point_style ?? yoloFootPointStyle,
+            yolo_foot_point_color: next.yolo_foot_point_color ?? yoloFootPointColor,
+          }),
+        });
+        if (!r.ok) throw new Error("save failed");
+        const data = await r.json().catch(() => ({}));
+        setDrawFootfallLineOverlay(Boolean(data?.draw_footfall_line_overlay));
+        setYoloBoxStyle(data?.yolo_box_style === "rect" ? "rect" : "corners_rounded");
+        setYoloBoxColor(data?.yolo_box_color === "green" ? "green" : data?.yolo_box_color === "blue" ? "blue" : "white");
+        setYoloFootPointEnabled(Boolean(data?.yolo_foot_point_enabled ?? false));
+        setYoloFootPointStyle(data?.yolo_foot_point_style === "square" ? "square" : "circle");
+        setYoloFootPointColor(
+          data?.yolo_foot_point_color === "blue" ? "blue" : data?.yolo_foot_point_color === "white" ? "white" : "green",
+        );
+      } catch (e) {
+        console.error(e);
+        alert("保存失败，请稍后重试。");
+      } finally {
+        setSavingFootfallOverlay(false);
+      }
+    },
+    [drawFootfallLineOverlay, yoloBoxColor, yoloBoxStyle, yoloFootPointColor, yoloFootPointEnabled, yoloFootPointStyle],
+  );
+
+  const toggleFootfallOverlay = useCallback(async (checked: boolean) => {
+    setDrawFootfallLineOverlay(checked);
+    await saveOverlayConfig({ draw_footfall_line_overlay: checked });
+  }, [saveOverlayConfig]);
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-slate-800">系统设置</h2>
@@ -307,6 +383,109 @@ const SystemSettingsView: React.FC = () => {
         >
           {downloading ? "下载中..." : "下载数据库备份"}
         </button>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-2 text-sm font-semibold text-slate-800">人流量分析显示设置</div>
+        <p className="mb-3 text-xs text-slate-500">
+          控制人流量分析中摄像头 YOLO 画面是否绘制进出判定线（仅影响可视化，不影响统计结果）。
+        </p>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={!drawFootfallLineOverlay}
+              disabled={savingFootfallOverlay}
+              onChange={(e) => void toggleFootfallOverlay(!e.target.checked)}
+            />
+            <span>隐藏判定线（默认勾选）</span>
+          </label>
+
+          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
+            <input
+              type="checkbox"
+              checked={!yoloFootPointEnabled}
+              disabled={savingFootfallOverlay}
+              onChange={(e) => {
+                const hideChecked = e.target.checked;
+                const enabled = !hideChecked;
+                setYoloFootPointEnabled(enabled);
+                void saveOverlayConfig({ yolo_foot_point_enabled: enabled });
+              }}
+            />
+            <span>隐藏脚部点（默认勾选）</span>
+          </label>
+
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="shrink-0">YOLO 框样式</span>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1"
+              value={yoloBoxStyle}
+              disabled={savingFootfallOverlay}
+              onChange={(e) => {
+                const v = e.target.value === "corners_rounded" ? "corners_rounded" : "rect";
+                setYoloBoxStyle(v);
+                void saveOverlayConfig({ yolo_box_style: v });
+              }}
+            >
+              <option value="rect">矩形框</option>
+              <option value="corners_rounded">仅四角线段（圆角，默认）</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="shrink-0">YOLO 框颜色</span>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1"
+              value={yoloBoxColor}
+              disabled={savingFootfallOverlay}
+              onChange={(e) => {
+                const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
+                setYoloBoxColor(v);
+                void saveOverlayConfig({ yolo_box_color: v });
+              }}
+            >
+              <option value="green">绿色</option>
+              <option value="blue">蓝色</option>
+              <option value="white">白色（默认）</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="shrink-0">脚部点样式</span>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1"
+              value={yoloFootPointStyle}
+              disabled={savingFootfallOverlay || !yoloFootPointEnabled}
+              onChange={(e) => {
+                const v = e.target.value === "square" ? "square" : "circle";
+                setYoloFootPointStyle(v);
+                void saveOverlayConfig({ yolo_foot_point_style: v });
+              }}
+            >
+              <option value="circle">圆形点</option>
+              <option value="square">正方形点</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 text-xs text-slate-700">
+            <span className="shrink-0">脚部点颜色</span>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1"
+              value={yoloFootPointColor}
+              disabled={savingFootfallOverlay || !yoloFootPointEnabled}
+              onChange={(e) => {
+                const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
+                setYoloFootPointColor(v);
+                void saveOverlayConfig({ yolo_foot_point_color: v });
+              }}
+            >
+              <option value="green">绿色（默认）</option>
+              <option value="blue">蓝色</option>
+              <option value="white">白色</option>
+            </select>
+          </div>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

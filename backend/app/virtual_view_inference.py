@@ -119,6 +119,15 @@ class VirtualViewInferenceManager:
         # 当前在后端用于 footfall 判定的直线（用于在 YOLO 画面里可视化对齐）
         # vv_id -> ((p1_u,p1_v),(p2_u,p2_v))
         self._footfall_line_uv_by_vv: Dict[int, Tuple[Tuple[float, float], Tuple[float, float]]] = {}
+        # 是否在 analyzed 画面里绘制 footfall 判定线（系统设置开关）
+        self._draw_footfall_line_overlay: bool = False
+        # YOLO 框样式与颜色（系统设置）
+        self._yolo_box_style: str = "corners_rounded"  # rect | corners_rounded
+        self._yolo_box_color: str = "white"  # green | blue | white
+        # YOLO 脚部点开关/样式/颜色（系统设置）
+        self._yolo_foot_point_enabled: bool = False
+        self._yolo_foot_point_style: str = "circle"  # circle | square
+        self._yolo_foot_point_color: str = "green"  # green | blue | white
 
     def set_footfall_line_uv(
         self, virtual_view_id: int, p1_uv: Tuple[float, float], p2_uv: Tuple[float, float]
@@ -129,6 +138,93 @@ class VirtualViewInferenceManager:
     def clear_footfall_line_uv(self, virtual_view_id: int) -> None:
         with self._lock:
             self._footfall_line_uv_by_vv.pop(int(virtual_view_id), None)
+
+    def set_draw_footfall_line_overlay(self, enabled: bool) -> None:
+        with self._lock:
+            self._draw_footfall_line_overlay = bool(enabled)
+
+    def get_draw_footfall_line_overlay(self) -> bool:
+        with self._lock:
+            return bool(self._draw_footfall_line_overlay)
+
+    def set_yolo_draw_config(
+        self,
+        box_style: Optional[str] = None,
+        box_color: Optional[str] = None,
+        foot_point_enabled: Optional[bool] = None,
+        foot_point_style: Optional[str] = None,
+        foot_point_color: Optional[str] = None,
+    ) -> None:
+        with self._lock:
+            if box_style is not None:
+                s = str(box_style).strip().lower()
+                if s in ("rect", "corners_rounded"):
+                    self._yolo_box_style = s
+            if box_color is not None:
+                c = str(box_color).strip().lower()
+                if c in ("green", "blue", "white"):
+                    self._yolo_box_color = c
+            if foot_point_enabled is not None:
+                self._yolo_foot_point_enabled = bool(foot_point_enabled)
+            if foot_point_style is not None:
+                s = str(foot_point_style).strip().lower()
+                if s in ("circle", "square"):
+                    self._yolo_foot_point_style = s
+            if foot_point_color is not None:
+                c = str(foot_point_color).strip().lower()
+                if c in ("green", "blue", "white"):
+                    self._yolo_foot_point_color = c
+
+    def get_yolo_draw_config(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "box_style": str(self._yolo_box_style),
+                "box_color": str(self._yolo_box_color),
+                "foot_point_enabled": bool(self._yolo_foot_point_enabled),
+                "foot_point_style": str(self._yolo_foot_point_style),
+                "foot_point_color": str(self._yolo_foot_point_color),
+            }
+
+    @staticmethod
+    def _named_bgr(color_name: str) -> Tuple[int, int, int]:
+        c = str(color_name or "").strip().lower()
+        if c == "blue":
+            return (255, 0, 0)
+        if c == "white":
+            return (255, 255, 255)
+        return (0, 255, 0)
+
+    @staticmethod
+    def _draw_corners_rounded_box(
+        img,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        color: Tuple[int, int, int],
+        thickness: int = 2,
+    ) -> None:
+        w = max(1, x2 - x1)
+        h = max(1, y2 - y1)
+        corner = max(6, int(min(w, h) * 0.18))
+        corner = min(corner, max(6, int(min(w, h) * 0.45)))
+        r = max(2, int(corner * 0.35))
+        # top-left
+        cv2.line(img, (x1 + r, y1), (x1 + corner, y1), color, thickness)
+        cv2.line(img, (x1, y1 + r), (x1, y1 + corner), color, thickness)
+        cv2.ellipse(img, (x1 + r, y1 + r), (r, r), 0, 180, 270, color, thickness)
+        # top-right
+        cv2.line(img, (x2 - corner, y1), (x2 - r, y1), color, thickness)
+        cv2.line(img, (x2, y1 + r), (x2, y1 + corner), color, thickness)
+        cv2.ellipse(img, (x2 - r, y1 + r), (r, r), 0, 270, 360, color, thickness)
+        # bottom-left
+        cv2.line(img, (x1 + r, y2), (x1 + corner, y2), color, thickness)
+        cv2.line(img, (x1, y2 - corner), (x1, y2 - r), color, thickness)
+        cv2.ellipse(img, (x1 + r, y2 - r), (r, r), 0, 90, 180, color, thickness)
+        # bottom-right
+        cv2.line(img, (x2 - corner, y2), (x2 - r, y2), color, thickness)
+        cv2.line(img, (x2, y2 - corner), (x2, y2 - r), color, thickness)
+        cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, thickness)
 
     def _ensure_age_gender_model(self) -> None:
         """
@@ -1350,13 +1446,31 @@ class VirtualViewInferenceManager:
 
                 # 如果当前 vv 有前端配置的判定线，则画到 YOLO 画面上便于对齐验证
                 foot_line_uv = None
+                draw_footfall_line = True
+                yolo_draw_cfg = {}
                 try:
                     with self._lock:
                         foot_line_uv = self._footfall_line_uv_by_vv.get(int(virtual_view_id))
+                        draw_footfall_line = bool(self._draw_footfall_line_overlay)
+                        yolo_draw_cfg = {
+                            "box_style": self._yolo_box_style,
+                            "box_color": self._yolo_box_color,
+                            "foot_point_enabled": self._yolo_foot_point_enabled,
+                            "foot_point_style": self._yolo_foot_point_style,
+                            "foot_point_color": self._yolo_foot_point_color,
+                        }
                 except Exception:
                     foot_line_uv = None
+                    draw_footfall_line = True
+                    yolo_draw_cfg = {
+                        "box_style": "rect",
+                        "box_color": "green",
+                        "foot_point_enabled": True,
+                        "foot_point_style": "circle",
+                        "foot_point_color": "green",
+                    }
 
-                if inference_enabled and foot_line_uv is not None:
+                if inference_enabled and draw_footfall_line and foot_line_uv is not None:
                     try:
                         annotated_img = plain_img.copy()
                     except Exception:
@@ -1387,6 +1501,11 @@ class VirtualViewInferenceManager:
                     except Exception:
                         annotated_img = plain_img
                     xyxy, cls_ids = last_boxes
+                    box_color_bgr = self._named_bgr(str(yolo_draw_cfg.get("box_color", "green")))
+                    foot_color_bgr = self._named_bgr(str(yolo_draw_cfg.get("foot_point_color", "green")))
+                    box_style = str(yolo_draw_cfg.get("box_style", "rect"))
+                    foot_enabled = bool(yolo_draw_cfg.get("foot_point_enabled", True))
+                    foot_style = str(yolo_draw_cfg.get("foot_point_style", "circle"))
                     for i, ((x1, y1, x2, y2), cid) in enumerate(zip(xyxy, cls_ids)):
                         try:
                             cid_int = int(cid)
@@ -1396,18 +1515,28 @@ class VirtualViewInferenceManager:
                         if not person_like:
                             continue
                         x1_i, y1_i, x2_i, y2_i = map(int, [x1, y1, x2, y2])
-                        cv2.rectangle(annotated_img, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
+                        if box_style == "corners_rounded":
+                            self._draw_corners_rounded_box(annotated_img, x1_i, y1_i, x2_i, y2_i, box_color_bgr, 2)
+                        else:
+                            cv2.rectangle(annotated_img, (x1_i, y1_i), (x2_i, y2_i), box_color_bgr, 2)
 
                         # 脚步原点：bbox 底部中心向上 1%
                         try:
                             h_box = float(y2_i - y1_i)
                             foot_x = int(round((x1_i + x2_i) * 0.5))
                             foot_y = int(round(float(y2_i) - 0.01 * h_box))
-                            if 0 <= foot_x < int(w_img) and 0 <= foot_y < int(h_img):
-                                cv2.circle(annotated_img, (foot_x, foot_y), 4, (0, 255, 255), -1)
-                                # 十字准星（更醒目）
-                                cv2.line(annotated_img, (foot_x - 6, foot_y), (foot_x + 6, foot_y), (0, 255, 255), 1)
-                                cv2.line(annotated_img, (foot_x, foot_y - 6), (foot_x, foot_y + 6), (0, 255, 255), 1)
+                            if foot_enabled and 0 <= foot_x < int(w_img) and 0 <= foot_y < int(h_img):
+                                if foot_style == "square":
+                                    s = 4
+                                    cv2.rectangle(
+                                        annotated_img,
+                                        (foot_x - s, foot_y - s),
+                                        (foot_x + s, foot_y + s),
+                                        foot_color_bgr,
+                                        -1,
+                                    )
+                                else:
+                                    cv2.circle(annotated_img, (foot_x, foot_y), 4, foot_color_bgr, -1)
                         except Exception:
                             pass
                         gender = None
@@ -1439,7 +1568,7 @@ class VirtualViewInferenceManager:
                             (x1_i, max(y1_i - 5, 0)),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
-                            (0, 255, 0),
+                            box_color_bgr,
                             1,
                             cv2.LINE_AA,
                         )
