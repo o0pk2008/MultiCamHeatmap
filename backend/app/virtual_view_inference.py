@@ -659,6 +659,23 @@ class VirtualViewInferenceManager:
         except Exception:
             return
 
+    def reanalyze_face_capture_attributes(self, image_base64: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        对已落库的人脸抓拍图（base64）重新执行年龄/性别识别。
+        返回 (gender, age_bucket)。
+        """
+        if not image_base64:
+            return None, None
+        try:
+            raw = base64.b64decode(str(image_base64))
+            arr = np.frombuffer(raw, dtype=np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if img is None or getattr(img, "size", 0) == 0:
+                return None, None
+            return self._infer_gender_age_from_crop(img, time.time())
+        except Exception:
+            return None, None
+
     def _infer_gender_age_from_crop(self, crop, now: float) -> Tuple[Optional[str], Optional[str]]:
         """
         运行二阶段性别/年龄模型（如果已配置），并返回 (gender, age_bucket)。

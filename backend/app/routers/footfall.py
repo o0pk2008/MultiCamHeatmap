@@ -9,6 +9,7 @@ from ..db import SessionLocal
 from .. import models
 from ..footfall_analysis import analyzer, FootfallLine
 from ..footfall_store import get_footfall_stats_sync
+from ..virtual_view_inference import manager
 
 router = APIRouter(prefix="/api/footfall", tags=["footfall"])
 
@@ -69,6 +70,14 @@ class FaceCaptureOut(BaseModel):
     gender: Optional[str] = None
     age_bucket: Optional[str] = None
     image_base64: str
+
+
+class FaceReanalyzeRequest(BaseModel):
+    floor_plan_id: int
+    mode: str = "all"  # all | range
+    start_date: Optional[str] = None  # YYYY-MM-DD
+    end_date: Optional[str] = None  # YYYY-MM-DD
+    tz_offset_minutes: Optional[int] = None
 
 
 @router.post("/start")
@@ -351,6 +360,92 @@ async def footfall_face_captures(
         except Exception:
             continue
     return out
+
+
+@router.post("/reanalyze-face-captures")
+async def footfall_reanalyze_face_captures(req: FaceReanalyzeRequest):
+    fp_id = int(req.floor_plan_id)
+    mode = str(req.mode or "all").strip().lower()
+    start_ts: Optional[float] = None
+    end_ts: Optional[float] = None
+
+    def _tz_from_offset_minutes(tz_min: Optional[int]) -> timezone:
+        if tz_min is None:
+            local_dt = datetime.now().astimezone()
+            tzinfo = local_dt.tzinfo
+            if isinstance(tzinfo, timezone):
+                return tzinfo
+            offset = local_dt.utcoffset() or timedelta(0)
+            return timezone(offset)
+        return timezone(-timedelta(minutes=int(tz_min)))
+
+    if mode not in ("all", "range"):
+        raise HTTPException(status_code=400, detail="invalid mode")
+    if mode == "range":
+        if not req.start_date or not req.end_date:
+            raise HTTPException(status_code=400, detail="start_date and end_date required in range mode")
+        tz = _tz_from_offset_minutes(req.tz_offset_minutes)
+        try:
+            sy, sm, sd = [int(x) for x in str(req.start_date).split("-", 2)]
+            ey, em, ed = [int(x) for x in str(req.end_date).split("-", 2)]
+            start_dt = datetime(sy, sm, sd, tzinfo=tz)
+            end_dt = datetime(ey, em, ed, tzinfo=tz) + timedelta(days=1)
+            start_ts = float(start_dt.timestamp())
+            end_ts = float(end_dt.timestamp())
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid start_date/end_date")
+
+    scanned = 0
+    updated_captures = 0
+    updated_events = 0
+
+    with SessionLocal() as db:
+        q = db.query(models.FootfallFaceCapture).filter(models.FootfallFaceCapture.floor_plan_id == fp_id)
+        if start_ts is not None and end_ts is not None:
+            q = q.filter(models.FootfallFaceCapture.ts >= float(start_ts), models.FootfallFaceCapture.ts < float(end_ts))
+        rows = q.order_by(models.FootfallFaceCapture.id.asc()).all()
+
+        for r in rows:
+            scanned += 1
+            gender, age_bucket = manager.reanalyze_face_capture_attributes(str(r.image_base64 or ""))
+            gender_next = str(gender) if gender is not None else None
+            age_next = str(age_bucket) if age_bucket is not None else None
+            changed = (r.gender != gender_next) or (r.age_bucket != age_next)
+            if not changed:
+                continue
+            r.gender = gender_next
+            r.age_bucket = age_next
+            updated_captures += 1
+
+            # 同步修正统计事件（只影响 in 方向）
+            ev_q = db.query(models.FootfallCrossEvent).filter(
+                models.FootfallCrossEvent.floor_plan_id == int(r.floor_plan_id),
+                models.FootfallCrossEvent.virtual_view_id == int(r.virtual_view_id),
+                models.FootfallCrossEvent.line_config_id == int(r.line_config_id),
+                models.FootfallCrossEvent.direction == "in",
+                models.FootfallCrossEvent.ts >= float(r.ts) - 3.0,
+                models.FootfallCrossEvent.ts <= float(r.ts) + 3.0,
+            )
+            sid = int(r.stable_id) if r.stable_id is not None else None
+            tid = int(r.track_id) if r.track_id is not None else None
+            if sid is not None:
+                ev_q = ev_q.filter(models.FootfallCrossEvent.stable_id == sid)
+            elif tid is not None:
+                ev_q = ev_q.filter(models.FootfallCrossEvent.track_id == tid)
+            ev = ev_q.order_by(models.FootfallCrossEvent.ts.desc()).first()
+            if ev is not None:
+                ev.gender = gender_next
+                ev.age_bucket = age_next
+                updated_events += 1
+
+        db.commit()
+
+    return {
+        "status": "ok",
+        "scanned": int(scanned),
+        "updated_captures": int(updated_captures),
+        "updated_events": int(updated_events),
+    }
 
 
 @router.post("/stop")

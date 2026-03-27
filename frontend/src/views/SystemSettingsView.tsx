@@ -66,6 +66,7 @@ const SystemSettingsView: React.FC = () => {
   const [downloading, setDownloading] = useState(false);
   const [purgingHeatmap, setPurgingHeatmap] = useState(false);
   const [purgingFootfall, setPurgingFootfall] = useState(false);
+  const [reanalyzingFootfall, setReanalyzingFootfall] = useState(false);
   const [drawFootfallLineOverlay, setDrawFootfallLineOverlay] = useState(false);
   const [savingFootfallOverlay, setSavingFootfallOverlay] = useState(false);
   const [yoloBoxStyle, setYoloBoxStyle] = useState<"rect" | "corners_rounded">("corners_rounded");
@@ -251,6 +252,48 @@ const SystemSettingsView: React.FC = () => {
       setPurgingFootfall(false);
     }
   }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
+
+  const reanalyzeFootfallFaceCaptures = useCallback(async () => {
+    if (selectedFloorPlanId === "") return;
+    const ok = window.confirm(
+      `将对平面图 [${selectedFloorPlanName}] 已抓拍人脸重新执行年龄/性别识别，并同步修正统计数据。\n\n确认继续吗？`,
+    );
+    if (!ok) return;
+    if (purgeMode === "range" && (!purgeStartDate || !purgeEndDate)) {
+      alert("请选择起始日期和结束日期。");
+      return;
+    }
+    setReanalyzingFootfall(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/footfall/reanalyze-face-captures`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          floor_plan_id: Number(selectedFloorPlanId),
+          mode: purgeMode,
+          start_date: purgeMode === "range" ? purgeStartDate : null,
+          end_date: purgeMode === "range" ? purgeEndDate : null,
+          tz_offset_minutes: new Date().getTimezoneOffset(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(`重识别失败: ${data?.detail || res.status}`);
+        return;
+      }
+      alert(
+        `重识别完成：扫描 ${Number(data?.scanned || 0)} 条，更新抓拍 ${Number(
+          data?.updated_captures || 0,
+        )} 条，同步统计事件 ${Number(data?.updated_events || 0)} 条。`,
+      );
+      void refreshStats();
+    } catch (e) {
+      console.error(e);
+      alert("重识别失败，请稍后重试。");
+    } finally {
+      setReanalyzingFootfall(false);
+    }
+  }, [purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
 
   const saveOverlayConfig = useCallback(
     async (next: {
@@ -571,6 +614,13 @@ const SystemSettingsView: React.FC = () => {
             disabled={selectedFloorPlanId === "" || purgingFootfall}
           >
             {purgingFootfall ? "清理中..." : "清理人流量历史"}
+          </button>
+          <button
+            className="ml-2 rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+            onClick={() => void reanalyzeFootfallFaceCaptures()}
+            disabled={selectedFloorPlanId === "" || reanalyzingFootfall}
+          >
+            {reanalyzingFootfall ? "重识别中..." : "重识别历史抓拍"}
           </button>
         </div>
       </div>
