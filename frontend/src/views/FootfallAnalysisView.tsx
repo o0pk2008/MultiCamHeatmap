@@ -564,19 +564,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const handleHeatmapWsEvent = useCallback(
     (raw: any) => {
-      if (!analysisLineRef.current) return;
-      const cfg = analysisLineRef.current;
+      if (selectedFloorPlanId == null) return;
+      const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+      const currentVirtualViewId = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
+      if (currentVirtualViewId == null) return;
 
       const evt = raw ?? {};
       if (evt.floor_plan_id !== selectedFloorPlanId) return;
       const vvId = evt.virtual_view_id ?? null;
-      if (vvId == null || Number(vvId) !== cfg.virtualViewId) return;
+      // 闪烁应跟随“当前正在查看”的摄像头，而不是“启动分析当时选中的摄像头”
+      if (vvId == null || Number(vvId) !== Number(currentVirtualViewId)) return;
 
-      if (cfg.filterMode === "date" && cfg.filterDateKey) {
+      if (statsMode === "date" && statsDate) {
         const tsSec = Number.isFinite(Number(evt.ts)) ? Number(evt.ts) : NaN;
         if (!Number.isFinite(tsSec)) return;
         const dateKey = toUTCDateInputValue(new Date(tsSec * 1000));
-        if (dateKey !== cfg.filterDateKey) return;
+        if (dateKey !== statsDate) return;
       }
 
       const dirRaw = evt.direction;
@@ -598,7 +601,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       scheduleRefreshStats();
       flashLine(dirRaw);
     },
-    [flashLine, scheduleRefreshStats, selectedFloorPlanId],
+    [bindCameraId, bindCameraOptions, flashLine, scheduleRefreshStats, selectedFloorPlanId, statsDate, statsMode],
   );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
@@ -1422,7 +1425,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         if (lineEnabled) {
           const now = Date.now();
           const flashing = lineFlash != null && now <= lineFlash.untilMs;
-          const flashColor = lineFlash?.kind === "in" ? "#10B981" : "#F97316";
+          const flashColor = lineFlash?.kind === "in" ? "#10B981" : "#FACC15";
           if (flashing) {
             ctx.strokeStyle = flashColor;
             ctx.lineWidth = 6;

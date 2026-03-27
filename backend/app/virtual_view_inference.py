@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
 import cv2
+import numpy as np
 
 from .db import SessionLocal
 from . import models
@@ -21,6 +22,13 @@ try:
     import torch
 except Exception:  # pragma: no cover
     torch = None  # type: ignore
+
+try:
+    from uniface.detection import RetinaFace  # type: ignore
+    from uniface.attribute.age_gender import AgeGender  # type: ignore
+except Exception:  # pragma: no cover
+    RetinaFace = None  # type: ignore
+    AgeGender = None  # type: ignore
 
 
 @dataclass
@@ -105,6 +113,21 @@ class VirtualViewInferenceManager:
         # track_id -> (gender, age_bucket, ts)
         self._ag_cache: Dict[int, Tuple[Optional[str], Optional[str], float]] = {}
         self._ag_cache_ttl_sec: float = float(os.environ.get("YOLO_AGE_GENDER_CACHE_TTL_SEC", "3.0"))
+        # 年龄/性别算法提供者：uniface | yolo（默认使用 uniface）
+        self._ag_provider: str = str(os.environ.get("AG_PROVIDER", "uniface")).strip().lower()
+        self._ag_uniface_fallback_to_yolo: bool = str(
+            os.environ.get("AG_UNIFACE_FALLBACK_TO_YOLO", "0")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        # UniFace 相关模型
+        self._uniface_detector = None
+        self._uniface_age_gender = None
+        self._uniface_infer_lock = threading.Lock()
+        self._uniface_init_warned = False
+        providers_raw = str(os.environ.get("UNIFACE_PROVIDERS", "CPUExecutionProvider")).strip()
+        self._uniface_providers = [p.strip() for p in providers_raw.split(",") if p.strip()]
+        if not self._uniface_providers:
+            self._uniface_providers = ["CPUExecutionProvider"]
+        self._uniface_face_min_conf: float = float(os.environ.get("UNIFACE_FACE_MIN_CONF", "0.2"))
         # 最近人脸抓拍（供前端可视化）
         self._face_captures_by_vv: Dict[int, list[Dict[str, Any]]] = {}
         self._face_capture_seq: int = 0
@@ -384,10 +407,10 @@ class VirtualViewInferenceManager:
         if not gender_str:
             return None
         s = str(gender_str).strip().lower()
-        if "male" in s or "man" in s or s in ("m", "男"):
-            return "male"
         if "female" in s or "woman" in s or s in ("f", "女"):
             return "female"
+        if "male" in s or "man" in s or s in ("m", "男"):
+            return "male"
         if s in ("男",):
             return "male"
         if s in ("女",):
@@ -466,9 +489,7 @@ class VirtualViewInferenceManager:
         age_bucket: Optional[str],
         person_crop,
     ) -> Optional[Dict[str, Any]]:
-        # 没有任何属性时不抓拍，避免噪声
-        if not gender and not age_bucket:
-            return None
+        # 抓拍以“过线事件”为准：即使属性暂未识别，也应保留抓拍记录（前端显示未知）
         key = (int(virtual_view_id), int(track_id))
         last_ts = self._face_capture_last_ts.get(key)
         if last_ts is not None and (float(ts) - float(last_ts)) < self._face_capture_min_interval_sec:
@@ -476,6 +497,16 @@ class VirtualViewInferenceManager:
         face_crop = self._extract_face_crop_for_capture(person_crop)
         if face_crop is None or getattr(face_crop, "size", 0) == 0:
             return None
+        # 对最终抓拍的人脸图再做一次属性识别（与离线 demo 输入口径一致）
+        try:
+            if str(self._ag_provider).lower() == "uniface":
+                g2, a2 = self._infer_gender_age_from_crop_uniface(face_crop)
+                if g2 is not None:
+                    gender = g2
+                if a2 is not None:
+                    age_bucket = a2
+        except Exception:
+            pass
         try:
             ok, jpg = cv2.imencode(".jpg", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
             if not ok:
@@ -555,12 +586,25 @@ class VirtualViewInferenceManager:
             sample = self._track_attr_latest.get((vv, tid))
         if not sample:
             return
+        # 仅在抓拍时做属性最终判定（优先 UniFace），避免画框阶段的临时属性干扰落库结果
+        final_gender = sample.get("gender")
+        final_age_bucket = sample.get("age_bucket")
+        try:
+            crop = sample.get("crop")
+            if crop is not None and getattr(crop, "size", 0) != 0:
+                g2, a2 = self._infer_gender_age_from_crop(crop, float(ts))
+                if g2 is not None:
+                    final_gender = g2
+                if a2 is not None:
+                    final_age_bucket = a2
+        except Exception:
+            pass
         row = self._push_face_capture(
             virtual_view_id=vv,
             track_id=tid,
             ts=float(ts),
-            gender=sample.get("gender"),
-            age_bucket=sample.get("age_bucket"),
+            gender=final_gender,
+            age_bucket=final_age_bucket,
             person_crop=sample.get("crop"),
         )
         if row is None:
@@ -574,8 +618,8 @@ class VirtualViewInferenceManager:
                 track_id=tid,
                 stable_id=sid,
                 ts=float(ts),
-                gender=sample.get("gender"),
-                age_bucket=sample.get("age_bucket"),
+                gender=final_gender,
+                age_bucket=final_age_bucket,
                 image_base64=str(row.get("image_base64", "")),
             )
         except Exception:
@@ -606,8 +650,8 @@ class VirtualViewInferenceManager:
                     ts=float(ts),
                     track_id=int(track_id),
                     stable_id=int(stable_id),
-                    gender=(str(gender) if gender is not None else None),
-                    age_bucket=(str(age_bucket) if age_bucket is not None else None),
+                gender=(str(gender) if gender is not None else None),
+                age_bucket=(str(age_bucket) if age_bucket is not None else None),
                     image_base64=str(image_base64),
                 )
                 db.add(row)
@@ -621,6 +665,12 @@ class VirtualViewInferenceManager:
         - gender 来自 `yolov8n-gender-classification.pt`
         - age 来自 `yolo11n-face-age.pt`
         """
+        if str(self._ag_provider).lower() == "uniface":
+            g, a = self._infer_gender_age_from_crop_uniface(crop)
+            # 默认严格使用 UniFace，避免与旧 YOLO 结果混用导致口径不一致。
+            # 如需兜底回退，可设置 AG_UNIFACE_FALLBACK_TO_YOLO=1。
+            if (g is not None or a is not None) or (not self._ag_uniface_fallback_to_yolo):
+                return g, a
         if self._gender_model is None and self._face_age_model is None:
             return None, None
 
@@ -788,6 +838,116 @@ class VirtualViewInferenceManager:
                         gender = self._normalize_gender(gender_str)
                 except Exception:
                     gender = None
+
+            return gender, age_bucket
+        except Exception:
+            return None, None
+
+    def _ensure_uniface_models(self) -> None:
+        if self._uniface_detector is not None and self._uniface_age_gender is not None:
+            return
+        if RetinaFace is None or AgeGender is None:
+            if not self._uniface_init_warned:
+                self._uniface_init_warned = True
+                print("[UNIFACE] package not available, fallback to YOLO age/gender")
+            return
+        try:
+            self._uniface_detector = RetinaFace(providers=self._uniface_providers)
+            self._uniface_age_gender = AgeGender(providers=self._uniface_providers)
+            print(f"[UNIFACE] initialized with providers={self._uniface_providers}")
+        except Exception as e:
+            if not self._uniface_init_warned:
+                self._uniface_init_warned = True
+                print(f"[UNIFACE] init failed, fallback to YOLO: {e}")
+            self._uniface_detector = None
+            self._uniface_age_gender = None
+
+    def _infer_gender_age_from_crop_uniface(self, crop) -> Tuple[Optional[str], Optional[str]]:
+        if crop is None or getattr(crop, "size", 0) == 0:
+            return None, None
+        self._ensure_uniface_models()
+        if self._uniface_detector is None or self._uniface_age_gender is None:
+            return None, None
+        try:
+            img = crop
+            if not isinstance(img, np.ndarray):
+                return None, None
+            with self._uniface_infer_lock:
+                faces = self._uniface_detector.detect(img) or []
+            # 实时场景 person crop 中人脸偏小：先原图检测，失败后再做放大重试
+            if not faces:
+                try:
+                    h0, w0 = img.shape[:2]
+                    scale = 2.0 if min(h0, w0) < 220 else 1.5
+                    up = cv2.resize(img, (max(2, int(w0 * scale)), max(2, int(h0 * scale))), interpolation=cv2.INTER_CUBIC)
+                    with self._uniface_infer_lock:
+                        faces = self._uniface_detector.detect(up) or []
+                    img = up
+                except Exception:
+                    faces = []
+            if not faces:
+                return None, None
+            valid_faces = []
+            for f in faces:
+                try:
+                    conf = float(getattr(f, "confidence", 0.0) or 0.0)
+                except Exception:
+                    conf = 0.0
+                if conf >= float(self._uniface_face_min_conf):
+                    valid_faces.append(f)
+            # 严格阈值下可能一个都不过；兜底取最高分人脸，避免长期全“未知”
+            if not valid_faces:
+                valid_faces = list(faces)
+
+            def _score(face) -> float:
+                try:
+                    x1, y1, x2, y2 = [float(v) for v in getattr(face, "bbox", [0, 0, 0, 0])]
+                    area = max(1.0, (x2 - x1) * (y2 - y1))
+                except Exception:
+                    area = 1.0
+                try:
+                    conf = float(getattr(face, "confidence", 0.0) or 0.0)
+                except Exception:
+                    conf = 0.0
+                return conf * area
+
+            best_face = max(valid_faces, key=_score)
+            with self._uniface_infer_lock:
+                # 兼容不同 uniface 版本：
+                # - 新版可能支持传 face 对象
+                # - 部分版本仅支持 bbox（np.ndarray/list[4]）
+                try:
+                    res = self._uniface_age_gender.predict(img, best_face)
+                except Exception:
+                    bbox = getattr(best_face, "bbox", None)
+                    if bbox is None:
+                        raise
+                    res = self._uniface_age_gender.predict(img, bbox)
+
+            gender: Optional[str] = None
+            age_bucket: Optional[str] = None
+
+            gender_raw = getattr(res, "gender", None)
+            try:
+                gv = int(gender_raw)
+                if gv == 1:
+                    gender = "male"
+                elif gv == 0:
+                    gender = "female"
+            except Exception:
+                s = str(gender_raw or "").strip().lower()
+                if "female" in s:
+                    gender = "female"
+                elif "male" in s:
+                    gender = "male"
+
+            age_raw = getattr(res, "age", None)
+            try:
+                age_v = float(age_raw)
+                if np.isfinite(age_v):
+                    age_bucket = self._age_to_bucket(age_v)
+            except Exception:
+                age_bucket = None
 
             return gender, age_bucket
         except Exception:
@@ -1560,11 +1720,7 @@ class VirtualViewInferenceManager:
                         except Exception:
                             label = "person"
 
-                        if gender_cn and "?" not in str(gender_cn) and "？" not in str(gender_cn):
-                            label = f"{label} {gender_cn}"
-                        age_text = str(age_bucket).strip() if age_bucket is not None else ""
-                        if age_text and "?" not in age_text and "？" not in age_text:
-                            label = f"{label} {age_text}"
+                        # 按产品要求：YOLO 框顶只显示 person/id，不在这里显示性别和年龄
                         cv2.putText(
                             annotated_img,
                             label,

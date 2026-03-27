@@ -15,11 +15,16 @@ COPY requirements.txt /app/requirements.txt
 # 注意：需要宿主机 + Docker 已启用 NVIDIA GPU 支持
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cu124 torch torchvision torchaudio
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir uniface onnxruntime
 
 COPY . /app
 
 ENV PYTHONUNBUFFERED=1 \
-    TZ=Asia/Shanghai
+    TZ=Asia/Shanghai \
+    AG_PROVIDER=uniface \
+    AG_UNIFACE_FALLBACK_TO_YOLO=0 \
+    UNIFACE_PROVIDERS=CPUExecutionProvider \
+    UNIFACE_FACE_MIN_CONF=0.2
 
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
