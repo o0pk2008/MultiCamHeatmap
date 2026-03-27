@@ -397,6 +397,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const [statsMode, setStatsMode] = useState<"date" | "realtime">("realtime");
   const [statsDate, setStatsDate] = useState<string>(() => toUTCDateInputValue(new Date()));
   const [statsData, setStatsData] = useState<FootfallStats>(() => buildEmptyStats());
+  const [lineOverviewStats, setLineOverviewStats] = useState<Record<string, { inCount: number; outCount: number }>>({});
   const [analyzing, setAnalyzing] = useState(false);
   const [faceCaptures, setFaceCaptures] = useState<FaceCaptureItem[]>([]);
   const [newFaceCaptureIds, setNewFaceCaptureIds] = useState<number[]>([]);
@@ -415,6 +416,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const wsConnectSeqRef = useRef(0);
   const statsRefreshTimerRef = useRef<number | null>(null);
   const statsPollTimerRef = useRef<number | null>(null);
+  const lineOverviewPollTimerRef = useRef<number | null>(null);
   const faceCapturePollTimerRef = useRef<number | null>(null);
   const faceCaptureContainerRef = useRef<HTMLDivElement | null>(null);
   const faceCaptureReqSeqRef = useRef(0);
@@ -472,6 +474,42 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       void fetchStatsFromBackend();
     }, 120);
   }, [fetchStatsFromBackend]);
+
+  const fetchLineOverviewStats = useCallback(async () => {
+    if (selectedFloorPlanId == null) {
+      setLineOverviewStats({});
+      return;
+    }
+    const vvKeys = Object.keys(allLineCfg).filter((k) => /^vv:\d+$/.test(k));
+    if (vvKeys.length <= 0) {
+      setLineOverviewStats({});
+      return;
+    }
+    const mode = statsMode === "realtime" ? "realtime" : "date";
+    const pairs = await Promise.all(
+      vvKeys.map(async (key) => {
+        const m = key.match(/^vv:(\d+)$/);
+        const vvId = m ? Number(m[1]) : NaN;
+        if (!Number.isFinite(vvId)) return [key, { inCount: 0, outCount: 0 }] as const;
+        const url =
+          `${API_BASE}/api/footfall/stats?floor_plan_id=${selectedFloorPlanId}` +
+          `&virtual_view_id=${vvId}` +
+          `&mode=${mode}` +
+          (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "");
+        try {
+          const r = await fetch(url);
+          if (!r.ok) return [key, { inCount: 0, outCount: 0 }] as const;
+          const data = (await r.json()) as FootfallStats;
+          return [key, { inCount: Number(data?.inCount || 0), outCount: Number(data?.outCount || 0) }] as const;
+        } catch {
+          return [key, { inCount: 0, outCount: 0 }] as const;
+        }
+      }),
+    );
+    const next: Record<string, { inCount: number; outCount: number }> = {};
+    for (const [k, v] of pairs) next[k] = v;
+    setLineOverviewStats(next);
+  }, [allLineCfg, selectedFloorPlanId, statsDate, statsMode]);
 
   const fetchFaceCaptures = useCallback(async (reset: boolean = true) => {
     const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
@@ -599,9 +637,19 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       // 后端是统计权威源：前端仅触发刷新并做视觉闪烁
       scheduleRefreshStats();
+      void fetchLineOverviewStats();
       flashLine(dirRaw);
     },
-    [bindCameraId, bindCameraOptions, flashLine, scheduleRefreshStats, selectedFloorPlanId, statsDate, statsMode],
+    [
+      bindCameraId,
+      bindCameraOptions,
+      fetchLineOverviewStats,
+      flashLine,
+      scheduleRefreshStats,
+      selectedFloorPlanId,
+      statsDate,
+      statsMode,
+    ],
   );
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
@@ -1031,6 +1079,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         window.clearInterval(statsPollTimerRef.current);
         statsPollTimerRef.current = null;
       }
+      if (lineOverviewPollTimerRef.current != null) {
+        window.clearInterval(lineOverviewPollTimerRef.current);
+        lineOverviewPollTimerRef.current = null;
+      }
       if (faceCapturePollTimerRef.current != null) {
         window.clearInterval(faceCapturePollTimerRef.current);
         faceCapturePollTimerRef.current = null;
@@ -1056,6 +1108,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       if (statsPollTimerRef.current != null) {
         window.clearInterval(statsPollTimerRef.current);
         statsPollTimerRef.current = null;
+      }
+      if (lineOverviewPollTimerRef.current != null) {
+        window.clearInterval(lineOverviewPollTimerRef.current);
+        lineOverviewPollTimerRef.current = null;
       }
       if (faceCapturePollTimerRef.current != null) {
         window.clearInterval(faceCapturePollTimerRef.current);
@@ -1087,6 +1143,24 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
     };
   }, [analyzing, fetchStatsFromBackend]);
+
+  useEffect(() => {
+    void fetchLineOverviewStats();
+    if (lineOverviewPollTimerRef.current != null) {
+      window.clearInterval(lineOverviewPollTimerRef.current);
+      lineOverviewPollTimerRef.current = null;
+    }
+    if (!analyzing) return;
+    lineOverviewPollTimerRef.current = window.setInterval(() => {
+      void fetchLineOverviewStats();
+    }, 2000);
+    return () => {
+      if (lineOverviewPollTimerRef.current != null) {
+        window.clearInterval(lineOverviewPollTimerRef.current);
+        lineOverviewPollTimerRef.current = null;
+      }
+    };
+  }, [analyzing, fetchLineOverviewStats]);
 
   useEffect(() => {
     return () => {
@@ -1647,57 +1721,86 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         ctx.restore();
       }
 
-      if (!floorLineP1 || !floorLineP2) return;
-      const p1 = toWorld(floorLineP1);
-      const p2 = toWorld(floorLineP2);
-      const cx = (p1.x + p2.x) / 2;
-      const cy = (p1.y + p2.y) / 2;
       ctx.save();
       ctx.translate(info.pan.x, info.pan.y);
       ctx.scale(info.zoom, info.zoom);
-      ctx.strokeStyle = "#38BDF8";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(p1.x, p1.y);
-      ctx.lineTo(p2.x, p2.y);
-      ctx.stroke();
-      ctx.fillStyle = "#fff";
-      ctx.strokeStyle = "#0EA5E9";
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(p1.x, p1.y, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(p2.x, p2.y, 6, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      const label = `进入 ${statsData.inCount} / 离开 ${statsData.outCount}`;
-      ctx.font = "600 12px sans-serif";
-      const tw = Math.ceil(ctx.measureText(label).width);
-      const lh = 20;
-      const ly = cy - 24;
-      ctx.fillStyle = "rgba(255,255,255,0.72)";
-      ctx.beginPath();
-      const rx = cx - tw / 2 - 8;
-      const ry = ly - lh + 6;
-      const rw = tw + 16;
-      const rh = lh;
-      const rr = 6;
-      ctx.moveTo(rx + rr, ry);
-      ctx.arcTo(rx + rw, ry, rx + rw, ry + rh, rr);
-      ctx.arcTo(rx + rw, ry + rh, rx, ry + rh, rr);
-      ctx.arcTo(rx, ry + rh, rx, ry, rr);
-      ctx.arcTo(rx, ry, rx + rw, ry, rr);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = "#0f172a";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(label, cx, ly - 4);
+
+      const rows = Object.entries(allLineCfg)
+        .map(([key, cfg]) => ({
+          key,
+          p1: cfg.floor_p1 ?? cfg.p1,
+          p2: cfg.floor_p2 ?? cfg.p2,
+          inLabel: cfg.inLabel || "进入",
+          outLabel: cfg.outLabel || "离开",
+          enabled: cfg.enabled !== false,
+          active: key === bindCameraId,
+        }))
+        .filter((it) => !!it.p1 && !!it.p2);
+
+      const drawTag = (text: string, x: number, y: number, active: boolean) => {
+        ctx.font = "600 11px sans-serif";
+        const tw = Math.ceil(ctx.measureText(text).width);
+        const th = 16;
+        const padX = 5;
+        const padY = 2;
+        const rx = x - tw / 2 - padX;
+        const ry = y - th / 2 - padY;
+        const rw = tw + padX * 2;
+        const rh = th + padY * 2;
+        ctx.fillStyle = active ? "rgba(15,23,42,0.75)" : "rgba(15,23,42,0.62)";
+        ctx.fillRect(rx, ry, rw, rh);
+        ctx.fillStyle = "#FFFFFF";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(text, x, y);
+      };
+
+      for (const row of rows) {
+        const p1 = toWorld(row.p1);
+        const p2 = toWorld(row.p2);
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.hypot(dx, dy);
+        const nx = len > 1 ? -dy / len : 0;
+        const ny = len > 1 ? dx / len : 0;
+        const mx = (p1.x + p2.x) / 2;
+        const my = (p1.y + p2.y) / 2;
+        const d = 20;
+
+        ctx.strokeStyle = row.active ? "#38BDF8" : row.enabled ? "#60A5FA" : "rgba(148,163,184,0.7)";
+        ctx.lineWidth = row.active ? 3.5 : 2.2;
+        if (!row.enabled) {
+          ctx.setLineDash([6, 4]);
+        } else {
+          ctx.setLineDash([]);
+        }
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = "#FFFFFF";
+        ctx.strokeStyle = row.active ? "#0EA5E9" : "rgba(148,163,184,0.9)";
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.arc(p1.x, p1.y, row.active ? 5.5 : 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.arc(p2.x, p2.y, row.active ? 5.5 : 4.5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+
+        if (len > 1) {
+          const st = lineOverviewStats[row.key] || { inCount: 0, outCount: 0 };
+          drawTag(`${row.inLabel}${st.inCount}`, mx + nx * (d + 12), my + ny * (d + 12), row.active);
+          drawTag(`${row.outLabel}${st.outCount}`, mx - nx * (d + 12), my - ny * (d + 12), row.active);
+        }
+      }
       ctx.restore();
     },
-    [selectedFloorPlan, floorImgNaturalSize, showGrid, floorLineP1, floorLineP2, statsData.inCount, statsData.outCount],
+    [selectedFloorPlan, floorImgNaturalSize, showGrid, allLineCfg, bindCameraId, lineOverviewStats],
   );
 
   return (
