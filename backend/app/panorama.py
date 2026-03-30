@@ -20,13 +20,22 @@ def build_equirect_to_perspective_map(
     """
     构造等距柱状投影（equirectangular）到透视平面的 remap。
     约定：输入横轴为 yaw（-pi..pi），纵轴为 pitch/纬度（-pi/2..pi/2）。
+
+    视场角说明：
+    - 当前函数的 `fov_deg` 视为「水平视场角」(horizontal FOV)。
+    - 垂直视场角会根据输出宽高比自动换算，避免非正方形输出时产生几何拉伸/扭曲。
     """
     key = (in_w, in_h, float(yaw_deg), float(pitch_deg), float(fov_deg), out_w, out_h)
     cached = _remap_cache.get(key)
     if cached is not None:
         return cached
 
-    fov = math.radians(fov_deg)
+    # Treat fov_deg as horizontal FOV, derive vertical FOV from aspect ratio.
+    # Relationship: tan(fov_y/2) = (h/w) * tan(fov_x/2)
+    fov_x = math.radians(fov_deg)
+    aspect_ratio = out_w / max(1, out_h)
+    # out_h/out_w is the inverse of aspect_ratio; use direct form for clarity.
+    fov_y = 2.0 * math.atan((out_h / max(1, out_w)) * math.tan(fov_x / 2.0))
     yaw = math.radians(yaw_deg)
     pitch = math.radians(pitch_deg)
 
@@ -35,8 +44,8 @@ def build_equirect_to_perspective_map(
     xx, yy = np.meshgrid(x, y)
 
     zz = np.ones_like(xx)
-    xx = xx * math.tan(fov / 2.0)
-    yy = -yy * math.tan(fov / 2.0)
+    xx = xx * math.tan(fov_x / 2.0)
+    yy = -yy * math.tan(fov_y / 2.0)
 
     norm = np.sqrt(xx * xx + yy * yy + zz * zz)
     vx = xx / norm
