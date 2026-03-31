@@ -38,6 +38,12 @@ class VirtualViewFrame:
 
 
 @dataclass
+class CameraRawFrame:
+    frame: Any
+    ts: float
+
+
+@dataclass
 class VirtualViewDetections:
     """
     最近一次推理的检测框（xyxy + cls），以及对应图像尺寸与时间戳。
@@ -65,6 +71,12 @@ class VirtualViewInferenceManager:
     def __init__(self) -> None:
         self._threads: Dict[int, threading.Thread] = {}
         self._stops: Dict[int, threading.Event] = {}
+        # camera 级共享解码：同一 camera_id 只拉一次 RTSP，供多个 virtual view 复用
+        self._camera_threads: Dict[int, threading.Thread] = {}
+        self._camera_stops: Dict[int, threading.Event] = {}
+        self._camera_refs: Dict[int, int] = {}
+        self._camera_rtsp_by_id: Dict[int, str] = {}
+        self._camera_latest: Dict[int, CameraRawFrame] = {}
         # plain: 不带检测框（用于 preview_shared / snapshot）
         self._latest_plain: Dict[int, VirtualViewFrame] = {}
         # annotated: 带检测框（用于 analyzed）
@@ -1105,6 +1117,111 @@ class VirtualViewInferenceManager:
         _g, _a, person_like = self._infer_gender_age_from_cls_id(int(cid))
         return bool(person_like)
 
+    def _acquire_camera_reader(self, camera_id: int, rtsp_url: str) -> None:
+        cid = int(camera_id)
+        with self._lock:
+            self._camera_refs[cid] = int(self._camera_refs.get(cid, 0)) + 1
+            self._camera_rtsp_by_id[cid] = str(rtsp_url or "")
+            t = self._camera_threads.get(cid)
+            if t is not None and t.is_alive():
+                return
+            if t is not None and not t.is_alive():
+                self._camera_threads.pop(cid, None)
+                ev_old = self._camera_stops.pop(cid, None)
+                if ev_old is not None:
+                    try:
+                        ev_old.set()
+                    except Exception:
+                        pass
+            ev = threading.Event()
+            t = threading.Thread(
+                target=self._camera_reader_loop,
+                args=(cid, ev),
+                name=f"cam-reader-{cid}",
+                daemon=True,
+            )
+            self._camera_stops[cid] = ev
+            self._camera_threads[cid] = t
+            t.start()
+
+    def _release_camera_reader(self, camera_id: int) -> None:
+        cid = int(camera_id)
+        with self._lock:
+            cur = int(self._camera_refs.get(cid, 0)) - 1
+            if cur > 0:
+                self._camera_refs[cid] = cur
+                return
+            self._camera_refs.pop(cid, None)
+            ev = self._camera_stops.pop(cid, None)
+            if ev is not None:
+                try:
+                    ev.set()
+                except Exception:
+                    pass
+            self._camera_threads.pop(cid, None)
+            self._camera_rtsp_by_id.pop(cid, None)
+            self._camera_latest.pop(cid, None)
+
+    def _get_latest_camera_frame(self, camera_id: int) -> Optional[Any]:
+        fr = self._camera_latest.get(int(camera_id))
+        if fr is None:
+            return None
+        return fr.frame
+
+    def _camera_reader_loop(self, camera_id: int, stop_event: threading.Event) -> None:
+        cap = None
+        opened_rtsp = ""
+        last_ok_ts = time.time()
+        cid = int(camera_id)
+        try:
+            while not stop_event.is_set():
+                with self._lock:
+                    rtsp_url = str(self._camera_rtsp_by_id.get(cid, "") or "")
+                if not rtsp_url:
+                    time.sleep(0.05)
+                    continue
+                if cap is None or not cap.isOpened() or rtsp_url != opened_rtsp:
+                    if cap is not None:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                    cap = cv2.VideoCapture(rtsp_url)
+                    opened_rtsp = rtsp_url
+                    try:
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    except Exception:
+                        pass
+                    time.sleep(0.02)
+
+                ok, frame = cap.read() if cap is not None else (False, None)
+                if not ok or frame is None:
+                    if time.time() - last_ok_ts > 5:
+                        try:
+                            if cap is not None:
+                                cap.release()
+                        except Exception:
+                            pass
+                        cap = None
+                        opened_rtsp = ""
+                        last_ok_ts = time.time()
+                        time.sleep(0.2)
+                    else:
+                        time.sleep(0.01)
+                    continue
+
+                last_ok_ts = time.time()
+                self._camera_latest[cid] = CameraRawFrame(frame=frame, ts=last_ok_ts)
+                time.sleep(0.001)
+        except Exception:
+            return
+        finally:
+            try:
+                if cap is not None:
+                    cap.release()
+            except Exception:
+                pass
+
     def ensure_running(self, virtual_view_id: int) -> None:
         """
         analyzed 模式：确保后台推理线程在跑，并允许 YOLO inference。
@@ -1257,7 +1374,7 @@ class VirtualViewInferenceManager:
     def get_latest_detections(self, virtual_view_id: int) -> Optional[VirtualViewDetections]:
         return self._detections.get(virtual_view_id)
 
-    def _load_view(self, virtual_view_id: int) -> Optional[Tuple[str, models.CameraVirtualView]]:
+    def _load_view(self, virtual_view_id: int) -> Optional[Tuple[int, str, models.CameraVirtualView]]:
         with SessionLocal() as db:
             view = (
                 db.query(models.CameraVirtualView)
@@ -1269,9 +1386,9 @@ class VirtualViewInferenceManager:
             cam = db.query(models.Camera).filter(models.Camera.id == view.camera_id).first()
             if not cam:
                 return None
-            return cam.rtsp_url, view
+            return int(cam.id), cam.rtsp_url, view
 
-    def _reload_view_params(self, virtual_view_id: int) -> Optional[Tuple[str, dict]]:
+    def _reload_view_params(self, virtual_view_id: int) -> Optional[Tuple[int, str, dict]]:
         """
         热加载 view 参数：用于不中断流的情况下应用最新 view_mode/yaw/pitch/fov/out_w/out_h/enabled。
         返回 (rtsp_url, params_dict)。
@@ -1287,7 +1404,7 @@ class VirtualViewInferenceManager:
             cam = db.query(models.Camera).filter(models.Camera.id == view.camera_id).first()
             if not cam:
                 return None
-            return cam.rtsp_url, {
+            return int(cam.id), cam.rtsp_url, {
                 "enabled": bool(view.enabled),
                 "view_mode": str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective"),
                 "yaw_deg": float(view.yaw_deg),
@@ -1321,7 +1438,7 @@ class VirtualViewInferenceManager:
         loaded = self._load_view(virtual_view_id)
         if not loaded:
             return
-        rtsp_url, view = loaded
+        camera_id, rtsp_url, view = loaded
         enabled = bool(view.enabled)
         view_mode = str(getattr(view, "view_mode", "panorama_perspective") or "panorama_perspective")
         yaw_deg = float(view.yaw_deg)
@@ -1338,8 +1455,7 @@ class VirtualViewInferenceManager:
         with self._lock:
             inference_enabled = bool(self._inference_enabled.get(virtual_view_id, False))
 
-        cap = None
-        last_ok_ts = time.time()
+        self._acquire_camera_reader(camera_id, rtsp_url)
         try:
             while not stop_event.is_set():
                 now = time.time()
@@ -1349,7 +1465,7 @@ class VirtualViewInferenceManager:
                     try:
                         reloaded = self._reload_view_params(virtual_view_id)
                         if reloaded is not None:
-                            new_rtsp, p = reloaded
+                            new_camera_id, new_rtsp, p = reloaded
                             enabled = bool(p["enabled"])
                             view_mode = str(p.get("view_mode", "panorama_perspective"))
                             yaw_deg = float(p["yaw_deg"])
@@ -1361,14 +1477,15 @@ class VirtualViewInferenceManager:
                             crop_y1 = p.get("crop_y1")
                             crop_x2 = p.get("crop_x2")
                             crop_y2 = p.get("crop_y2")
-                            if new_rtsp and new_rtsp != rtsp_url:
-                                rtsp_url = new_rtsp
-                                try:
-                                    if cap is not None:
-                                        cap.release()
-                                except Exception:
-                                    pass
-                                cap = None
+                            if int(new_camera_id) != int(camera_id):
+                                self._release_camera_reader(camera_id)
+                                camera_id = int(new_camera_id)
+                                rtsp_url = str(new_rtsp or "")
+                                self._acquire_camera_reader(camera_id, rtsp_url)
+                            elif new_rtsp and new_rtsp != rtsp_url:
+                                rtsp_url = str(new_rtsp)
+                                with self._lock:
+                                    self._camera_rtsp_by_id[int(camera_id)] = rtsp_url
                     except Exception:
                         pass
 
@@ -1385,35 +1502,10 @@ class VirtualViewInferenceManager:
                         tracks = {}
                         next_track_id = 1
 
-                if cap is None or not cap.isOpened():
-                    if cap is not None:
-                        try:
-                            cap.release()
-                        except Exception:
-                            pass
-                    cap = cv2.VideoCapture(rtsp_url)
-                    try:
-                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    except Exception:
-                        pass
-                    time.sleep(0.05)
-
-                ok, frame = cap.read() if cap is not None else (False, None)
-                if not ok or frame is None:
-                    # 如果长时间读不到帧，重连
-                    if time.time() - last_ok_ts > 5:
-                        try:
-                            if cap is not None:
-                                cap.release()
-                        except Exception:
-                            pass
-                        cap = None
-                        last_ok_ts = time.time()
-                        time.sleep(0.2)
-                    else:
-                        time.sleep(0.02)
+                frame = self._get_latest_camera_frame(camera_id)
+                if frame is None:
+                    time.sleep(0.02)
                     continue
-                last_ok_ts = time.time()
 
                 # 只对 virtual PTZ 透视图做处理
                 if not enabled:
@@ -1802,11 +1894,7 @@ class VirtualViewInferenceManager:
             # 线程异常退出时，避免整个服务崩溃
             return
         finally:
-            try:
-                if cap is not None:
-                    cap.release()
-            except Exception:
-                pass
+            self._release_camera_reader(camera_id)
 
 
 manager = VirtualViewInferenceManager()
