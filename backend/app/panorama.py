@@ -1,4 +1,4 @@
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import math
 
@@ -6,6 +6,20 @@ import cv2
 import numpy as np
 
 _remap_cache: Dict[Tuple[int, int, float, float, float, int, int], Tuple[np.ndarray, np.ndarray]] = {}
+_gpu_remap_cache: Dict[Tuple[int, int, float, float, float, int, int], Tuple[Any, Any]] = {}
+
+
+def _has_cuda_remap() -> bool:
+    try:
+        if not hasattr(cv2, "cuda"):
+            return False
+        count = int(cv2.cuda.getCudaEnabledDeviceCount())
+        return count > 0 and hasattr(cv2.cuda, "remap")
+    except Exception:
+        return False
+
+
+_CUDA_REMAP_AVAILABLE = _has_cuda_remap()
 
 
 def build_equirect_to_perspective_map(
@@ -86,9 +100,35 @@ def equirect_to_perspective(
     out_h: int,
 ) -> np.ndarray:
     in_h, in_w = frame_bgr.shape[:2]
-    map_x, map_y = build_equirect_to_perspective_map(
-        in_w, in_h, yaw_deg, pitch_deg, fov_deg, out_w, out_h
-    )
+    key = (in_w, in_h, float(yaw_deg), float(pitch_deg), float(fov_deg), out_w, out_h)
+    map_x, map_y = build_equirect_to_perspective_map(*key)
+
+    if _CUDA_REMAP_AVAILABLE:
+        try:
+            gpu_maps = _gpu_remap_cache.get(key)
+            if gpu_maps is None:
+                gpu_map_x = cv2.cuda_GpuMat()
+                gpu_map_y = cv2.cuda_GpuMat()
+                gpu_map_x.upload(map_x)
+                gpu_map_y.upload(map_y)
+                gpu_maps = (gpu_map_x, gpu_map_y)
+                _gpu_remap_cache[key] = gpu_maps
+            gpu_map_x, gpu_map_y = gpu_maps
+
+            gpu_src = cv2.cuda_GpuMat()
+            gpu_src.upload(frame_bgr)
+            gpu_dst = cv2.cuda.remap(
+                gpu_src,
+                gpu_map_x,
+                gpu_map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_WRAP,
+            )
+            return gpu_dst.download()
+        except Exception:
+            # Any CUDA runtime error falls back to CPU path.
+            pass
+
     return cv2.remap(
         frame_bgr,
         map_x,
