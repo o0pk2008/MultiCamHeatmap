@@ -15,8 +15,10 @@ from .panorama import equirect_to_perspective
 
 try:
     from ultralytics import YOLO  # type: ignore
+    import ultralytics as _ultralytics_pkg  # type: ignore
 except Exception:  # pragma: no cover
     YOLO = None  # type: ignore
+    _ultralytics_pkg = None  # type: ignore
 
 try:
     import torch
@@ -998,17 +1000,27 @@ class VirtualViewInferenceManager:
         # 默认 COCO/人属性模型（自动下载一次）
         # 如果你的权重包含 gender/age 类别名，可通过环境变量切换为正确的权重。
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        default_model_path = os.path.join(base_dir, "yolov8m.pt")
+        default_model_path = os.path.join(base_dir, "yolo26s.pt")
         model_path = os.environ.get("YOLO_MODEL_PATH")
         if not model_path:
             model_path = default_model_path
         elif not os.path.isabs(model_path) and not os.path.exists(model_path):
             model_path = os.path.join(base_dir, model_path)
         self._model = YOLO(model_path)
+        runtime_device = "cpu"
         # 显式切到 GPU（在部分环境中 ultralytics 默认不会自动选择 cuda）
         try:
             if torch is not None and torch.cuda.is_available():
                 self._model.to("cuda:0")
+                runtime_device = "cuda:0"
+        except Exception:
+            pass
+        try:
+            uv = getattr(_ultralytics_pkg, "__version__", "unknown")
+            print(
+                f"[VV] YOLO model loaded: path={model_path}, device={runtime_device}, ultralytics={uv}",
+                flush=True,
+            )
         except Exception:
             pass
 
