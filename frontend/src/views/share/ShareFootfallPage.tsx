@@ -92,6 +92,9 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
   const [faceLoading, setFaceLoading] = useState(false);
   const [statusText, setStatusText] = useState<string>("");
 
+  const fetchStatsRef = useRef<() => Promise<void>>(async () => {});
+  const fetchFacesRef = useRef<(reset: boolean, opts?: { quiet?: boolean }) => Promise<void>>(async () => {});
+
   useEffect(() => {
     faceOffsetRef.current = faceOffset;
   }, [faceOffset]);
@@ -169,13 +172,15 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
   const fetchStats = useCallback(async () => {
     if (!Number.isFinite(floorPlanId) || floorPlanId <= 0 || selectedVvId == null) return;
     const mode = dataMode === "live" ? "realtime" : "date";
+    const tzOffsetMin = new Date().getTimezoneOffset();
     let url =
       `${API_BASE}/api/footfall/stats?floor_plan_id=${floorPlanId}` +
       `&virtual_view_id=${selectedVvId}` +
-      `&mode=${mode}`;
+      `&mode=${mode}` +
+      `&tz_offset_minutes=${encodeURIComponent(String(tzOffsetMin))}`;
     if (mode === "date") url += `&date_key=${encodeURIComponent(historyDate)}`;
     try {
-      const r = await fetch(url);
+      const r = await fetch(url, { cache: "no-store" });
       if (!r.ok) return;
       const data = (await r.json()) as FootfallStats;
       setStats(data);
@@ -186,7 +191,7 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
   }, [floorPlanId, selectedVvId, dataMode, historyDate]);
 
   const fetchFaces = useCallback(
-    async (reset: boolean) => {
+    async (reset: boolean, opts?: { quiet?: boolean }) => {
       if (!Number.isFinite(floorPlanId) || floorPlanId <= 0 || selectedVvId == null) return;
       const mode = dataMode === "live" ? "realtime" : "date";
       const off = reset ? 0 : faceOffsetRef.current;
@@ -200,9 +205,10 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
         `&tz_offset_minutes=${encodeURIComponent(String(tzOffsetMin))}` +
         `&offset=${off}` +
         `&limit=${limit}`;
-      setFaceLoading(true);
+      const quiet = Boolean(opts?.quiet);
+      if (!quiet) setFaceLoading(true);
       try {
-        const r = await fetch(url);
+        const r = await fetch(url, { cache: "no-store" });
         if (!r.ok) return;
         const data = (await r.json()) as FaceCaptureItem[];
         const list = Array.isArray(data) ? data : [];
@@ -221,11 +227,19 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
         }
         setFaceHasMore(list.length >= limit);
       } finally {
-        setFaceLoading(false);
+        if (!quiet) setFaceLoading(false);
       }
     },
     [floorPlanId, selectedVvId, dataMode, historyDate],
   );
+
+  useEffect(() => {
+    fetchStatsRef.current = fetchStats;
+  }, [fetchStats]);
+
+  useEffect(() => {
+    fetchFacesRef.current = fetchFaces;
+  }, [fetchFaces]);
 
   useEffect(() => {
     void fetchStats();
@@ -240,9 +254,25 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
 
   useEffect(() => {
     if (dataMode !== "live" || selectedVvId == null) return;
-    const t = window.setInterval(() => void fetchStats(), refreshMs);
+    const tick = () => {
+      void fetchStatsRef.current();
+      void fetchFacesRef.current(true, { quiet: true });
+    };
+    const t = window.setInterval(tick, refreshMs);
     return () => window.clearInterval(t);
-  }, [dataMode, selectedVvId, refreshMs, fetchStats]);
+  }, [dataMode, selectedVvId, refreshMs]);
+
+  useEffect(() => {
+    if (dataMode !== "live" || selectedVvId == null) return;
+    const onVis = () => {
+      if (document.visibilityState === "visible") {
+        void fetchStatsRef.current();
+        void fetchFacesRef.current(true, { quiet: true });
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [dataMode, selectedVvId]);
 
   const genderOption = useMemo(
     () => ({

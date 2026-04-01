@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from fastapi import HTTPException
+from fastapi import Response
 from pydantic import BaseModel
 
 from ..db import SessionLocal
@@ -260,6 +261,7 @@ async def footfall_lines_list(floor_plan_id: int):
 
 @router.get("/stats")
 async def footfall_stats(
+    response: Response,
     floor_plan_id: int,
     virtual_view_id: int,
     mode: str = "realtime",  # realtime | date
@@ -267,13 +269,16 @@ async def footfall_stats(
     tz_offset_minutes: Optional[int] = None,  # JS Date.getTimezoneOffset()
 ):
     try:
-        return get_footfall_stats_sync(
+        payload = get_footfall_stats_sync(
             floor_plan_id=int(floor_plan_id),
             virtual_view_id=int(virtual_view_id),
             mode=str(mode),
             date_key=date_key,
             tz_offset_minutes=(int(tz_offset_minutes) if tz_offset_minutes is not None else None),
         )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return payload
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -292,6 +297,7 @@ async def footfall_status(
 
 @router.get("/face-captures", response_model=List[FaceCaptureOut])
 async def footfall_face_captures(
+    response: Response,
     virtual_view_id: int,
     floor_plan_id: Optional[int] = None,
     mode: str = "realtime",  # realtime | date
@@ -359,6 +365,8 @@ async def footfall_face_captures(
             )
         except Exception:
             continue
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
     return out
 
 
