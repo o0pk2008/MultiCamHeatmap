@@ -1,5 +1,6 @@
 from typing import List
 
+import json
 import time
 
 import cv2
@@ -181,8 +182,51 @@ def update_virtual_view(
     if not view:
         raise HTTPException(status_code=404, detail="Virtual view not found")
     data = payload.dict(exclude_unset=True)
+    old_out_w = int(getattr(view, "out_w", 0) or 0)
+    old_out_h = int(getattr(view, "out_h", 0) or 0)
     for k, v in data.items():
         setattr(view, k, v)
+
+    # 兼容性修复：当输出分辨率变化时，按比例缩放已保存的 virtual grid 四边形，
+    # 避免“绑定映射”里网格区域在画面中错位。
+    new_out_w = int(getattr(view, "out_w", 0) or 0)
+    new_out_h = int(getattr(view, "out_h", 0) or 0)
+    if (
+        old_out_w > 0
+        and old_out_h > 0
+        and new_out_w > 0
+        and new_out_h > 0
+        and (new_out_w != old_out_w or new_out_h != old_out_h)
+    ):
+        cfg = (
+            db.query(models.CameraVirtualViewGridConfig)
+            .filter(models.CameraVirtualViewGridConfig.virtual_view_id == view_id)
+            .first()
+        )
+        if cfg and cfg.polygon_json:
+            try:
+                raw = json.loads(cfg.polygon_json or "[]")
+                if isinstance(raw, list) and len(raw) == 4:
+                    max_x = 0.0
+                    max_y = 0.0
+                    for p in raw:
+                        x = float(p.get("x"))
+                        y = float(p.get("y"))
+                        max_x = max(max_x, x)
+                        max_y = max(max_y, y)
+                    # 仅对“像素坐标”做缩放；若是 0..1 归一化数据则跳过
+                    if max_x > 1.5 or max_y > 1.5:
+                        sx = float(new_out_w) / float(old_out_w)
+                        sy = float(new_out_h) / float(old_out_h)
+                        scaled = []
+                        for p in raw:
+                            x = float(p.get("x"))
+                            y = float(p.get("y"))
+                            scaled.append({"x": x * sx, "y": y * sy})
+                        cfg.polygon_json = json.dumps(scaled, ensure_ascii=False)
+            except Exception:
+                pass
+
     db.commit()
     db.refresh(view)
     return view
