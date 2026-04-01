@@ -1365,6 +1365,16 @@ class VirtualViewInferenceManager:
         with self._lock:
             return int(self._plain_subscribers.get(virtual_view_id, 0) + self._analyzed_subscribers.get(virtual_view_id, 0))
 
+    def count_inference_enabled_virtual_views(self) -> int:
+        """当前启用 YOLO 推理的虚拟视窗数量（人流量/热力图/分析订阅等均可能打开）。"""
+        with self._lock:
+            return sum(1 for en in self._inference_enabled.values() if en)
+
+    def active_virtual_view_stream_count(self) -> int:
+        """正在拉流解码的虚拟视窗线程数（plain/analyzed 预览底层循环）。"""
+        with self._lock:
+            return len(self._threads)
+
     def get_latest_plain(self, virtual_view_id: int) -> Optional[VirtualViewFrame]:
         return self._latest_plain.get(virtual_view_id)
 

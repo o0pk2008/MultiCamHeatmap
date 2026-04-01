@@ -4,6 +4,7 @@ import json
 from sqlalchemy import inspect, text
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -108,6 +109,26 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     return {"status": "ok"}
+
+
+@app.get("/api/system/status")
+async def system_status(response: Response):
+    """首页仪表盘：后台分析 / 推理任务数量（不含重复语义上的「总和」，分项展示）。"""
+    from .footfall_analysis import analyzer as footfall_analyzer
+    from .routers import mappings as mappings_mod
+    from .virtual_view_inference import manager as vv_manager
+
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    footfall_sessions = int(footfall_analyzer.running_session_count())
+    heatmap_floor_plans = len(mappings_mod.heatmap_running_floor_plans)
+    inference_views = int(vv_manager.count_inference_enabled_virtual_views())
+    decode_streams = int(vv_manager.active_virtual_view_stream_count())
+    return {
+        "footfall_sessions": footfall_sessions,
+        "heatmap_floor_plans": heatmap_floor_plans,
+        "inference_virtual_views": inference_views,
+        "virtual_view_decode_streams": decode_streams,
+    }
 
 
 @app.websocket("/ws/heatmap")

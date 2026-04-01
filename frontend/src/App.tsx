@@ -14,10 +14,11 @@ import HeatmapViewPage from "./views/HeatmapView";
 import MappedCamerasGrid from "./views/heatmap/MappedCamerasGrid";
 import FloorPlanCanvas from "./components/canvas/FloorPlanCanvas";
 import FootfallAnalysisView from "./views/FootfallAnalysisView";
+import HomeWelcomeView from "./views/HomeWelcomeView";
 import SystemSettingsView from "./views/SystemSettingsView";
 
 const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabKey>("realtime");
+  const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [shareRoute, setShareRoute] = useState<ShareRoute>(() => parseShareRoute(window.location.hash));
 
@@ -44,6 +45,17 @@ const App: React.FC = () => {
   const renderTabIcon = (tab: TabKey) => {
     const cls = "h-4 w-4";
     switch (tab) {
+      case "home":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <path
+              d="M4 10.5L12 4l8 6.5V20a1 1 0 01-1 1h-5v-6H10v6H5a1 1 0 01-1-1v-9.5z"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinejoin="round"
+            />
+          </svg>
+        );
       case "realtime":
         return (
           <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
@@ -141,6 +153,14 @@ const App: React.FC = () => {
 
           <nav className="flex-1 space-y-2">
             <SidebarTabButton
+              label="首页"
+              icon={renderTabIcon("home")}
+              tab="home"
+              activeTab={activeTab}
+              collapsed={sidebarCollapsed}
+              onChange={setActiveTab}
+            />
+            <SidebarTabButton
               label="实时画面"
               icon={renderTabIcon("realtime")}
               tab="realtime"
@@ -209,8 +229,11 @@ const App: React.FC = () => {
           </div>
         </aside>
 
-        {/* 右侧内容区 */}
-        <main className="flex-1 px-4 py-4">
+        {/* 右侧内容区（首页铺满宽度，其余标签保留左右内边距） */}
+        <main
+          className={`flex min-h-0 flex-1 flex-col py-4 ${activeTab === "home" ? "px-0" : "px-4"}`}
+        >
+          {activeTab === "home" && <HomeWelcomeView onOpenTab={setActiveTab} />}
           {activeTab === "realtime" && <RealtimeView />}
           {activeTab === "heatmap" && (
             <HeatmapViewPage

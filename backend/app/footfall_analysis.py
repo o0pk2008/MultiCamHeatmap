@@ -79,6 +79,9 @@ class FootfallAnalyzer:
         key = self._session_key(floor_plan_id, virtual_view_id)
         return key in self._tasks
 
+    def running_session_count(self) -> int:
+        return len(self._tasks)
+
     def stop(self, floor_plan_id: int, virtual_view_id: int) -> None:
         key = self._session_key(floor_plan_id, virtual_view_id)
         task = self._tasks.pop(key, None)
