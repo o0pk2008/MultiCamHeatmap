@@ -49,8 +49,8 @@ class CameraVirtualView(Base):
     fov_deg = Column(Float, nullable=False, default=90.0)
 
     # 输出分辨率
-    out_w = Column(Integer, nullable=False, default=960)
-    out_h = Column(Integer, nullable=False, default=540)
+    out_w = Column(Integer, nullable=False, default=640)
+    out_h = Column(Integer, nullable=False, default=640)
     # 视窗模式：
     # - panorama_perspective: 全景透视（yaw/pitch/fov 生效）
     # - native_resize: 直接使用原始画面，仅按 out_w/out_h 缩放

@@ -38,8 +38,8 @@ class CameraVirtualViewBase(BaseModel):
     yaw_deg: float = 0.0
     pitch_deg: float = 0.0
     fov_deg: float = 90.0
-    out_w: int = 960
-    out_h: int = 540
+    out_w: int = 640
+    out_h: int = 640
     crop_x1: Optional[int] = None
     crop_y1: Optional[int] = None
     crop_x2: Optional[int] = None

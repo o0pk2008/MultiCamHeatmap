@@ -2707,8 +2707,8 @@ const PanoramaViewsView: React.FC<{ onViewsChanged?: () => void }> = ({ onViewsC
           yaw_deg: 0,
           pitch_deg: 0,
           fov_deg: 90,
-          out_w: 512,
-          out_h: 512,
+          out_w: 640,
+          out_h: 640,
         }),
       });
       if (!res.ok) {
