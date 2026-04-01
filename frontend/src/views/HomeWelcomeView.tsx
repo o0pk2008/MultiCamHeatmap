@@ -15,13 +15,6 @@ type Props = {
 
 const POLL_MS = 4000;
 
-/** 欢迎页卡片背景：将 PNG 放在 frontend/public/data/images/（访问路径 /data/images/…） */
-const cardBg = (filename: string) => {
-  const b = String(import.meta.env.BASE_URL || "/");
-  const prefix = b.endsWith("/") ? b : `${b}/`;
-  return `${prefix}data/images/${filename}`;
-};
-
 const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
   const [apiOk, setApiOk] = useState<boolean | null>(null);
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -66,7 +59,11 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
       tab: "heatmap" as const,
       title: "热力图",
       desc: "平面图热度聚合与多机位映射展示",
-      bgUrl: cardBg("01_heatmap.png"),
+      bgClass:
+        "bg-gradient-to-br from-[#f8fbff] via-[#eef7ff] to-[#e9f2ff] border-[#d7e9ff]/90 hover:border-[#b8d9ff]",
+      glowClass: "from-[#dbeeff]/70 via-[#dbeeff]/20 to-transparent",
+      iconClass: "text-[#2f6fec]",
+      ctaClass: "text-[#2f6fec]",
       icon: (
         <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" aria-hidden="true">
           <circle cx="7" cy="7" r="2.2" fill="currentColor" />
@@ -80,7 +77,11 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
       tab: "footfall" as const,
       title: "人流量",
       desc: "判定线过线与客流统计、分享大屏",
-      bgUrl: cardBg("02_pepole.png"),
+      bgClass:
+        "bg-gradient-to-br from-[#fffaf4] via-[#fff3e6] to-[#ffe9d5] border-[#ffe2bf]/90 hover:border-[#ffd39b]",
+      glowClass: "from-[#ffe7ca]/70 via-[#ffe7ca]/20 to-transparent",
+      iconClass: "text-[#d57a2d]",
+      ctaClass: "text-[#d57a2d]",
       icon: (
         <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" aria-hidden="true">
           <path d="M5 6v12M19 6v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
@@ -99,7 +100,11 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
       tab: "mapping" as const,
       title: "虚拟视窗配置",
       desc: "映射管理：平面图与虚拟视窗绑定配置",
-      bgUrl: cardBg("03_config.png"),
+      bgClass:
+        "bg-gradient-to-br from-[#f8fbf8] via-[#eef9f1] to-[#e3f5ea] border-[#d2efdc]/90 hover:border-[#b6e3c6]",
+      glowClass: "from-[#d8f2e1]/75 via-[#d8f2e1]/20 to-transparent",
+      iconClass: "text-[#2f915c]",
+      ctaClass: "text-[#2f915c]",
       icon: (
         <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" aria-hidden="true">
           <path
@@ -130,25 +135,29 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
               key={it.tab}
               type="button"
               onClick={() => onOpenTab(it.tab)}
-              className="group relative flex w-full min-h-0 flex-col justify-between overflow-hidden rounded-2xl border border-slate-200/90 bg-slate-100 p-5 text-left shadow-md transition hover:-translate-y-0.5 hover:shadow-lg sm:p-6 aspect-video"
+              className={`group relative flex aspect-video w-full min-h-0 flex-col justify-between overflow-hidden rounded-2xl border p-5 text-left shadow-sm transition-all duration-300 hover:-translate-y-1 hover:shadow-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6d57f9]/45 sm:p-6 ${it.bgClass}`}
             >
               <span
                 aria-hidden
-                className="pointer-events-none absolute inset-0 z-0 bg-cover bg-center transition duration-500 ease-out group-hover:scale-105"
-                style={{ backgroundImage: `url(${it.bgUrl})` }}
+                className={`pointer-events-none absolute -bottom-14 -right-14 z-[1] opacity-18 transition-transform duration-300 group-hover:scale-110 group-hover:rotate-3 ${it.iconClass} [&_svg]:h-64 [&_svg]:w-64 md:[&_svg]:h-72 md:[&_svg]:w-72`}
+              >
+                {it.icon}
+              </span>
+              <span
+                aria-hidden
+                className={`pointer-events-none absolute inset-0 z-0 bg-gradient-to-br opacity-0 blur-2xl transition-opacity duration-300 group-hover:opacity-100 ${it.glowClass}`}
               />
               <span
                 aria-hidden
-                className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-b from-white/15 via-white/35 to-white/80"
+                className="pointer-events-none absolute inset-0 z-[1] bg-gradient-to-b from-white/25 via-white/35 to-white/65"
               />
-              <div className="relative z-[2] flex min-h-0 flex-1 flex-col text-slate-900 [text-shadow:0_1px_2px_rgba(255,255,255,0.85)]">
-                <span className="shrink-0 text-[#5639e0] [filter:drop-shadow(0_1px_1px_rgba(255,255,255,0.9))]">{it.icon}</span>
-                <span className="mt-3 line-clamp-2 text-lg font-semibold tracking-tight">{it.title}</span>
+              <div className="relative z-[2] flex min-h-0 flex-1 flex-col text-slate-900">
+                <span className="line-clamp-2 text-lg font-semibold tracking-tight">{it.title}</span>
                 <span className="mt-1 line-clamp-2 text-sm leading-relaxed text-slate-700 md:line-clamp-3">
                   {it.desc}
                 </span>
               </div>
-              <span className="relative z-[2] mt-3 shrink-0 text-xs font-semibold text-[#5639e0] [text-shadow:0_1px_2px_rgba(255,255,255,0.9)]">
+              <span className={`relative z-[2] mt-3 shrink-0 text-xs font-semibold transition-transform duration-300 group-hover:translate-x-1 ${it.ctaClass}`}>
                 进入 →
               </span>
             </button>
