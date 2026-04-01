@@ -61,7 +61,17 @@ type FaceCaptureItem = {
   ts: number;
   gender?: string | null;
   age_bucket?: string | null;
-  image_base64: string;
+  image_url?: string | null;
+  image_base64?: string | null;
+};
+
+const faceCaptureSrc = (it: FaceCaptureItem): string => {
+  const imageUrl = String(it.image_url || "").trim();
+  if (imageUrl) {
+    return imageUrl.startsWith("http") ? imageUrl : `${API_BASE}${imageUrl}`;
+  }
+  const b64 = String(it.image_base64 || "").trim();
+  return b64 ? `data:image/jpeg;base64,${b64}` : "";
 };
 
 const storageKey = "footfall_line_configs_v1";
@@ -2222,7 +2232,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                   >
                     <div className="flex h-[76px] flex-row gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
                       <img
-                        src={`data:image/jpeg;base64,${it.image_base64}`}
+                        src={faceCaptureSrc(it)}
                         alt={`face-${it.id}`}
                         className="h-16 w-16 flex-shrink-0 rounded object-cover"
                       />

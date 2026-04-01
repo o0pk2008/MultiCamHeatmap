@@ -48,7 +48,17 @@ type FaceCaptureItem = {
   ts: number;
   gender?: string | null;
   age_bucket?: string | null;
-  image_base64: string;
+  image_url?: string | null;
+  image_base64?: string | null;
+};
+
+const faceCaptureSrc = (it: FaceCaptureItem): string => {
+  const imageUrl = String(it.image_url || "").trim();
+  if (imageUrl) {
+    return imageUrl.startsWith("http") ? imageUrl : `${API_BASE}${imageUrl}`;
+  }
+  const b64 = String(it.image_base64 || "").trim();
+  return b64 ? `data:image/jpeg;base64,${b64}` : "";
 };
 
 const emptyStats = (): FootfallStats => ({
@@ -460,7 +470,7 @@ export const ShareFootfallPage: React.FC<Props> = ({ params, FloorPlanCanvasComp
               {faces.map((it) => (
                 <div key={it.id} className="flex gap-2 rounded-lg border border-slate-200 bg-slate-50 p-2">
                   <img
-                    src={`data:image/jpeg;base64,${it.image_base64}`}
+                    src={faceCaptureSrc(it)}
                     alt=""
                     className="h-16 w-16 flex-shrink-0 rounded object-cover"
                   />

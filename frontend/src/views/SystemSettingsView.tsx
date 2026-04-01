@@ -75,6 +75,8 @@ const SystemSettingsView: React.FC = () => {
   const [yoloFootPointStyle, setYoloFootPointStyle] = useState<"circle" | "square">("circle");
   const [yoloFootPointColor, setYoloFootPointColor] = useState<"green" | "blue" | "white">("green");
   const [mappedCamGridColor, setMappedCamGridColor] = useState<"white" | "green" | "blue">("white");
+  const [faceRetentionDays, setFaceRetentionDays] = useState<number>(30);
+  const [savingFaceRetention, setSavingFaceRetention] = useState(false);
   const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
   const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [purgeEndDate, setPurgeEndDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -119,6 +121,21 @@ const SystemSettingsView: React.FC = () => {
       }
     };
     void loadOverlayConfig();
+  }, []);
+
+  useEffect(() => {
+    const loadFaceRetention = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/face-capture-retention`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const v = Number(data?.retention_days);
+        if (Number.isFinite(v) && v >= 0) setFaceRetentionDays(Math.floor(v));
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadFaceRetention();
   }, []);
 
   const refreshStats = useCallback(async () => {
@@ -368,6 +385,30 @@ const SystemSettingsView: React.FC = () => {
     await saveOverlayConfig({ draw_footfall_line_overlay: checked });
   }, [saveOverlayConfig]);
 
+  const saveFaceRetention = useCallback(async () => {
+    const days = Math.max(0, Math.min(3650, Math.floor(Number(faceRetentionDays) || 0)));
+    setSavingFaceRetention(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/admin/face-capture-retention`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ retention_days: days }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(`保存失败: ${data?.detail || r.status}`);
+        return;
+      }
+      setFaceRetentionDays(Number(data?.retention_days ?? days));
+      alert("人脸抓拍保留策略已保存。");
+    } catch (e) {
+      console.error(e);
+      alert("保存失败，请稍后重试。");
+    } finally {
+      setSavingFaceRetention(false);
+    }
+  }, [faceRetentionDays]);
+
   return (
     <div className="space-y-4">
       <h2 className="text-xl font-semibold text-slate-800">系统设置</h2>
@@ -571,6 +612,33 @@ const SystemSettingsView: React.FC = () => {
               <option value="blue">蓝色</option>
             </select>
           </div>
+        </div>
+      </div>
+
+      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍保留策略</div>
+        <p className="mb-3 text-xs text-slate-500">
+          设置抓拍图片在磁盘和数据库中的保留天数。0 表示不自动清理，建议生产环境设置为 30~180 天。
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            max={3650}
+            step={1}
+            className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+            value={faceRetentionDays}
+            onChange={(e) => setFaceRetentionDays(Number(e.target.value || 0))}
+            disabled={savingFaceRetention}
+          />
+          <span className="text-xs text-slate-600">天</span>
+          <button
+            className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
+            onClick={() => void saveFaceRetention()}
+            disabled={savingFaceRetention}
+          >
+            {savingFaceRetention ? "保存中..." : "保存策略"}
+          </button>
         </div>
       </div>
 

@@ -34,6 +34,13 @@ class FootfallOverlayConfigRequest(BaseModel):
     mapped_cam_grid_color: Optional[str] = None  # white | green | blue
 
 
+class FaceCaptureRetentionRequest(BaseModel):
+    retention_days: int
+
+
+FACE_CAPTURE_RETENTION_KEY = "face_capture_retention_days"
+
+
 def _resolve_sqlite_db_path() -> Path:
     if not str(DB_URL).startswith("sqlite:///"):
         raise HTTPException(status_code=400, detail="db backup only supports sqlite")
@@ -227,3 +234,32 @@ async def admin_set_footfall_overlay_config(req: FootfallOverlayConfigRequest):
         "yolo_foot_point_color": str(cfg.get("foot_point_color", "green")),
         "mapped_cam_grid_color": str(cfg.get("mapped_cam_grid_color", "white")),
     }
+
+
+@router.get("/face-capture-retention")
+async def admin_get_face_capture_retention():
+    days = manager.get_face_capture_retention_days()
+    with SessionLocal() as db:
+        row = db.query(models.AppSetting).filter(models.AppSetting.key == FACE_CAPTURE_RETENTION_KEY).first()
+        if row is not None:
+            try:
+                days = max(0, int(str(row.value)))
+            except Exception:
+                pass
+    manager.set_face_capture_retention_days(int(days))
+    return {"retention_days": int(days)}
+
+
+@router.post("/face-capture-retention")
+async def admin_set_face_capture_retention(req: FaceCaptureRetentionRequest):
+    days = max(0, min(int(req.retention_days), 3650))
+    manager.set_face_capture_retention_days(days)
+    with SessionLocal() as db:
+        row = db.query(models.AppSetting).filter(models.AppSetting.key == FACE_CAPTURE_RETENTION_KEY).first()
+        if row is None:
+            row = models.AppSetting(key=FACE_CAPTURE_RETENTION_KEY, value=str(days))
+            db.add(row)
+        else:
+            row.value = str(days)
+        db.commit()
+    return {"status": "ok", "retention_days": int(days)}

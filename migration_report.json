@@ -1,0 +1,10 @@
+{
+  "status": "ok",
+  "scanned": 831,
+  "migrated": 0,
+  "skipped": 831,
+  "cleared_base64": 831,
+  "target_dir": "D:/AILAB/MultiCamHeatmap/MultiCamHeatmap/data/face-captures",
+  "clear_base64": true,
+  "limit": 0
+}

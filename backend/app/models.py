@@ -303,5 +303,18 @@ class FootfallFaceCapture(Base):
     stable_id = Column(Integer, nullable=True, index=True)
     gender = Column(String(16), nullable=True)
     age_bucket = Column(String(16), nullable=True)
+    image_path = Column(Text, nullable=True)
     image_base64 = Column(Text, nullable=False)
+
+
+class AppSetting(Base):
+    """
+    通用系统设置（key/value），用于持久化系统配置项。
+    """
+
+    __tablename__ = "app_settings"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(128), nullable=False, unique=True, index=True)
+    value = Column(Text, nullable=False, default="")
 

@@ -10,7 +10,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.requests import Request
 
-from .db import Base, engine
+from .db import Base, engine, SessionLocal
+from . import models
 from .routers.cameras import router as cameras_router
 from .routers.mappings import router as mappings_router
 from .routers.discovery import router as discovery_router
@@ -61,6 +62,10 @@ def _ensure_schema_columns() -> None:
                 conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_x2 INTEGER"))
             if "crop_y2" not in cols:
                 conn.execute(text("ALTER TABLE camera_virtual_views ADD COLUMN crop_y2 INTEGER"))
+        face_cols = {c.get("name") for c in insp.get_columns("footfall_face_captures")}
+        with engine.begin() as conn:
+            if "image_path" not in face_cols:
+                conn.execute(text("ALTER TABLE footfall_face_captures ADD COLUMN image_path TEXT"))
     except Exception:
         # 避免迁移失败阻断服务启动
         pass
@@ -73,6 +78,10 @@ _ensure_schema_columns()
 maps_dir = "/data/maps"
 os.makedirs(maps_dir, exist_ok=True)
 app.mount("/maps", StaticFiles(directory=maps_dir, html=False), name="maps")
+
+face_captures_dir = "/data/face-captures"
+os.makedirs(face_captures_dir, exist_ok=True)
+app.mount("/face-captures", StaticFiles(directory=face_captures_dir, html=False), name="face-captures")
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 icons_dir = "/data/icon" if os.path.isdir("/data/icon") else os.path.join(repo_root, "data", "icon")
@@ -101,6 +110,22 @@ app.include_router(footfall_router)
 app.include_router(admin_router)
 
 
+@app.on_event("startup")
+async def _load_persisted_runtime_settings() -> None:
+    try:
+        from .virtual_view_inference import manager as vv_manager
+
+        with SessionLocal() as db:
+            row = db.query(models.AppSetting).filter(models.AppSetting.key == "face_capture_retention_days").first()
+            if row is not None:
+                try:
+                    vv_manager.set_face_capture_retention_days(int(str(row.value)))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     return "<h1>MultiCam Heatmap Backend</h1><p>FastAPI is running.</p>"
@@ -123,11 +148,13 @@ async def system_status(response: Response):
     heatmap_floor_plans = len(mappings_mod.heatmap_running_floor_plans)
     inference_views = int(vv_manager.count_inference_enabled_virtual_views())
     decode_streams = int(vv_manager.active_virtual_view_stream_count())
+    face_capture_queue_size = int(vv_manager.face_capture_queue_size())
     return {
         "footfall_sessions": footfall_sessions,
         "heatmap_floor_plans": heatmap_floor_plans,
         "inference_virtual_views": inference_views,
         "virtual_view_decode_streams": decode_streams,
+        "face_capture_queue_size": face_capture_queue_size,
     }
 
 

@@ -70,7 +70,8 @@ class FaceCaptureOut(BaseModel):
     ts: float
     gender: Optional[str] = None
     age_bucket: Optional[str] = None
-    image_base64: str
+    image_url: Optional[str] = None
+    image_base64: Optional[str] = None
 
 
 class FaceReanalyzeRequest(BaseModel):
@@ -360,7 +361,12 @@ async def footfall_face_captures(
                     ts=float(r.ts),
                     gender=(str(r.gender) if r.gender is not None else None),
                     age_bucket=(str(r.age_bucket) if r.age_bucket is not None else None),
-                    image_base64=str(r.image_base64),
+                    image_url=(
+                        f"/face-captures/{str(r.image_path).lstrip('/')}"
+                        if getattr(r, "image_path", None)
+                        else None
+                    ),
+                    image_base64=(str(r.image_base64) if getattr(r, "image_base64", None) else None),
                 )
             )
         except Exception:
@@ -415,7 +421,10 @@ async def footfall_reanalyze_face_captures(req: FaceReanalyzeRequest):
 
         for r in rows:
             scanned += 1
-            gender, age_bucket = manager.reanalyze_face_capture_attributes(str(r.image_base64 or ""))
+            gender, age_bucket = manager.reanalyze_face_capture_attributes(
+                image_base64=str(r.image_base64 or ""),
+                image_path=(str(r.image_path) if getattr(r, "image_path", None) else None),
+            )
             gender_next = str(gender) if gender is not None else None
             age_next = str(age_bucket) if age_bucket is not None else None
             changed = (r.gender != gender_next) or (r.age_bucket != age_next)

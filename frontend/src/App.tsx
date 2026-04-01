@@ -1153,7 +1153,7 @@ const MappingView: React.FC = () => {
                 ) : bindMappedCameraIds.length > 0 ? (
                   <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1">
                     <div className="text-[11px] text-amber-900">
-                      该平面图已存在映射关联（摄像头 {bindMappedCameraIds.length} 个），需先清空映射后才能修改网格。
+                      该平面图已存在映射关联（设备 {bindMappedCameraIds.length} 个），需先清空映射后才能修改网格。
                     </div>
                     <button
                       type="button"

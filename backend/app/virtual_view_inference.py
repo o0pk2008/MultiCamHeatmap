@@ -3,6 +3,8 @@ import time
 import threading
 import re
 import base64
+import queue
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, Any
 
@@ -150,6 +152,21 @@ class VirtualViewInferenceManager:
         self._track_attr_latest: Dict[Tuple[int, int], Dict[str, Any]] = {}
         # 去重：每次进入只抓拍一次（按稳定ID）
         self._enter_capture_seen: Dict[Tuple[int, int], float] = {}
+        self._face_captures_root = os.environ.get("FACE_CAPTURE_DIR", "/data/face-captures")
+        self._face_capture_jpeg_quality = int(os.environ.get("FACE_CAPTURE_JPEG_QUALITY", "75"))
+        self._face_capture_retention_days = max(0, int(os.environ.get("FACE_CAPTURE_RETENTION_DAYS", "30")))
+        self._face_capture_write_queue: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=2000)
+        self._face_capture_writer_stop = threading.Event()
+        self._face_capture_writer = threading.Thread(
+            target=self._face_capture_writer_loop,
+            name="face-capture-writer",
+            daemon=True,
+        )
+        try:
+            os.makedirs(self._face_captures_root, exist_ok=True)
+        except Exception:
+            pass
+        self._face_capture_writer.start()
 
         # 当前在后端用于 footfall 判定的直线（用于在 YOLO 画面里可视化对齐）
         # vv_id -> ((p1_u,p1_v),(p2_u,p2_v))
@@ -165,6 +182,14 @@ class VirtualViewInferenceManager:
         self._yolo_foot_point_color: str = "green"  # green | blue | white
         # 监控画面映射网格颜色（系统设置）
         self._mapped_cam_grid_color: str = "white"  # white | green | blue
+
+    def set_face_capture_retention_days(self, days: int) -> None:
+        with self._lock:
+            self._face_capture_retention_days = max(0, int(days))
+
+    def get_face_capture_retention_days(self) -> int:
+        with self._lock:
+            return int(self._face_capture_retention_days)
 
     def set_footfall_line_uv(
         self, virtual_view_id: int, p1_uv: Tuple[float, float], p2_uv: Tuple[float, float]
@@ -528,10 +553,11 @@ class VirtualViewInferenceManager:
         except Exception:
             pass
         try:
-            ok, jpg = cv2.imencode(".jpg", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            ok, jpg = cv2.imencode(".jpg", face_crop, [int(cv2.IMWRITE_JPEG_QUALITY), int(self._face_capture_jpeg_quality)])
             if not ok:
                 return
-            b64 = base64.b64encode(jpg.tobytes()).decode("ascii")
+            jpg_bytes = jpg.tobytes()
+            b64 = base64.b64encode(jpg_bytes).decode("ascii")
         except Exception:
             return None
         self._face_capture_last_ts[key] = float(ts)
@@ -544,6 +570,7 @@ class VirtualViewInferenceManager:
                 "gender": gender,
                 "age_bucket": age_bucket,
                 "image_base64": b64,
+                "_jpg_bytes": jpg_bytes,
             }
             arr = self._face_captures_by_vv.setdefault(int(virtual_view_id), [])
             arr.insert(0, row)
@@ -640,10 +667,12 @@ class VirtualViewInferenceManager:
                 ts=float(ts),
                 gender=final_gender,
                 age_bucket=final_age_bucket,
-                image_base64=str(row.get("image_base64", "")),
+                image_jpg=row.get("_jpg_bytes"),
             )
         except Exception:
             pass
+        with self._lock:
+            row.pop("_jpg_bytes", None)
         with self._lock:
             self._enter_capture_seen[seen_key] = float(ts)
 
@@ -657,39 +686,129 @@ class VirtualViewInferenceManager:
         ts: float,
         gender: Optional[str],
         age_bucket: Optional[str],
-        image_base64: str,
+        image_jpg: Any,
     ) -> None:
-        if not image_base64:
+        if not image_jpg:
             return
+        item = {
+            "line_config_id": int(line_config_id),
+            "floor_plan_id": int(floor_plan_id),
+            "virtual_view_id": int(virtual_view_id),
+            "ts": float(ts),
+            "track_id": int(track_id),
+            "stable_id": int(stable_id),
+            "gender": (str(gender) if gender is not None else None),
+            "age_bucket": (str(age_bucket) if age_bucket is not None else None),
+            "image_jpg": bytes(image_jpg),
+        }
+        try:
+            self._face_capture_write_queue.put_nowait(item)
+        except queue.Full:
+            try:
+                self._face_capture_write_queue.get_nowait()
+                self._face_capture_write_queue.put_nowait(item)
+            except Exception:
+                return
+
+    def face_capture_queue_size(self) -> int:
+        try:
+            return int(self._face_capture_write_queue.qsize())
+        except Exception:
+            return 0
+
+    def _face_capture_path_for_item(self, item: Dict[str, Any]) -> Tuple[str, str]:
+        ts = float(item.get("ts", time.time()))
+        dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        day = dt.strftime("%Y-%m-%d")
+        rel_dir = day
+        file_name = (
+            f"fp{int(item.get('floor_plan_id', 0))}_vv{int(item.get('virtual_view_id', 0))}"
+            f"_t{int(ts * 1000)}_s{int(item.get('stable_id', -1))}_k{int(item.get('track_id', -1))}.jpg"
+        )
+        rel_path = f"{rel_dir}/{file_name}"
+        abs_path = os.path.join(self._face_captures_root, rel_dir, file_name)
+        return rel_path, abs_path
+
+    def _cleanup_face_captures_retention(self) -> None:
+        if self._face_capture_retention_days <= 0:
+            return
+        cutoff = time.time() - float(self._face_capture_retention_days * 86400)
         try:
             with SessionLocal() as db:
-                row = models.FootfallFaceCapture(
-                    line_config_id=int(line_config_id),
-                    floor_plan_id=int(floor_plan_id),
-                    virtual_view_id=int(virtual_view_id),
-                    ts=float(ts),
-                    track_id=int(track_id),
-                    stable_id=int(stable_id),
-                gender=(str(gender) if gender is not None else None),
-                age_bucket=(str(age_bucket) if age_bucket is not None else None),
-                    image_base64=str(image_base64),
+                old_rows = (
+                    db.query(models.FootfallFaceCapture)
+                    .filter(models.FootfallFaceCapture.ts < float(cutoff))
+                    .all()
                 )
-                db.add(row)
+                for row in old_rows:
+                    p = str(getattr(row, "image_path", "") or "").strip()
+                    if p:
+                        full = os.path.join(self._face_captures_root, p.replace("/", os.sep))
+                        try:
+                            if os.path.isfile(full):
+                                os.remove(full)
+                        except Exception:
+                            pass
+                    db.delete(row)
                 db.commit()
         except Exception:
             return
 
-    def reanalyze_face_capture_attributes(self, image_base64: str) -> Tuple[Optional[str], Optional[str]]:
+    def _face_capture_writer_loop(self) -> None:
+        last_cleanup_ts = 0.0
+        while not self._face_capture_writer_stop.is_set():
+            try:
+                item = self._face_capture_write_queue.get(timeout=0.5)
+            except queue.Empty:
+                item = None
+            if item is not None:
+                try:
+                    rel_path, abs_path = self._face_capture_path_for_item(item)
+                    os.makedirs(os.path.dirname(abs_path), exist_ok=True)
+                    with open(abs_path, "wb") as f:
+                        f.write(bytes(item.get("image_jpg", b"")))
+                    with SessionLocal() as db:
+                        row = models.FootfallFaceCapture(
+                            line_config_id=int(item.get("line_config_id", 0)),
+                            floor_plan_id=int(item.get("floor_plan_id", 0)),
+                            virtual_view_id=int(item.get("virtual_view_id", 0)),
+                            ts=float(item.get("ts", time.time())),
+                            track_id=int(item.get("track_id", -1)),
+                            stable_id=int(item.get("stable_id", -1)),
+                            gender=item.get("gender"),
+                            age_bucket=item.get("age_bucket"),
+                            image_path=str(rel_path),
+                            image_base64="",
+                        )
+                        db.add(row)
+                        db.commit()
+                except Exception:
+                    pass
+            now = time.time()
+            if now - last_cleanup_ts >= 3600:
+                self._cleanup_face_captures_retention()
+                last_cleanup_ts = now
+
+    def reanalyze_face_capture_attributes(
+        self,
+        image_base64: Optional[str] = None,
+        image_path: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
         """
         对已落库的人脸抓拍图（base64）重新执行年龄/性别识别。
         返回 (gender, age_bucket)。
         """
-        if not image_base64:
-            return None, None
         try:
-            raw = base64.b64decode(str(image_base64))
-            arr = np.frombuffer(raw, dtype=np.uint8)
-            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            img = None
+            p = str(image_path or "").strip()
+            if p:
+                full = os.path.join(self._face_captures_root, p.replace("/", os.sep))
+                if os.path.isfile(full):
+                    img = cv2.imread(full)
+            if img is None and image_base64:
+                raw = base64.b64decode(str(image_base64))
+                arr = np.frombuffer(raw, dtype=np.uint8)
+                img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if img is None or getattr(img, "size", 0) == 0:
                 return None, None
             return self._infer_gender_age_from_crop(img, time.time())
