@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
+import { copyToClipboard } from "../shared/clipboard";
 import { API_BASE } from "../shared/config";
 import { floorPlanImageUrl, preloadFloorPlanImage } from "../shared/floorPlan";
 import { worldToImagePoint } from "../shared/geometry";
@@ -1815,20 +1816,46 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   return (
     <div className="grid h-full min-h-0 grid-cols-1 gap-4 md:grid-cols-[2fr,1fr,3fr] md:grid-rows-[4fr,2fr]">
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-1 md:row-start-1 md:row-span-2">
-        <div className="mb-2 flex items-center justify-between">
+        <div className="mb-2 flex items-center justify-between gap-2">
           <span className="text-sm font-semibold text-slate-800">平面图选择</span>
-          <select
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
-            value={selectedFloorPlanId ?? ""}
-            onChange={(e) => setSelectedFloorPlanId(e.target.value ? Number(e.target.value) : null)}
-          >
-            {floorPlans.length === 0 && <option value="">无平面图</option>}
-            {floorPlans.map((fp) => (
-              <option key={fp.id} value={fp.id}>
-                {fp.name}
-              </option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+              disabled={selectedFloorPlanId == null || requiredVirtualViewId == null}
+              title={requiredVirtualViewId == null ? "请先选择已配置判定线的虚拟视窗" : "复制分享链接"}
+              onClick={async () => {
+                if (selectedFloorPlanId == null || requiredVirtualViewId == null) return;
+                const base = `${window.location.origin}${window.location.pathname}#/share/footfall`;
+                const qp = new URLSearchParams();
+                qp.set("floor_plan_id", String(selectedFloorPlanId));
+                qp.set("virtual_view_id", String(requiredVirtualViewId));
+                qp.set("embed", "1");
+                qp.set("grid", showGrid ? "1" : "0");
+                qp.set("refresh_ms", "2000");
+                qp.set("mode", statsMode === "realtime" ? "current" : "history");
+                if (statsMode === "date") qp.set("date_key", statsDate);
+                const url = `${base}?${qp.toString()}`;
+                const ok = await copyToClipboard(url);
+                if (ok) alert("已复制分享链接");
+                else window.prompt("复制链接", url);
+              }}
+            >
+              分享
+            </button>
+            <select
+              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs focus:border-blue-500 focus:outline-none"
+              value={selectedFloorPlanId ?? ""}
+              onChange={(e) => setSelectedFloorPlanId(e.target.value ? Number(e.target.value) : null)}
+            >
+              {floorPlans.length === 0 && <option value="">无平面图</option>}
+              {floorPlans.map((fp) => (
+                <option key={fp.id} value={fp.id}>
+                  {fp.name}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
         <div className="mb-2 flex items-center justify-between">

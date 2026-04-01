@@ -26,6 +26,13 @@ export type FloorPlanCanvasProps = {
     vMax: number;
   };
   cellFillColors?: Map<string, string>;
+  /** 人流量判定线（归一化 UV 0–1，与底图同一 pan/zoom 变换） */
+  footfallLineUV?: {
+    p1: { x: number; y: number };
+    p2: { x: number; y: number };
+    inLabel: string;
+    outLabel: string;
+  } | null;
 };
 
 const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
@@ -47,6 +54,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     showPoiTrackIds = false,
     heatmapRender,
     cellFillColors,
+    footfallLineUV = null,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -323,6 +331,48 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       ctx.strokeRect(x, y, cellW, cellH);
     }
 
+    if (footfallLineUV) {
+      const { p1, p2, inLabel, outLabel } = footfallLineUV;
+      const ix1 = p1.x * iw;
+      const iy1 = p1.y * ih;
+      const ix2 = p2.x * iw;
+      const iy2 = p2.y * ih;
+      const mx = (ix1 + ix2) / 2;
+      const my = (iy1 + iy2) / 2;
+      ctx.beginPath();
+      ctx.moveTo(ix1, iy1);
+      ctx.lineTo(ix2, iy2);
+      ctx.strokeStyle = "rgba(15,23,42,0.35)";
+      ctx.lineWidth = 5 / fitScale;
+      ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(ix1, iy1);
+      ctx.lineTo(ix2, iy2);
+      ctx.strokeStyle = "#0EA5E9";
+      ctx.lineWidth = 3 / fitScale;
+      ctx.stroke();
+      const dotR = 5.5 / fitScale;
+      ctx.fillStyle = "#fff";
+      ctx.strokeStyle = "#0EA5E9";
+      ctx.lineWidth = 2 / fitScale;
+      ctx.beginPath();
+      ctx.arc(ix1, iy1, dotR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(ix2, iy2, dotR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      const fontPx = 11 / fitScale;
+      ctx.font = `600 ${fontPx}px sans-serif`;
+      ctx.fillStyle = "#0f172a";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(inLabel, mx, my - 14 / fitScale);
+      ctx.fillText(outLabel, mx, my + 22 / fitScale);
+    }
+
     if (hoverCell != null && hoverCell.row >= 0 && hoverCell.row < rows && hoverCell.col >= 0 && hoverCell.col < cols) {
       const cellW = iw / cols;
       const cellH = ih / rows;
@@ -348,7 +398,28 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       return;
     }
     ctx.restore();
-  }, [pan, zoom, hoverCell, linkedHoverCell, sel, showGrid, gridRows, gridCols, imgSize, canvasSize, poiIconReadyTick, heatmapCells, poiCells, poiTrackIds, showPoiTrackIds, heatmapRender, cellFillColors, backgroundColor, mappedCells]);
+  }, [
+    pan,
+    zoom,
+    hoverCell,
+    linkedHoverCell,
+    sel,
+    showGrid,
+    gridRows,
+    gridCols,
+    imgSize,
+    canvasSize,
+    poiIconReadyTick,
+    heatmapCells,
+    poiCells,
+    poiTrackIds,
+    showPoiTrackIds,
+    heatmapRender,
+    cellFillColors,
+    backgroundColor,
+    mappedCells,
+    footfallLineUV,
+  ]);
 
   useEffect(() => {
     draw();
@@ -388,30 +459,42 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     [canvasToImage, gridRows, gridCols, imgSize],
   );
 
-  const onWheel = (e: React.WheelEvent) => {
-    if (!imgSize || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const cssX = e.clientX - rect.left;
-    const cssY = e.clientY - rect.top;
-    const cx = (cssX * canvasSize.w) / Math.max(1, rect.width);
-    const cy = (cssY * canvasSize.h) / Math.max(1, rect.height);
-    const { x: imgX, y: imgY } = canvasToImage(cx, cy);
-    const cw = canvasSize.w;
-    const ch = canvasSize.h;
-    const iw = imgSize.w;
-    const ih = imgSize.h;
-    const fitScale = Math.min(cw / iw, ch / ih);
-    const offsetX = cw / 2 - (iw * fitScale) / 2;
-    const offsetY = ch / 2 - (ih * fitScale) / 2;
-    const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom((oldZoom) => {
-      const newZoom = Math.min(5, Math.max(0.3, oldZoom * zoomFactor));
-      const baseX = offsetX + fitScale * imgX;
-      const baseY = offsetY + fitScale * imgY;
-      setPan({ x: cx - newZoom * baseX, y: cy - newZoom * baseY });
-      return newZoom;
-    });
-  };
+  const onWheelNative = useCallback(
+    (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!imgSize || !canvasRef.current) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const cssX = e.clientX - rect.left;
+      const cssY = e.clientY - rect.top;
+      const cx = (cssX * canvasSize.w) / Math.max(1, rect.width);
+      const cy = (cssY * canvasSize.h) / Math.max(1, rect.height);
+      const { x: imgX, y: imgY } = canvasToImage(cx, cy);
+      const cw = canvasSize.w;
+      const ch = canvasSize.h;
+      const iw = imgSize.w;
+      const ih = imgSize.h;
+      const fitScale = Math.min(cw / iw, ch / ih);
+      const offsetX = cw / 2 - (iw * fitScale) / 2;
+      const offsetY = ch / 2 - (ih * fitScale) / 2;
+      const zoomFactor = e.deltaY > 0 ? 0.9 : 1.1;
+      setZoom((oldZoom) => {
+        const newZoom = Math.min(5, Math.max(0.3, oldZoom * zoomFactor));
+        const baseX = offsetX + fitScale * imgX;
+        const baseY = offsetY + fitScale * imgY;
+        setPan({ x: cx - newZoom * baseX, y: cy - newZoom * baseY });
+        return newZoom;
+      });
+    },
+    [imgSize, canvasSize, canvasToImage],
+  );
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    el.addEventListener("wheel", onWheelNative, { passive: false });
+    return () => el.removeEventListener("wheel", onWheelNative);
+  }, [onWheelNative]);
 
   const onMouseDown = (e: React.MouseEvent) => {
     setDragging(true);
@@ -451,8 +534,7 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     <div
       ref={containerRef}
       className={`relative h-full w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-100 ${className}`}
-      style={{ height: "100%", minHeight: 0, userSelect: "none" }}
-      onWheel={onWheel}
+      style={{ height: "100%", minHeight: 0, userSelect: "none", overscrollBehavior: "contain" }}
       onMouseDown={onMouseDown}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}

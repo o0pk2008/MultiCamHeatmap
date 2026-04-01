@@ -1,6 +1,6 @@
 export type TabKey = "realtime" | "heatmap" | "people" | "footfall" | "mapping" | "settings";
 
-export type ShareKind = "heatmap" | "people";
+export type ShareKind = "heatmap" | "people" | "footfall";
 export type ShareRoute =
   | {
       kind: ShareKind;

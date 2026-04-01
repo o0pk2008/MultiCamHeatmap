@@ -8,6 +8,7 @@ import { Camera, CameraVirtualView, FloorPlan, Footfall, HeatmapSource, Pt, Shar
 import { parseShareRoute } from "./shared/routing";
 import RealtimeView from "./views/RealtimeView";
 import { ShareHeatmapPage, SharePeoplePage } from "./views/share/SharePages";
+import { ShareFootfallPage } from "./views/share/ShareFootfallPage";
 import PeoplePositionView from "./views/PeoplePositionView";
 import HeatmapViewPage from "./views/HeatmapView";
 import MappedCamerasGrid from "./views/heatmap/MappedCamerasGrid";
@@ -33,6 +34,9 @@ const App: React.FC = () => {
   if (shareRoute) {
     if (shareRoute.kind === "heatmap") {
       return <ShareHeatmapPage params={shareRoute.params} FloorPlanCanvasComponent={FloorPlanCanvas} />;
+    }
+    if (shareRoute.kind === "footfall") {
+      return <ShareFootfallPage params={shareRoute.params} FloorPlanCanvasComponent={FloorPlanCanvas} />;
     }
     return <SharePeoplePage params={shareRoute.params} FloorPlanCanvasComponent={FloorPlanCanvas} />;
   }
@@ -1185,7 +1189,7 @@ const MappingView: React.FC = () => {
               </div>
             )}
             <div className="mb-2 text-[11px] font-semibold text-slate-700">平面图预览</div>
-            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-100">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
               {bindFloorPlanId !== "" ? (
                 (() => {
                   const fp = floorPlans.find((f) => f.id === bindFloorPlanId) || null;
@@ -1204,6 +1208,7 @@ const MappingView: React.FC = () => {
                       imageUrl={url}
                       gridRows={rows}
                       gridCols={cols}
+                      backgroundColor="white"
                       selectedCell={fpSelectedCell}
                       onCellClick={(cell) => {
                         setFpSelectedCell(cell);
