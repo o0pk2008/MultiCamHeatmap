@@ -156,8 +156,8 @@ const VirtualViewGridOverlay: React.FC<{
 };
 
 /** 主宫格 MJPEG：分批发起连接，减轻首屏争用；每批路数与批次间隔 */
-const MJPEG_STAGGER_BATCH = 2;
-const MJPEG_STAGGER_INTERVAL_MS = 300;
+const MJPEG_STAGGER_BATCH = 1;
+const MJPEG_STAGGER_INTERVAL_MS = 1000;
 
 /**
  * 热力图宫格 MJPEG：SPA 内切换 analyzed 时需「短时卸载 + iframe」断干净旧 multipart 连接（用 img 易再黑屏）。
@@ -167,19 +167,23 @@ const MJPEG_SWAP_UNMOUNT_MS = 160;
 
 const HeatmapSlotMjpeg: React.FC<{
   staggerAllowed: boolean;
+  analyzing: boolean;
   mjpegUrl: string;
+  readyProbeUrl?: string;
   imgKey: string;
   alt: string;
   frameW: number;
   frameH: number;
   gridOverlay: React.ReactNode;
-}> = ({ staggerAllowed, mjpegUrl, imgKey, alt, frameW, frameH, gridOverlay }) => {
+}> = ({ staggerAllowed, analyzing, mjpegUrl, readyProbeUrl = "", imgKey, alt, frameW, frameH, gridOverlay }) => {
   const [streamVisible, setStreamVisible] = useState(false);
+  const [frameLoaded, setFrameLoaded] = useState(false);
   const firstUrlForSlotRef = useRef(true);
   const wrapRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
 
   useEffect(() => {
+    setFrameLoaded(false);
     if (!staggerAllowed) {
       setStreamVisible(false);
       return;
@@ -193,6 +197,49 @@ const HeatmapSlotMjpeg: React.FC<{
     const t = window.setTimeout(() => setStreamVisible(true), MJPEG_SWAP_UNMOUNT_MS);
     return () => window.clearTimeout(t);
   }, [staggerAllowed, mjpegUrl]);
+
+  useEffect(() => {
+    if (!streamVisible) return;
+    if (frameLoaded) return;
+    if (!readyProbeUrl) return;
+
+    let cancelled = false;
+    let timer: number | null = null;
+    let hardDeadlineTimer: number | null = null;
+    const startedAt = Date.now();
+
+    // 独立硬超时：防止探测请求长期 pending（既不 onload 也不 onerror）导致遮罩不消失。
+    hardDeadlineTimer = window.setTimeout(() => {
+      if (!cancelled) setFrameLoaded(true);
+    }, 2200);
+
+    const probe = () => {
+      if (cancelled || frameLoaded) return;
+      const img = new Image();
+      img.onload = () => {
+        if (cancelled) return;
+        setFrameLoaded(true);
+      };
+      img.onerror = () => {
+        if (cancelled || frameLoaded) return;
+        if (Date.now() - startedAt > 7000) {
+          // 兜底：探测长期失败也不要让遮罩永久存在
+          setFrameLoaded(true);
+          return;
+        }
+        timer = window.setTimeout(probe, 450);
+      };
+      const sep = readyProbeUrl.includes("?") ? "&" : "?";
+      img.src = `${readyProbeUrl}${sep}t=${Date.now()}`;
+    };
+
+    probe();
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+      if (hardDeadlineTimer != null) window.clearTimeout(hardDeadlineTimer);
+    };
+  }, [streamVisible, frameLoaded, readyProbeUrl, mjpegUrl]);
 
   useLayoutEffect(() => {
     const el = wrapRef.current;
@@ -217,15 +264,20 @@ const HeatmapSlotMjpeg: React.FC<{
   const scale =
     box.w > 0 && box.h > 0 ? Math.min(box.w / iw, box.h / ih) : 1;
 
+  const LoadingOverlay = (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex items-center gap-2 rounded-md border border-white/20 bg-black/35 px-3 py-2 text-xs text-slate-100">
+        <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
+        <span>{analyzing ? "正在启动分析流..." : "正在连接预览流..."}</span>
+      </div>
+    </div>
+  );
+
   if (!staggerAllowed) {
-    return (
-      <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">加载中...</div>
-    );
+    return LoadingOverlay;
   }
   if (!streamVisible) {
-    return (
-      <div className="flex h-full w-full items-center justify-center text-xs text-slate-200">加载中...</div>
-    );
+    return LoadingOverlay;
   }
   return (
     <div ref={wrapRef} className="relative h-full w-full min-h-0 overflow-hidden bg-black">
@@ -247,7 +299,13 @@ const HeatmapSlotMjpeg: React.FC<{
           transform: `translate(-50%, -50%) scale(${scale})`,
           transformOrigin: "center center",
         }}
+        onLoad={() => setFrameLoaded(true)}
       />
+      {!frameLoaded ? (
+        <div className="pointer-events-none absolute inset-0">
+          {LoadingOverlay}
+        </div>
+      ) : null}
       {gridOverlay}
     </div>
   );
@@ -529,7 +587,9 @@ const MappedCamerasGrid: React.FC<{
                           return (
                             <HeatmapSlotMjpeg
                               staggerAllowed={canStartMjpeg}
+                              analyzing={analyzing}
                               mjpegUrl={mjpegUrl}
+                              readyProbeUrl={`${API_BASE}/api/cameras/${src.camera_id}/virtual-views/${src.virtual_view_id}/snapshot.jpg`}
                               imgKey={`${key}-${analyzing}-e${mjpegStreamEpoch}-s${slotIdx}`}
                               alt={`heatmap-virtual-${src.virtual_view_id}`}
                               frameW={fw}
