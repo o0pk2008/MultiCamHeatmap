@@ -523,6 +523,9 @@ const MappingView: React.FC = () => {
   const [mappingsLoading, setMappingsLoading] = useState(false);
   const [mappingsSaving, setMappingsSaving] = useState(false);
   const [replaceMappingId, setReplaceMappingId] = useState<number | null>(null);
+  /** 平面图上点击已绑定格子切换摄像头后，待 cellMappings 加载再补全右侧映射格选中 */
+  const pendingFloorLocateRef = useRef<{ row: number; col: number } | null>(null);
+  const cellMappingListScrollRef = useRef<HTMLDivElement | null>(null);
   const [autoAnchors, setAutoAnchors] = useState<{ camera_row: number; camera_col: number; floor_row: number; floor_col: number }[]>([]);
   const [autoOverwrite, setAutoOverwrite] = useState(false);
 
@@ -902,6 +905,44 @@ const MappingView: React.FC = () => {
       .finally(() => setMappingsLoading(false));
   }, [bindCameraId, bindCameraOptions, bindFloorPlanId]);
 
+  useEffect(() => {
+    const p = pendingFloorLocateRef.current;
+    if (!p || mappingsLoading) return;
+    const m = cellMappings.find((x) => x.floor_row === p.row && x.floor_col === p.col);
+    if (m) {
+      setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
+    }
+    pendingFloorLocateRef.current = null;
+  }, [cellMappings, mappingsLoading]);
+
+  const cellMappingListHighlightId = useMemo(() => {
+    if (replaceMappingId != null) return replaceMappingId;
+    if (vpSelectedCell == null || fpSelectedCell == null) return null;
+    const m = cellMappings.find(
+      (x) =>
+        x.camera_row === vpSelectedCell.row &&
+        x.camera_col === vpSelectedCell.col &&
+        x.floor_row === fpSelectedCell.row &&
+        x.floor_col === fpSelectedCell.col,
+    );
+    return m?.id ?? null;
+  }, [replaceMappingId, vpSelectedCell, fpSelectedCell, cellMappings]);
+
+  useEffect(() => {
+    if (cellMappingListHighlightId == null) return;
+    const id = cellMappingListHighlightId;
+    const run = () => {
+      const root = cellMappingListScrollRef.current;
+      if (!root) return;
+      const card = root.querySelector(`[data-cell-mapping-id="${id}"]`);
+      if (card instanceof HTMLElement) {
+        card.scrollIntoView({ block: "center", behavior: "smooth", inline: "nearest" });
+      }
+    };
+    const t = window.requestAnimationFrame(run);
+    return () => window.cancelAnimationFrame(t);
+  }, [cellMappingListHighlightId]);
+
   // 切换平面图时同步网格数为该平面图的配置
   useEffect(() => {
     if (bindFloorPlanId === "") return;
@@ -1235,12 +1276,27 @@ const MappingView: React.FC = () => {
                       selectedCell={fpSelectedCell}
                       onCellClick={(cell) => {
                         setFpSelectedCell(cell);
-                        if (!cell) return;
+                        if (!cell) {
+                          pendingFloorLocateRef.current = null;
+                          return;
+                        }
+                        setReplaceMappingId(null);
                         const key = `${cell.row},${cell.col}`;
                         const srcKey = floorCellToSourceKey.get(key);
                         if (srcKey) {
-                          // 自动切换右侧摄像头选择到该绑定源
-                          setBindCameraId(srcKey);
+                          if (srcKey === bindCameraId) {
+                            pendingFloorLocateRef.current = null;
+                            const m = cellMappings.find((x) => x.floor_row === cell.row && x.floor_col === cell.col);
+                            if (m) {
+                              setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
+                            }
+                          } else {
+                            pendingFloorLocateRef.current = { row: cell.row, col: cell.col };
+                            setBindCameraId(srcKey);
+                          }
+                        } else {
+                          pendingFloorLocateRef.current = null;
+                          setVpSelectedCell(null);
                         }
                       }}
                       onCellHover={(cell) => setFpHoverCell(cell)}
@@ -1692,7 +1748,14 @@ const MappingView: React.FC = () => {
                               }
                             }
                             if (found && mappedCamCells.has(`${found.row},${found.col}`)) {
-                              // 已绑定的格子不可再次选择
+                              const m = cellMappings.find(
+                                (x) => x.camera_row === found.row && x.camera_col === found.col,
+                              );
+                              if (m) {
+                                setReplaceMappingId(null);
+                                setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
+                                setFpSelectedCell({ row: m.floor_row, col: m.floor_col });
+                              }
                               return;
                             }
                             setVpSelectedCell(found);
@@ -1915,6 +1978,101 @@ const MappingView: React.FC = () => {
                 </button>
                 <button
                   type="button"
+                  className="rounded border border-amber-300 bg-white px-3 py-1 text-xs text-amber-800 hover:bg-amber-50 disabled:opacity-50"
+                  disabled={(() => {
+                    if (
+                      mappingsSaving ||
+                      bindFloorPlanId === "" ||
+                      typeof bindFloorPlanId !== "number" ||
+                      !(bindCameraOptions.find((o) => o.key === bindCameraId) || null) ||
+                      (bindCameraOptions.find((o) => o.key === bindCameraId) || null)?.kind !== "virtual"
+                    ) {
+                      return true;
+                    }
+                    const pick = (() => {
+                      if (vpSelectedCell && fpSelectedCell) {
+                        const both = cellMappings.find(
+                          (x) =>
+                            x.camera_row === vpSelectedCell.row &&
+                            x.camera_col === vpSelectedCell.col &&
+                            x.floor_row === fpSelectedCell.row &&
+                            x.floor_col === fpSelectedCell.col,
+                        );
+                        if (both) return both;
+                      }
+                      if (vpSelectedCell) {
+                        return cellMappings.find(
+                          (x) =>
+                            x.camera_row === vpSelectedCell.row && x.camera_col === vpSelectedCell.col,
+                        );
+                      }
+                      if (fpSelectedCell) {
+                        return cellMappings.find(
+                          (x) =>
+                            x.floor_row === fpSelectedCell.row && x.floor_col === fpSelectedCell.col,
+                        );
+                      }
+                      return undefined;
+                    })();
+                    return pick == null;
+                  })()}
+                  title="删除当前选中格子对应的绑定（与下方列表「删」相同）"
+                  onClick={async () => {
+                    const opt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+                    if (!opt || opt.kind !== "virtual") return;
+                    if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+                    let m:
+                      | (typeof cellMappings)[number]
+                      | undefined;
+                    if (vpSelectedCell && fpSelectedCell) {
+                      m = cellMappings.find(
+                        (x) =>
+                          x.camera_row === vpSelectedCell.row &&
+                          x.camera_col === vpSelectedCell.col &&
+                          x.floor_row === fpSelectedCell.row &&
+                          x.floor_col === fpSelectedCell.col,
+                      );
+                    }
+                    if (!m && vpSelectedCell) {
+                      m = cellMappings.find(
+                        (x) =>
+                          x.camera_row === vpSelectedCell.row && x.camera_col === vpSelectedCell.col,
+                      );
+                    }
+                    if (!m && fpSelectedCell) {
+                      m = cellMappings.find(
+                        (x) =>
+                          x.floor_row === fpSelectedCell.row && x.floor_col === fpSelectedCell.col,
+                      );
+                    }
+                    if (!m) {
+                      alert("当前选择没有对应的绑定关系");
+                      return;
+                    }
+                    setMappingsSaving(true);
+                    try {
+                      const res = await fetch(
+                        `${API_BASE}/api/cameras/virtual-views/${opt.view.id}/cell-mappings/${m.id}`,
+                        { method: "DELETE" },
+                      );
+                      if (!res.ok) throw new Error("delete failed");
+                      setCellMappings((old) => old.filter((x) => x.id !== m!.id));
+                      setBindingColorRefreshTick((t) => t + 1);
+                      if (replaceMappingId === m.id) setReplaceMappingId(null);
+                      setVpSelectedCell(null);
+                      setFpSelectedCell(null);
+                    } catch (e) {
+                      console.error(e);
+                      alert("清除绑定失败");
+                    } finally {
+                      setMappingsSaving(false);
+                    }
+                  }}
+                >
+                  清除绑定
+                </button>
+                <button
+                  type="button"
                   className="rounded border border-rose-300 bg-white px-3 py-1 text-xs text-rose-700 hover:bg-rose-50 disabled:opacity-50"
                   disabled={
                     mappingsSaving ||
@@ -2093,7 +2251,7 @@ const MappingView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3">
+            <div ref={cellMappingListScrollRef} className="flex-1 overflow-y-auto p-3">
               {mappingsLoading ? (
                 <div className="text-xs text-slate-500">加载中…</div>
               ) : cellMappings.length === 0 ? (
@@ -2107,13 +2265,23 @@ const MappingView: React.FC = () => {
                     const floorCols = Math.max(1, Number(bindGridCols) || 1);
                     const camId = m.camera_row * camCols + m.camera_col;
                     const floorId = m.floor_row * floorCols + m.floor_col;
+                    const mappingCardActive =
+                      vpSelectedCell != null &&
+                      fpSelectedCell != null &&
+                      m.camera_row === vpSelectedCell.row &&
+                      m.camera_col === vpSelectedCell.col &&
+                      m.floor_row === fpSelectedCell.row &&
+                      m.floor_col === fpSelectedCell.col;
                     return (
                       <div
                         key={m.id}
+                        data-cell-mapping-id={m.id}
                         className={`rounded border px-2 py-2 text-[11px] ${
                           replaceMappingId === m.id
                             ? "border-rose-300 bg-rose-50"
-                            : "border-slate-200 bg-white"
+                            : mappingCardActive
+                              ? "border-emerald-500 bg-emerald-50/50 ring-2 ring-emerald-500 ring-offset-1 ring-offset-white"
+                              : "border-slate-200 bg-white"
                         }`}
                       >
                         <div className="flex items-center justify-between gap-2">
@@ -2129,6 +2297,7 @@ const MappingView: React.FC = () => {
                             <button
                               className="rounded border border-slate-300 bg-white px-2 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100"
                               onClick={() => {
+                                setReplaceMappingId(null);
                                 setVpSelectedCell({ row: m.camera_row, col: m.camera_col });
                                 setFpSelectedCell({ row: m.floor_row, col: m.floor_col });
                               }}

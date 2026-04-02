@@ -526,7 +526,6 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     const cx = e.clientX - rect.left;
     const cy = e.clientY - rect.top;
     const cell = getCellAt(cx, cy);
-    if (cell && mappedCells?.has(`${cell.row},${cell.col}`)) return;
     onCellClick(cell);
   };
 

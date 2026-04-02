@@ -1923,7 +1923,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                   setStatsDate(e.target.value || toUTCDateInputValue(new Date()));
                   setStatsMode("date");
                 }}
-                  disabled={statsMode === "realtime" || analyzing}
+                  disabled={statsMode === "realtime"}
                 title="选择日期加载统计数据"
               />
               <label className="flex items-center gap-1 select-none">
@@ -1931,7 +1931,6 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                   type="checkbox"
                   checked={statsMode === "realtime"}
                   onChange={(e) => setStatsMode(e.target.checked ? "realtime" : "date")}
-                    disabled={analyzing}
                 />
                 <span>实时数据</span>
               </label>
@@ -1968,9 +1967,9 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               <div className="min-h-0 flex-1">
                 <ReactECharts option={genderOption} style={{ height: "100%", width: "100%" }} notMerge />
               </div>
-              {analyzing && statsData.genderMale + statsData.genderFemale === 0 ? (
+              {analyzing && statsData.inCount > 0 && statsData.genderMale + statsData.genderFemale === 0 ? (
                 <div className="mt-2 text-[11px] text-amber-600">
-                  当前检测不到男/女：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），并能正确输出 gender（male/female）。
+                  已有进入事件但性别仍为 0：请确认后端已配置二阶段性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），并能正确输出 gender（male/female）。
                 </div>
               ) : null}
             </div>
@@ -1979,13 +1978,6 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               <div className="min-h-0 flex-1">
                 <ReactECharts option={ageOption} style={{ height: "100%", width: "100%" }} notMerge />
               </div>
-              {analyzing &&
-              statsData.inCount + statsData.outCount > 0 &&
-              statsData.ageBuckets.reduce((a, b) => a + b.value, 0) === 0 ? (
-                <div className="mt-2 text-[11px] text-amber-600">
-                  当前检测不到年龄分桶：请确认后端已配置两个二阶段模型：性别模型 `YOLO_GENDER_MODEL_PATH`（默认 `yolov8n-gender-classification.pt`），年龄模型 `YOLO_FACE_AGE_MODEL_PATH`（默认 `yolo11n-face-age.pt`），并能正确输出年龄（会被映射到 `18-25/55+` 等分桶）。
-                </div>
-              ) : null}
             </div>
           </div>
 
