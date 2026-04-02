@@ -17,6 +17,33 @@ import FootfallAnalysisView from "./views/FootfallAnalysisView";
 import HomeWelcomeView from "./views/HomeWelcomeView";
 import SystemSettingsView from "./views/SystemSettingsView";
 
+/** 平面图 Shift 框选：校验是否为完整轴对齐矩形块，并返回范围与尺寸 */
+function parseFloorMarqueeRect(
+  cells: { row: number; col: number }[],
+): { minRow: number; minCol: number; nRows: number; nCols: number } | null {
+  if (cells.length === 0) return null;
+  let minR = Infinity;
+  let maxR = -Infinity;
+  let minC = Infinity;
+  let maxC = -Infinity;
+  for (const c of cells) {
+    minR = Math.min(minR, c.row);
+    maxR = Math.max(maxR, c.row);
+    minC = Math.min(minC, c.col);
+    maxC = Math.max(maxC, c.col);
+  }
+  const nRows = maxR - minR + 1;
+  const nCols = maxC - minC + 1;
+  if (cells.length !== nRows * nCols) return null;
+  const set = new Set(cells.map((c) => `${c.row},${c.col}`));
+  for (let r = minR; r <= maxR; r++) {
+    for (let c = minC; c <= maxC; c++) {
+      if (!set.has(`${r},${c}`)) return null;
+    }
+  }
+  return { minRow: minR, minCol: minC, nRows, nCols };
+}
+
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabKey>("home");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
@@ -515,6 +542,9 @@ const MappingView: React.FC = () => {
   });
 
   const [fpSelectedCell, setFpSelectedCell] = useState<{ row: number; col: number } | null>(null);
+  /** Shift 框选结束后的多格选中（需为完整矩形）；与 fpSelectedCell 配合用于批量建网格 */
+  const [fpMarqueeSelectedCells, setFpMarqueeSelectedCells] = useState<{ row: number; col: number }[] | null>(null);
+  const [creatingGridFromFloorMarquee, setCreatingGridFromFloorMarquee] = useState(false);
   const [fpHoverCell, setFpHoverCell] = useState<{ row: number; col: number } | null>(null);
   const [linkedFpHoverCell, setLinkedFpHoverCell] = useState<{ row: number; col: number } | null>(null);
   const [linkedVpHoverCell, setLinkedVpHoverCell] = useState<{ row: number; col: number } | null>(null);
@@ -539,6 +569,18 @@ const MappingView: React.FC = () => {
     cellMappings.forEach((m) => s.add(`${m.floor_row},${m.floor_col}`));
     return s;
   }, [cellMappings]);
+
+  const fpMarqueeRectParsed = useMemo(() => {
+    if (!fpMarqueeSelectedCells || fpMarqueeSelectedCells.length === 0) return null;
+    return parseFloorMarqueeRect(fpMarqueeSelectedCells);
+  }, [fpMarqueeSelectedCells]);
+
+  const fpMarqueeHighlightSet = useMemo(() => {
+    if (!fpMarqueeSelectedCells || fpMarqueeSelectedCells.length === 0) return undefined;
+    const s = new Set<string>();
+    fpMarqueeSelectedCells.forEach((c) => s.add(`${c.row},${c.col}`));
+    return s;
+  }, [fpMarqueeSelectedCells]);
 
   // === 平面图“按绑定源分色” ===
   type BindSourceItem = { key: string; label: string; color: string };
@@ -649,6 +691,27 @@ const MappingView: React.FC = () => {
       }
     })();
   }, [bindFloorPlanId, bindingColorRefreshTick]);
+
+  /** 框选区域内平面图格子未被任何绑定源占用（与其它摄像头/虚拟视角的映射不重叠） */
+  const fpMarqueeCellsAllUnmappedOnFloor = useMemo(() => {
+    if (!fpMarqueeSelectedCells || fpMarqueeSelectedCells.length === 0) return false;
+    for (const c of fpMarqueeSelectedCells) {
+      if (floorCellToSourceKey.has(`${c.row},${c.col}`)) return false;
+    }
+    return true;
+  }, [fpMarqueeSelectedCells, floorCellToSourceKey]);
+
+  /** Shift 框选起点：任意已占用平面图格（含其它虚拟视角）均不可作为起点 */
+  const floorCellOccupiedForMarquee = useMemo(() => {
+    const s = new Set<string>();
+    floorCellToSourceKey.forEach((_, k) => s.add(k));
+    mappedFloorCells.forEach((k) => s.add(k));
+    return s;
+  }, [floorCellToSourceKey, mappedFloorCells]);
+
+  useEffect(() => {
+    setFpMarqueeSelectedCells(null);
+  }, [bindFloorPlanId, bindCameraId]);
 
   const camToFloor = useMemo(() => {
     const m = new Map<string, { row: number; col: number }>();
@@ -1002,6 +1065,23 @@ const MappingView: React.FC = () => {
     setEditingFloorPlanId(null);
   };
 
+  const putVirtualGridConfig = useCallback(async (viewId: number, quad: Pt[], gridRows: number, gridCols: number) => {
+    const res = await fetch(`${API_BASE}/api/cameras/virtual-views/${viewId}/grid-config`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        polygon_json: JSON.stringify(quad),
+        grid_rows: Math.max(1, Math.floor(Number(gridRows)) || 1),
+        grid_cols: Math.max(1, Math.floor(Number(gridCols)) || 1),
+      }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      console.error(text);
+      throw new Error("grid config save failed");
+    }
+  }, []);
+
   const saveBindGrid = async () => {
     if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
     const fp = floorPlans.find((f) => f.id === bindFloorPlanId);
@@ -1034,21 +1114,7 @@ const MappingView: React.FC = () => {
     if (!vpQuad) return;
     setVpSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/cameras/virtual-views/${viewId}/grid-config`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          polygon_json: JSON.stringify(vpQuad),
-          grid_rows: Math.max(1, Number(vpRows) || 1),
-          grid_cols: Math.max(1, Number(vpCols) || 1),
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        console.error(text);
-        alert("保存失败");
-        return;
-      }
+      await putVirtualGridConfig(viewId, vpQuad, Math.max(1, Number(vpRows) || 1), Math.max(1, Number(vpCols) || 1));
       await loadVirtualGridConfig(viewId);
       // 保存后关闭编辑（隐藏可拖拽顶点）
       setVpEditEnabled(false);
@@ -1060,6 +1126,99 @@ const MappingView: React.FC = () => {
       setVpSaving(false);
     }
   };
+
+  /** 根据平面图 Shift 框选的矩形区域：写监控端网格行列、（可选）整幅默认四边形、批量建立 cell 映射 */
+  const createGridFromFloorMarquee = useCallback(
+    async (view: CameraVirtualView) => {
+      const parsed = fpMarqueeRectParsed;
+      const cells = fpMarqueeSelectedCells;
+      if (!parsed || !cells || cells.length === 0) {
+        alert("请先在平面图上用 Shift+点击 拖出矩形并再单击完成框选，且须为完整矩形区域。");
+        return;
+      }
+      if (!fpMarqueeCellsAllUnmappedOnFloor) {
+        alert("框选区域内存在已被其它绑定占用的平面图格子，请换一块未占用的矩形区域。");
+        return;
+      }
+      if (bindFloorPlanId === "" || typeof bindFloorPlanId !== "number") return;
+
+      const aspectW = view.out_w || 960;
+      const aspectH = view.out_h || 540;
+      const fullFrameQuad = orderQuad([
+        { x: 0, y: 0 },
+        { x: aspectW, y: 0 },
+        { x: aspectW, y: aspectH },
+        { x: 0, y: aspectH },
+      ]);
+      const quadToSave = vpQuad && vpQuad.length === 4 ? vpQuad : fullFrameQuad;
+
+      const ok = confirm(
+        vpQuad && vpQuad.length === 4
+          ? `将根据框选设置监控端网格为 ${parsed.nRows} 行 × ${parsed.nCols} 列，保留当前四边形顶点；并清除该虚拟视角在此平面图上的全部旧绑定后，按行优先建立新映射。是否继续？`
+          : `将根据框选设置监控端网格为 ${parsed.nRows} 行 × ${parsed.nCols} 列，并使用整幅画面为默认四边形；并清除该虚拟视角在此平面图上的全部旧绑定后，按行优先建立新映射。是否继续？`,
+      );
+      if (!ok) return;
+
+      setCreatingGridFromFloorMarquee(true);
+      try {
+        const delRes = await fetch(
+          `${API_BASE}/api/cameras/virtual-views/${view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
+          { method: "DELETE" },
+        );
+        if (!delRes.ok) throw new Error("clear mappings failed");
+
+        await putVirtualGridConfig(view.id, quadToSave, parsed.nRows, parsed.nCols);
+        setVpQuad(quadToSave);
+        setVpRows(String(parsed.nRows));
+        setVpCols(String(parsed.nCols));
+        setVpQuadPoints([]);
+        await loadVirtualGridConfig(view.id);
+
+        for (let r = 0; r < parsed.nRows; r++) {
+          for (let c = 0; c < parsed.nCols; c++) {
+            const res = await fetch(`${API_BASE}/api/cameras/virtual-views/${view.id}/cell-mappings`, {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                floor_plan_id: bindFloorPlanId,
+                camera_row: r,
+                camera_col: c,
+                floor_row: parsed.minRow + r,
+                floor_col: parsed.minCol + c,
+              }),
+            });
+            if (!res.ok) throw new Error("mapping put failed");
+          }
+        }
+
+        const res2 = await fetch(
+          `${API_BASE}/api/cameras/virtual-views/${view.id}/cell-mappings?floor_plan_id=${bindFloorPlanId}`,
+        );
+        if (res2.ok) setCellMappings(await res2.json());
+        setBindingColorRefreshTick((t) => t + 1);
+        setFpSelectedCell({ row: parsed.minRow, col: parsed.minCol });
+        setVpSelectedCell({ row: 0, col: 0 });
+        setFpMarqueeSelectedCells(null);
+        setReplaceMappingId(null);
+        setVpEditEnabled(true);
+        setVpTool("none");
+      } catch (e) {
+        console.error(e);
+        alert("从平面图区域创建网格失败，请稍后重试。");
+      } finally {
+        setCreatingGridFromFloorMarquee(false);
+      }
+    },
+    [
+      fpMarqueeRectParsed,
+      fpMarqueeSelectedCells,
+      fpMarqueeCellsAllUnmappedOnFloor,
+      bindFloorPlanId,
+      vpQuad,
+      putVirtualGridConfig,
+      loadVirtualGridConfig,
+    ],
+  );
 
   const saveEditFloorPlan = async () => {
     if (editingFloorPlanId == null) return;
@@ -1252,7 +1411,13 @@ const MappingView: React.FC = () => {
                 </div>
               </div>
             )}
-            <div className="mb-2 text-[11px] font-semibold text-slate-700">平面图预览</div>
+            <div className="mb-1 text-[11px] font-semibold text-slate-700">平面图预览</div>
+            <div className="mb-2 text-[10px] leading-snug text-slate-500">
+              快速框选：在<strong className="font-semibold text-slate-600">未绑定</strong>格子上{" "}
+              <kbd className="rounded border border-slate-200 bg-slate-50 px-1">Shift</kbd>+
+              <kbd className="rounded border border-slate-200 bg-slate-50 px-1">左键</kbd>{" "}
+              点起点，移动后再次单击完成矩形，选中区域内所有格子。
+            </div>
             <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white">
               {bindFloorPlanId !== "" ? (
                 (() => {
@@ -1274,7 +1439,28 @@ const MappingView: React.FC = () => {
                       gridCols={cols}
                       backgroundColor="white"
                       selectedCell={fpSelectedCell}
+                      shiftMarqueeSelect
+                      marqueeCancelKey={`${bindFloorPlanId}-${bindCameraId}`}
+                      multiHighlightCells={fpMarqueeHighlightSet}
+                      onShiftMarqueeComplete={(cells) => {
+                        const parsed = parseFloorMarqueeRect(cells);
+                        if (!parsed) {
+                          alert("请框选完整的矩形区域（与网格对齐、中间无缺口）。");
+                          setFpMarqueeSelectedCells(null);
+                          return;
+                        }
+                        for (const c of cells) {
+                          if (floorCellToSourceKey.has(`${c.row},${c.col}`)) {
+                            alert("框选区域内包含已被绑定的平面图格子，请仅框选完全未绑定的矩形区域。");
+                            setFpMarqueeSelectedCells(null);
+                            return;
+                          }
+                        }
+                        setFpMarqueeSelectedCells(cells);
+                        setFpSelectedCell({ row: parsed.minRow, col: parsed.minCol });
+                      }}
                       onCellClick={(cell) => {
+                        setFpMarqueeSelectedCells(null);
                         setFpSelectedCell(cell);
                         if (!cell) {
                           pendingFloorLocateRef.current = null;
@@ -1301,7 +1487,7 @@ const MappingView: React.FC = () => {
                       }}
                       onCellHover={(cell) => setFpHoverCell(cell)}
                       linkedHoverCell={linkedFpHoverCell}
-                      mappedCells={mappedFloorCells}
+                      mappedCells={floorCellOccupiedForMarquee}
                       cellFillColors={floorCellFillColors}
                       className="w-full h-full"
                     />
@@ -1816,6 +2002,38 @@ const MappingView: React.FC = () => {
                           </div>
                         )}
 
+                        <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-violet-100 bg-violet-50/60 px-2 py-1.5">
+                          <button
+                            type="button"
+                            className="rounded border border-violet-300 bg-white px-2 py-1 text-[11px] font-medium text-violet-900 shadow-sm hover:bg-violet-100 disabled:opacity-50"
+                            disabled={
+                              creatingGridFromFloorMarquee ||
+                              mappingsSaving ||
+                              !fpMarqueeRectParsed ||
+                              !fpMarqueeCellsAllUnmappedOnFloor ||
+                              bindFloorPlanId === "" ||
+                              typeof bindFloorPlanId !== "number"
+                            }
+                            title={
+                              !fpMarqueeRectParsed
+                                ? "请先在左侧平面图用 Shift+左键 起点，再单击完成矩形框选"
+                                : !fpMarqueeCellsAllUnmappedOnFloor
+                                  ? "框选区域须全部为未绑定的平面图格子"
+                                  : "按框选尺寸设置监控端行列并批量建立映射，之后可拖动四边形顶点微调"
+                            }
+                            onClick={() => void createGridFromFloorMarquee(view)}
+                          >
+                            {creatingGridFromFloorMarquee ? "创建中…" : "从平面图框选创建网格"}
+                          </button>
+                          <span className="min-w-0 text-[11px] text-slate-600">
+                            {fpMarqueeRectParsed && fpMarqueeCellsAllUnmappedOnFloor
+                              ? `已选平面图区域 ${fpMarqueeRectParsed.nRows}×${fpMarqueeRectParsed.nCols}（可创建）`
+                              : fpMarqueeSelectedCells && fpMarqueeSelectedCells.length > 0 && !fpMarqueeRectParsed
+                                ? "框选须为完整矩形，请重新框选"
+                                : "需先在左侧完成 Shift 矩形框选（未绑定区域）"}
+                          </span>
+                        </div>
+
                         {vpQuad && (
                           <div className="mt-2 flex flex-wrap items-center gap-2">
                             <label className="text-xs text-slate-600">
@@ -1971,6 +2189,7 @@ const MappingView: React.FC = () => {
                   onClick={() => {
                     setVpSelectedCell(null);
                     setFpSelectedCell(null);
+                    setFpMarqueeSelectedCells(null);
                     setReplaceMappingId(null);
                   }}
                 >

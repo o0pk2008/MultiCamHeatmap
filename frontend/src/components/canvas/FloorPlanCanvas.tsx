@@ -2,6 +2,34 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { POI_ICON_URL } from "../../shared/config";
 import { preloadFloorPlanImage, preloadPoiIcon } from "../../shared/floorPlan";
 
+function collectCellsInImageRect(
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+  rows: number,
+  cols: number,
+  iw: number,
+  ih: number,
+): { row: number; col: number }[] {
+  const rx1 = Math.min(ax, bx);
+  const rx2 = Math.max(ax, bx);
+  const ry1 = Math.min(ay, by);
+  const ry2 = Math.max(ay, by);
+  const out: { row: number; col: number }[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cx1 = (c / cols) * iw;
+      const cx2 = ((c + 1) / cols) * iw;
+      const cy1 = (r / rows) * ih;
+      const cy2 = ((r + 1) / rows) * ih;
+      if (cx2 < rx1 || cx1 > rx2 || cy2 < ry1 || cy1 > ry2) continue;
+      out.push({ row: r, col: c });
+    }
+  }
+  return out;
+}
+
 export type FloorPlanCanvasProps = {
   imageUrl: string;
   gridRows: number;
@@ -33,6 +61,13 @@ export type FloorPlanCanvasProps = {
     inLabel: string;
     outLabel: string;
   } | null;
+  /** Shift+左键起点（未绑定格）→ 再单击结束：框选与坐标轴对齐的矩形区域内的格子 */
+  shiftMarqueeSelect?: boolean;
+  onShiftMarqueeComplete?: (cells: { row: number; col: number }[]) => void;
+  /** 多格高亮（例如框选结果），key 为 `row,col` */
+  multiHighlightCells?: Set<string>;
+  /** 变化时取消未完成的 Shift 框选 */
+  marqueeCancelKey?: number | string;
 };
 
 const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
@@ -55,8 +90,13 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     heatmapRender,
     cellFillColors,
     footfallLineUV = null,
+    shiftMarqueeSelect = false,
+    onShiftMarqueeComplete,
+    multiHighlightCells,
+    marqueeCancelKey,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const skipNextClickRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
   const poiIconRef = useRef<HTMLImageElement | null>(null);
@@ -69,6 +109,8 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
   const [canvasSize, setCanvasSize] = useState({ w: 600, h: 400 });
   const [poiIconReadyTick, setPoiIconReadyTick] = useState(0);
+  const [marqueeAnchor, setMarqueeAnchor] = useState<{ x: number; y: number } | null>(null);
+  const [marqueeHover, setMarqueeHover] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -97,6 +139,24 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    setMarqueeAnchor(null);
+    setMarqueeHover(null);
+  }, [marqueeCancelKey]);
+
+  useEffect(() => {
+    if (!shiftMarqueeSelect) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setMarqueeAnchor(null);
+        setMarqueeHover(null);
+        skipNextClickRef.current = false;
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [shiftMarqueeSelect]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -180,6 +240,25 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       });
     }
 
+    if (multiHighlightCells && multiHighlightCells.size > 0) {
+      const cellW = iw / cols;
+      const cellH = ih / rows;
+      multiHighlightCells.forEach((key) => {
+        const [rs, cs] = key.split(",");
+        const r = Number(rs);
+        const c = Number(cs);
+        if (Number.isNaN(r) || Number.isNaN(c) || r < 0 || r >= rows || c < 0 || c >= cols) return;
+        if (sel != null && sel.row === r && sel.col === c) return;
+        const x = c * cellW;
+        const y = r * cellH;
+        ctx.fillStyle = "rgba(59,130,246,0.14)";
+        ctx.fillRect(x, y, cellW, cellH);
+        ctx.strokeStyle = "rgba(37,99,235,0.55)";
+        ctx.lineWidth = 1.2 / fitScale;
+        ctx.strokeRect(x, y, cellW, cellH);
+      });
+    }
+
     if (sel != null && sel.row >= 0 && sel.row < rows && sel.col >= 0 && sel.col < cols) {
       const cellW = iw / cols;
       const cellH = ih / rows;
@@ -190,6 +269,20 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
       ctx.strokeStyle = "rgba(59,130,246,0.95)";
       ctx.lineWidth = 2 / fitScale;
       ctx.strokeRect(x, y, cellW, cellH);
+    }
+
+    if (marqueeAnchor && marqueeHover && shiftMarqueeSelect) {
+      const x1 = Math.min(marqueeAnchor.x, marqueeHover.x);
+      const y1 = Math.min(marqueeAnchor.y, marqueeHover.y);
+      const w = Math.abs(marqueeHover.x - marqueeAnchor.x);
+      const h = Math.abs(marqueeHover.y - marqueeAnchor.y);
+      ctx.setLineDash([6 / fitScale, 4 / fitScale]);
+      ctx.strokeStyle = "rgba(105,79,249,0.95)";
+      ctx.lineWidth = 2 / fitScale;
+      ctx.fillStyle = "rgba(105,79,249,0.08)";
+      ctx.fillRect(x1, y1, w, h);
+      ctx.strokeRect(x1, y1, w, h);
+      ctx.setLineDash([]);
     }
 
     if (heatmapCells && heatmapCells.size > 0) {
@@ -419,6 +512,10 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
     backgroundColor,
     mappedCells,
     footfallLineUV,
+    multiHighlightCells,
+    marqueeAnchor,
+    marqueeHover,
+    shiftMarqueeSelect,
   ]);
 
   useEffect(() => {
@@ -497,6 +594,25 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
   }, [onWheelNative]);
 
   const onMouseDown = (e: React.MouseEvent) => {
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect || !imgSize) return;
+    const cx = (e.clientX - rect.left) * (canvasRef.current.width / Math.max(1, rect.width));
+    const cy = (e.clientY - rect.top) * (canvasRef.current.height / Math.max(1, rect.height));
+
+    if (shiftMarqueeSelect && e.shiftKey && marqueeAnchor === null) {
+      const cell = getCellAt(cx, cy);
+      if (!cell || mappedCells?.has(`${cell.row},${cell.col}`)) return;
+      const imgPt = canvasToImage(cx, cy);
+      setMarqueeAnchor(imgPt);
+      setMarqueeHover(imgPt);
+      skipNextClickRef.current = true;
+      return;
+    }
+
+    if (marqueeAnchor !== null) {
+      return;
+    }
+
     setDragging(true);
     setHoverCell(null);
     setDragStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
@@ -504,8 +620,11 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
   const onMouseMove = (e: React.MouseEvent) => {
     const rect = canvasRef.current?.getBoundingClientRect();
     if (!rect) return;
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    const cx = (e.clientX - rect.left) * (canvasRef.current!.width / Math.max(1, rect.width));
+    const cy = (e.clientY - rect.top) * (canvasRef.current!.height / Math.max(1, rect.height));
+    if (marqueeAnchor !== null && shiftMarqueeSelect) {
+      setMarqueeHover(canvasToImage(cx, cy));
+    }
     if (dragging) {
       setPan({ x: e.clientX - dragStart.x, y: e.clientY - dragStart.y });
     } else {
@@ -520,11 +639,30 @@ const FloorPlanCanvas = (props: FloorPlanCanvasProps) => {
   }, [hoverCell, onCellHover]);
 
   const onClick = (e: React.MouseEvent) => {
-    if (!onCellClick) return;
     const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const cx = e.clientX - rect.left;
-    const cy = e.clientY - rect.top;
+    if (!rect || !imgSize) return;
+    const cx = (e.clientX - rect.left) * (canvasRef.current.width / Math.max(1, rect.width));
+    const cy = (e.clientY - rect.top) * (canvasRef.current.height / Math.max(1, rect.height));
+
+    if (skipNextClickRef.current) {
+      skipNextClickRef.current = false;
+      return;
+    }
+
+    if (marqueeAnchor !== null && shiftMarqueeSelect) {
+      const end = canvasToImage(cx, cy);
+      const rows = Math.max(1, gridRows);
+      const cols = Math.max(1, gridCols);
+      const iw = imgSize.w;
+      const ih = imgSize.h;
+      const cells = collectCellsInImageRect(marqueeAnchor.x, marqueeAnchor.y, end.x, end.y, rows, cols, iw, ih);
+      onShiftMarqueeComplete?.(cells);
+      setMarqueeAnchor(null);
+      setMarqueeHover(null);
+      return;
+    }
+
+    if (!onCellClick) return;
     const cell = getCellAt(cx, cy);
     onCellClick(cell);
   };
