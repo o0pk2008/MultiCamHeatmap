@@ -227,6 +227,19 @@ async def queue_wait_status(floor_plan_id: int, virtual_view_id: int):
     }
 
 
+@router.get("/live-occupancy")
+async def queue_wait_live_occupancy(
+    response: Response,
+    floor_plan_id: int,
+    virtual_view_id: int,
+):
+    """分析进行中时返回几何意义的排队区/服务区人数及「人数增加」时刻，供前端画 ROI 边框脉冲。"""
+    payload = analyzer.get_live_occupancy(int(floor_plan_id), int(virtual_view_id))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return payload
+
+
 @router.get("/stats")
 async def queue_wait_stats(
     response: Response,

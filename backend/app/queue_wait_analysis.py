@@ -65,9 +65,19 @@ class QueueWaitAnalyzer:
         self._tasks: Dict[str, asyncio.Task] = {}
         self._stops: Dict[str, asyncio.Event] = {}
         self._session_ctx: Dict[str, Dict[str, Any]] = {}
-        # 可由系统设置或环境变量 QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_SEC 初始化；运行中后台可改写。
+        # 按会话缓存最近一帧几何意义下 ROI 内人数；供前端监控边框「进入」高亮轮询。
+        self._live_occupancy: Dict[str, Dict[str, Any]] = {}
+        # 可由系统设置或环境变量初始化；运行中后台可改写。
         self._post_service_queue_ignore_sec: float = float(
             os.environ.get("QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_SEC", "30")
+        )
+        # 脚底直进服务区、未经过排队：仅当服务停留 ≥ 该秒数并离开后落库并计入「完成笔数」。
+        self._direct_service_complete_min_sec: float = float(
+            os.environ.get("QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_SEC", "3")
+        )
+        # 曾进排队区但未进服务区就离开：排队停留 < 该秒数则不落库，不计弃单（视作路过）。
+        self._abandon_min_queue_sec: float = float(
+            os.environ.get("QUEUE_WAIT_ABANDON_MIN_QUEUE_SEC", "2")
         )
 
     def get_post_service_queue_ignore_sec(self) -> float:
@@ -75,6 +85,18 @@ class QueueWaitAnalyzer:
 
     def set_post_service_queue_ignore_sec(self, sec: float) -> None:
         self._post_service_queue_ignore_sec = max(0.0, float(sec))
+
+    def get_direct_service_complete_min_sec(self) -> float:
+        return float(self._direct_service_complete_min_sec)
+
+    def set_direct_service_complete_min_sec(self, sec: float) -> None:
+        self._direct_service_complete_min_sec = max(0.0, float(sec))
+
+    def get_abandon_min_queue_sec(self) -> float:
+        return float(self._abandon_min_queue_sec)
+
+    def set_abandon_min_queue_sec(self, sec: float) -> None:
+        self._abandon_min_queue_sec = max(0.0, float(sec))
 
     @staticmethod
     def _session_key(floor_plan_id: int, virtual_view_id: int) -> str:
@@ -168,11 +190,34 @@ class QueueWaitAnalyzer:
         except Exception:
             pass
         self._session_ctx.pop(key, None)
+        self._live_occupancy.pop(key, None)
         try:
             manager.clear_queue_wait_overlay(int(virtual_view_id))
             manager.clear_queue_wait_labels(int(virtual_view_id))
         except Exception:
             pass
+
+    def get_live_occupancy(self, floor_plan_id: int, virtual_view_id: int) -> Dict[str, Any]:
+        key = self._session_key(floor_plan_id, virtual_view_id)
+        running = key in self._tasks
+        snap = self._live_occupancy.get(key)
+        if snap:
+            return {
+                "running": running,
+                "in_queue": int(snap.get("in_queue") or 0),
+                "in_service": int(snap.get("in_service") or 0),
+                "ts": float(snap.get("ts") or 0.0),
+                "queue_pulse_ts": float(snap.get("queue_pulse_ts") or 0.0),
+                "service_pulse_ts": float(snap.get("service_pulse_ts") or 0.0),
+            }
+        return {
+            "running": running,
+            "in_queue": 0,
+            "in_service": 0,
+            "ts": 0.0,
+            "queue_pulse_ts": 0.0,
+            "service_pulse_ts": 0.0,
+        }
 
     def _flush_tid(
         self,
@@ -191,6 +236,8 @@ class QueueWaitAnalyzer:
             if phase == "queue":
                 q0 = float(st.get("queue_t0") or now_ts)
                 qsec = max(0.0, float(now_ts) - q0)
+                if qsec < float(self._abandon_min_queue_sec):
+                    return
                 record_queue_visit_sync(
                     roi_config_id=roi_config_id,floor_plan_id=floor_plan_id,virtual_view_id=virtual_view_id,track_id=int(tid),
                     queue_seconds=qsec,service_seconds=None,end_ts=float(now_ts),
@@ -199,6 +246,8 @@ class QueueWaitAnalyzer:
                 q_at = float(st.get("queue_sec_fixed") or 0.0)
                 s0 = float(st.get("service_t0") or now_ts)
                 ssec = max(0.0, float(now_ts) - s0)
+                if q_at <= 1e-6 and ssec < float(self._direct_service_complete_min_sec):
+                    return
                 record_queue_visit_sync(
                     roi_config_id=roi_config_id,floor_plan_id=floor_plan_id,virtual_view_id=virtual_view_id,track_id=int(tid),
                     queue_seconds=q_at,service_seconds=ssec,end_ts=float(now_ts),
@@ -228,6 +277,8 @@ class QueueWaitAnalyzer:
         try:
             while not stop_event.is_set():
                 post_service_queue_ignore_sec = float(self._post_service_queue_ignore_sec)
+                abandon_min_q = float(self._abandon_min_queue_sec)
+                direct_svc_min = float(self._direct_service_complete_min_sec)
                 live = self._session_ctx.get(session_key)
                 if not live:
                     break
@@ -293,6 +344,40 @@ class QueueWaitAnalyzer:
                     foot_u, foot_v = foot_uv
                     active[int(tid)] = (float(foot_u), float(foot_v), int(idx))
 
+                cnt_queue_geom = 0
+                cnt_service_geom = 0
+                for _tid_g, (fu_g, fv_g, _ix_g) in active.items():
+                    in_q_raw = _point_in_poly(fu_g, fv_g, queue_poly)
+                    in_s_g = _point_in_poly(fu_g, fv_g, service_poly)
+                    in_queue_effective_g = bool(in_q_raw) and not bool(in_s_g)
+                    if in_s_g:
+                        cnt_service_geom += 1
+                    elif in_queue_effective_g:
+                        cnt_queue_geom += 1
+
+                prev_pair = live.get("_occ_prev_counts")
+                pq = int(prev_pair[0]) if isinstance(prev_pair, (list, tuple)) and len(prev_pair) == 2 else -1
+                ps = int(prev_pair[1]) if isinstance(prev_pair, (list, tuple)) and len(prev_pair) == 2 else -1
+                occ_prev = self._live_occupancy.get(session_key) or {}
+                queue_pulse_ts = float(occ_prev.get("queue_pulse_ts") or 0.0)
+                service_pulse_ts = float(occ_prev.get("service_pulse_ts") or 0.0)
+                ts_wall = float(time.time())
+                if pq >= 0:
+                    if cnt_queue_geom > pq:
+                        queue_pulse_ts = ts_wall
+                    if cnt_service_geom > ps:
+                        service_pulse_ts = ts_wall
+                live["_occ_prev_counts"] = (cnt_queue_geom, cnt_service_geom)
+                self._live_occupancy[session_key] = {
+                    "floor_plan_id": floor_plan_id,
+                    "virtual_view_id": virtual_view_id,
+                    "in_queue": int(cnt_queue_geom),
+                    "in_service": int(cnt_service_geom),
+                    "ts": float(det_ts),
+                    "queue_pulse_ts": queue_pulse_ts,
+                    "service_pulse_ts": service_pulse_ts,
+                }
+
                 labels: Dict[int, str] = {}
 
                 for tid, (fu, fv, _idx) in active.items():
@@ -343,16 +428,17 @@ class QueueWaitAnalyzer:
                                 q0 = float(st.get("queue_t0") or det_ts)
                                 qsec = max(0.0, float(det_ts) - q0)
                                 try:
-                                    # 弃单闭环：离开排队有效区且长时间未进入服务区
-                                    record_queue_visit_sync(
-                                        roi_config_id=roi_config_id,
-                                        floor_plan_id=floor_plan_id,
-                                        virtual_view_id=virtual_view_id,
-                                        track_id=int(tid),
-                                        queue_seconds=qsec,
-                                        service_seconds=None,
-                                        end_ts=float(det_ts),
-                                    )
+                                    # 弃单闭环：离开排队有效区且长时间未进入服务区；极短停留视为路过不落库
+                                    if qsec >= abandon_min_q:
+                                        record_queue_visit_sync(
+                                            roi_config_id=roi_config_id,
+                                            floor_plan_id=floor_plan_id,
+                                            virtual_view_id=virtual_view_id,
+                                            track_id=int(tid),
+                                            queue_seconds=qsec,
+                                            service_seconds=None,
+                                            end_ts=float(det_ts),
+                                        )
                                 except Exception:
                                     pass
                                 st["phase"] = "idle"
@@ -368,15 +454,16 @@ class QueueWaitAnalyzer:
                                 s0 = float(st.get("service_t0") or det_ts)
                                 ssec = max(0.0, float(det_ts) - s0)
                                 try:
-                                    record_queue_visit_sync(
-                                        roi_config_id=roi_config_id,
-                                        floor_plan_id=floor_plan_id,
-                                        virtual_view_id=virtual_view_id,
-                                        track_id=int(tid),
-                                        queue_seconds=q_at,
-                                        service_seconds=ssec,
-                                        end_ts=float(det_ts),
-                                    )
+                                    if q_at > 1e-6 or ssec >= direct_svc_min:
+                                        record_queue_visit_sync(
+                                            roi_config_id=roi_config_id,
+                                            floor_plan_id=floor_plan_id,
+                                            virtual_view_id=virtual_view_id,
+                                            track_id=int(tid),
+                                            queue_seconds=q_at,
+                                            service_seconds=ssec,
+                                            end_ts=float(det_ts),
+                                        )
                                 except Exception:
                                     pass
                                 st["phase"] = "idle"
@@ -428,6 +515,7 @@ class QueueWaitAnalyzer:
         except Exception:
             pass
         finally:
+            self._live_occupancy.pop(session_key, None)
             for tid, st in list(states.items()):
                 try:
                     self._flush_tid(

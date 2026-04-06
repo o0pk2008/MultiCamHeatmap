@@ -105,7 +105,12 @@ app.include_router(mappings_router)
 app.include_router(discovery_router)
 from .routers.footfall import router as footfall_router
 from .routers.queue_wait import router as queue_wait_router
-from .routers.admin import QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY, router as admin_router
+from .routers.admin import (
+    QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY,
+    QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY,
+    QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY,
+    router as admin_router,
+)
 
 app.include_router(footfall_router)
 app.include_router(queue_wait_router)
@@ -133,6 +138,26 @@ async def _load_persisted_runtime_settings() -> None:
             if row_qw is not None:
                 try:
                     qw_analyzer.set_post_service_queue_ignore_sec(float(str(row_qw.value)))
+                except Exception:
+                    pass
+            row_qd = (
+                db.query(models.AppSetting)
+                .filter(models.AppSetting.key == QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY)
+                .first()
+            )
+            if row_qd is not None:
+                try:
+                    qw_analyzer.set_direct_service_complete_min_sec(float(str(row_qd.value)))
+                except Exception:
+                    pass
+            row_qa = (
+                db.query(models.AppSetting)
+                .filter(models.AppSetting.key == QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY)
+                .first()
+            )
+            if row_qa is not None:
+                try:
+                    qw_analyzer.set_abandon_min_queue_sec(float(str(row_qa.value)))
                 except Exception:
                     pass
     except Exception:

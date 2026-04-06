@@ -42,10 +42,14 @@ class QueueWaitAnalysisConfigRequest(BaseModel):
     """排队时长分析运行参数（与 queue_wait_analysis 状态机一致）。"""
 
     post_service_queue_ignore_sec: float
+    direct_service_complete_min_sec: float
+    abandon_min_queue_sec: float
 
 
 FACE_CAPTURE_RETENTION_KEY = "face_capture_retention_days"
 QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY = "queue_wait_post_service_queue_ignore_sec"
+QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY = "queue_wait_direct_service_complete_min_sec"
+QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY = "queue_wait_abandon_min_queue_sec"
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -311,11 +315,20 @@ async def admin_set_face_capture_retention(req: FaceCaptureRetentionRequest):
     return {"status": "ok", "retention_days": int(days)}
 
 
+def _clamp_queue_wait_runtime_secs(v: float, lo: float = 0.0, hi: float = 3600.0) -> float:
+    try:
+        return max(lo, min(float(v), hi))
+    except Exception:
+        return lo
+
+
 @router.get("/queue-wait-analysis-config")
 async def admin_get_queue_wait_analysis_config():
     from ..queue_wait_analysis import analyzer as qw_analyzer
 
-    sec = float(qw_analyzer.get_post_service_queue_ignore_sec())
+    post_ign = float(qw_analyzer.get_post_service_queue_ignore_sec())
+    direct_min = float(qw_analyzer.get_direct_service_complete_min_sec())
+    abandon_q = float(qw_analyzer.get_abandon_min_queue_sec())
     with SessionLocal() as db:
         row = (
             db.query(models.AppSetting)
@@ -324,29 +337,64 @@ async def admin_get_queue_wait_analysis_config():
         )
         if row is not None:
             try:
-                sec = max(0.0, float(str(row.value)))
+                post_ign = max(0.0, float(str(row.value)))
             except Exception:
                 pass
-    qw_analyzer.set_post_service_queue_ignore_sec(sec)
-    return {"post_service_queue_ignore_sec": float(sec)}
+        row_d = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY)
+            .first()
+        )
+        if row_d is not None:
+            try:
+                direct_min = max(0.0, float(str(row_d.value)))
+            except Exception:
+                pass
+        row_a = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY)
+            .first()
+        )
+        if row_a is not None:
+            try:
+                abandon_q = max(0.0, float(str(row_a.value)))
+            except Exception:
+                pass
+    qw_analyzer.set_post_service_queue_ignore_sec(post_ign)
+    qw_analyzer.set_direct_service_complete_min_sec(direct_min)
+    qw_analyzer.set_abandon_min_queue_sec(abandon_q)
+    return {
+        "post_service_queue_ignore_sec": float(post_ign),
+        "direct_service_complete_min_sec": float(direct_min),
+        "abandon_min_queue_sec": float(abandon_q),
+    }
 
 
 @router.post("/queue-wait-analysis-config")
 async def admin_set_queue_wait_analysis_config(req: QueueWaitAnalysisConfigRequest):
     from ..queue_wait_analysis import analyzer as qw_analyzer
 
-    sec = max(0.0, min(float(req.post_service_queue_ignore_sec), 3600.0))
-    qw_analyzer.set_post_service_queue_ignore_sec(sec)
+    post_ign = _clamp_queue_wait_runtime_secs(float(req.post_service_queue_ignore_sec))
+    direct_min = _clamp_queue_wait_runtime_secs(float(req.direct_service_complete_min_sec))
+    abandon_q = _clamp_queue_wait_runtime_secs(float(req.abandon_min_queue_sec))
+    qw_analyzer.set_post_service_queue_ignore_sec(post_ign)
+    qw_analyzer.set_direct_service_complete_min_sec(direct_min)
+    qw_analyzer.set_abandon_min_queue_sec(abandon_q)
     with SessionLocal() as db:
-        row = (
-            db.query(models.AppSetting)
-            .filter(models.AppSetting.key == QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY)
-            .first()
-        )
-        if row is None:
-            row = models.AppSetting(key=QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY, value=str(sec))
-            db.add(row)
-        else:
-            row.value = str(sec)
+        def upsert(key: str, val: float) -> None:
+            row = db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+            if row is None:
+                db.add(models.AppSetting(key=key, value=str(val)))
+            else:
+                row.value = str(val)
+
+        upsert(QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY, post_ign)
+        upsert(QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY, direct_min)
+        upsert(QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY, abandon_q)
         db.commit()
-    return {"status": "ok", "post_service_queue_ignore_sec": float(sec)}
+    return {
+        "status": "ok",
+        "post_service_queue_ignore_sec": float(post_ign),
+        "direct_service_complete_min_sec": float(direct_min),
+        "abandon_min_queue_sec": float(abandon_q),
+    }

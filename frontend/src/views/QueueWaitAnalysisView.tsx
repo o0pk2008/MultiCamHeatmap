@@ -2,6 +2,7 @@ import type { EChartsOption, EChartsType } from "echarts";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactECharts from "echarts-for-react";
 import { API_BASE } from "../shared/config";
+import { RollingNumber } from "../shared/RollingNumber";
 import { floorPlanImageUrl, preloadFloorPlanImage } from "../shared/floorPlan";
 import { orderQuad, worldToImagePoint } from "../shared/geometry";
 import { Camera, FloorPlan, Pt } from "../shared/types";
@@ -189,6 +190,8 @@ const PanZoomViewport: React.FC<{
     ctx: CanvasRenderingContext2D,
     info: { w: number; h: number; pan: { x: number; y: number }; zoom: number },
   ) => void;
+  /** 递增则触发 overlay 重绘（用于与分析同步的 ROI 边框动画） */
+  redrawSignal?: number;
 }> = ({
   className = "",
   children,
@@ -199,6 +202,7 @@ const PanZoomViewport: React.FC<{
   onPointerUpWorld,
   topLeftOverlay,
   renderOverlay,
+  redrawSignal = 0,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -234,7 +238,7 @@ const PanZoomViewport: React.FC<{
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
     if (renderOverlay) renderOverlay(ctx, { w: c.width, h: c.height, pan, zoom });
-  }, [renderOverlay, pan, zoom]);
+  }, [renderOverlay, pan, zoom, redrawSignal]);
 
   useEffect(() => {
     redraw();
@@ -506,6 +510,12 @@ const QueueWaitAnalysisView: React.FC = () => {
 
   const vvId = selectedCameraOpt?.kind === "virtual" ? selectedCameraOpt.view.id : null;
 
+  const zonePulseRef = useRef({ queue: 0, service: 0 });
+  const queuePulseStartRef = useRef<number | null>(null);
+  const servicePulseStartRef = useRef<number | null>(null);
+  const lastSeenServerPulseRef = useRef({ q: 0, s: 0 });
+  const [overlayRedrawTick, setOverlayRedrawTick] = useState(0);
+
   const uvToImgQuad = useCallback((uv: UvQuad, ow: number, oh: number): Pt[] => {
     return uv.map((p) => ({ x: Number(p.x) * ow, y: Number(p.y) * oh }));
   }, []);
@@ -567,6 +577,73 @@ const QueueWaitAnalysisView: React.FC = () => {
     const id = window.setInterval(() => void fetchStats(), 2500);
     return () => window.clearInterval(id);
   }, [fetchStats]);
+
+  useEffect(() => {
+    if (analyzing) {
+      lastSeenServerPulseRef.current = { q: 0, s: 0 };
+      queuePulseStartRef.current = null;
+      servicePulseStartRef.current = null;
+    }
+  }, [analyzing]);
+
+  useEffect(() => {
+    if (!analyzing) {
+      zonePulseRef.current = { queue: 0, service: 0 };
+      return;
+    }
+    let raf = 0;
+    const durMs = 520;
+    const tick = () => {
+      const now = performance.now();
+      let q = 0;
+      let s = 0;
+      const qs = queuePulseStartRef.current;
+      const ss = servicePulseStartRef.current;
+      if (qs != null) {
+        const elapsed = now - qs;
+        if (elapsed < durMs) q = Math.sin(Math.PI * (elapsed / durMs));
+        else queuePulseStartRef.current = null;
+      }
+      if (ss != null) {
+        const elapsed = now - ss;
+        if (elapsed < durMs) s = Math.sin(Math.PI * (elapsed / durMs));
+        else servicePulseStartRef.current = null;
+      }
+      zonePulseRef.current = { queue: q, service: s };
+      setOverlayRedrawTick((t) => t + 1);
+      raf = window.requestAnimationFrame(tick);
+    };
+    raf = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(raf);
+  }, [analyzing]);
+
+  useEffect(() => {
+    if (!analyzing || selectedFloorPlanId == null || vvId == null) return;
+    const poll = async () => {
+      try {
+        const r = await fetch(
+          `${API_BASE}/api/queue-wait/live-occupancy?floor_plan_id=${selectedFloorPlanId}&virtual_view_id=${vvId}`,
+        );
+        if (!r.ok) return;
+        const j = (await r.json()) as { queue_pulse_ts?: number; service_pulse_ts?: number };
+        const qp = Number(j.queue_pulse_ts ?? 0);
+        const sp = Number(j.service_pulse_ts ?? 0);
+        if (qp > lastSeenServerPulseRef.current.q) {
+          queuePulseStartRef.current = performance.now();
+          lastSeenServerPulseRef.current.q = qp;
+        }
+        if (sp > lastSeenServerPulseRef.current.s) {
+          servicePulseStartRef.current = performance.now();
+          lastSeenServerPulseRef.current.s = sp;
+        }
+      } catch {
+        /* ignore */
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 380);
+    return () => window.clearInterval(id);
+  }, [analyzing, selectedFloorPlanId, vvId]);
 
   const statsTitleDate = statsMode === "realtime" ? "今日" : statsDate;
 
@@ -1032,6 +1109,7 @@ const QueueWaitAnalysisView: React.FC = () => {
         stroke: string,
         fill: string | null,
         closed: boolean,
+        pulse01 = 0,
       ) => {
         if (!pts.length) return;
         ctx.beginPath();
@@ -1048,6 +1126,23 @@ const QueueWaitAnalysisView: React.FC = () => {
         if (closed && fill) {
           ctx.fillStyle = fill;
           ctx.fill();
+        }
+        if (closed && pulse01 > 0.02 && pts.length === 4) {
+          ctx.save();
+          ctx.shadowColor = stroke;
+          ctx.shadowBlur = 20 * pulse01;
+          ctx.strokeStyle = `rgba(255,255,255,${0.35 + 0.45 * pulse01})`;
+          ctx.lineWidth = 2 + 12 * pulse01;
+          ctx.beginPath();
+          const a0 = toScreen(pts[0]);
+          ctx.moveTo(a0.x, a0.y);
+          for (let i = 1; i < pts.length; i++) {
+            const a = toScreen(pts[i]);
+            ctx.lineTo(a.x, a.y);
+          }
+          ctx.closePath();
+          ctx.stroke();
+          ctx.restore();
         }
       };
 
@@ -1093,6 +1188,9 @@ const QueueWaitAnalysisView: React.FC = () => {
       ctx.translate(pan.x, pan.y);
       ctx.scale(zoom, zoom);
 
+      const qPulse = zonePulseRef.current.queue;
+      const sPulse = zonePulseRef.current.service;
+
       const qPts = queuePolyImg ? queuePolyImg : queueQuadPoints;
       if (qPts.length > 0) {
         const closed = !!(queuePolyImg && queuePolyImg.length === 4);
@@ -1101,6 +1199,7 @@ const QueueWaitAnalysisView: React.FC = () => {
           "rgba(34,211,238,0.95)",
           closed ? "rgba(34,211,238,0.12)" : null,
           closed,
+          closed ? qPulse : 0,
         );
         if (queueEditEnabled && queuePolyImg && queuePolyImg.length === 4) {
           drawVertices(queuePolyImg, "rgba(34,211,238,1)");
@@ -1118,6 +1217,7 @@ const QueueWaitAnalysisView: React.FC = () => {
           "rgba(249,115,22,0.95)",
           closed ? "rgba(249,115,22,0.10)" : null,
           closed,
+          closed ? sPulse : 0,
         );
         if (serviceEditEnabled && servicePolyImg && servicePolyImg.length === 4) {
           drawVertices(servicePolyImg, "rgba(249,115,22,1)");
@@ -1231,29 +1331,47 @@ const QueueWaitAnalysisView: React.FC = () => {
           <div className="mb-3 grid shrink-0 grid-cols-3 gap-2">
             <div className="rounded border border-cyan-200 bg-cyan-50 p-2">
               <div className="text-[11px] text-cyan-900">{statsTitleDate} 平均排队（秒）</div>
-              <div className="text-lg font-semibold text-cyan-800">{statsData.avgQueueSeconds}</div>
+              <RollingNumber
+                value={Math.round(Number(statsData.avgQueueSeconds) || 0)}
+                className="text-lg font-semibold text-cyan-800"
+              />
             </div>
             <div className="rounded border border-orange-200 bg-orange-50 p-2">
               <div className="text-[11px] text-orange-900">{statsTitleDate} 平均服务（秒）</div>
-              <div className="text-lg font-semibold text-orange-800">{statsData.avgServiceSeconds}</div>
+              <RollingNumber
+                value={Math.round(Number(statsData.avgServiceSeconds) || 0)}
+                className="text-lg font-semibold text-orange-800"
+              />
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
               <div className="text-[11px] text-slate-600">完成笔数</div>
-              <div className="text-lg font-semibold text-slate-800">{statsData.queuedThenServedCount}</div>
-              <div className="mt-0.5 text-[10px] leading-tight text-slate-500">排队后成交（曾排队且完成服务）</div>
+              <RollingNumber
+                value={statsData.queuedThenServedCount}
+                className="text-lg font-semibold text-slate-800"
+              />
+              <div className="mt-0.5 text-[10px] leading-tight text-slate-500">
+                完成服务笔数：含排队后成交，以及直进服务区且服务时长达系统设置阈值
+              </div>
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
               <div className="text-[11px] text-slate-600">含服务时长样本</div>
-              <div className="text-lg font-semibold text-slate-800">{statsData.serviceSampleCount}</div>
+              <RollingNumber
+                value={statsData.serviceSampleCount}
+                className="text-lg font-semibold text-slate-800"
+              />
             </div>
             <div className="rounded border border-rose-200 bg-rose-50 p-2">
               <div className="text-[11px] text-rose-900">弃单（离排队区未进服务区）</div>
-              <div className="text-lg font-semibold text-rose-800">{statsData.abandonCount}</div>
+              <RollingNumber value={statsData.abandonCount} className="text-lg font-semibold text-rose-800" />
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
               <div className="text-[11px] text-slate-600">整体弃单率（排队意向样本）</div>
-              <div className="text-lg font-semibold text-slate-800">
-                {statsData.abandonRatePercent}%
+              <div className="flex flex-wrap items-baseline gap-0.5 text-lg font-semibold text-slate-800">
+                <RollingNumber
+                  value={Math.round(Number(statsData.abandonRatePercent) || 0)}
+                  className="tabular-nums"
+                />
+                <span>%</span>
                 <span className="ml-1 text-[10px] font-normal text-slate-500">
                   {(statsData.abandonCount + statsData.queuedThenServedCount) === 0
                     ? "（无排队意向样本）"
@@ -1455,6 +1573,7 @@ const QueueWaitAnalysisView: React.FC = () => {
                 onMoveWorld={onMoveWorld}
                 onPointerUpWorld={onPointerUpWorld}
                 renderOverlay={renderCamOverlay}
+                redrawSignal={overlayRedrawTick}
               >
                 <VirtualViewMjpeg
                   mjpegUrl={`${API_BASE}/api/cameras/${selectedCameraOpt.view.camera_id}/virtual-views/${

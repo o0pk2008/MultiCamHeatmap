@@ -97,6 +97,10 @@ const SystemSettingsView: React.FC = () => {
   const [savingFaceRetention, setSavingFaceRetention] = useState(false);
   /** 服务闭环后 N 秒内再踩排队区不计新排队（秒），0 为关闭 */
   const [postServiceQueueIgnoreSec, setPostServiceQueueIgnoreSec] = useState<number>(30);
+  /** 直进服务区时，服务停留 ≥ 该秒并离开才落库并计入完成笔数 */
+  const [directServiceCompleteMinSec, setDirectServiceCompleteMinSec] = useState<number>(3);
+  /** 排队后未进服务区就离开：排队停留 ≥ 该秒才计弃单；低于则视为路过不落库 */
+  const [abandonMinQueueSec, setAbandonMinQueueSec] = useState<number>(2);
   const [savingQueueWaitAnalysis, setSavingQueueWaitAnalysis] = useState(false);
   const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
   const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -167,6 +171,10 @@ const SystemSettingsView: React.FC = () => {
         const data = await r.json();
         const v = Number(data?.post_service_queue_ignore_sec);
         if (Number.isFinite(v) && v >= 0) setPostServiceQueueIgnoreSec(v);
+        const vd = Number(data?.direct_service_complete_min_sec);
+        if (Number.isFinite(vd) && vd >= 0) setDirectServiceCompleteMinSec(vd);
+        const va = Number(data?.abandon_min_queue_sec);
+        if (Number.isFinite(va) && va >= 0) setAbandonMinQueueSec(va);
       } catch (e) {
         console.error(e);
       }
@@ -482,16 +490,19 @@ const SystemSettingsView: React.FC = () => {
   }, [faceRetentionDays]);
 
   const saveQueueWaitAnalysisConfig = useCallback(async () => {
-    const sec = Math.max(
-      0,
-      Math.min(3600, Math.round(Number(postServiceQueueIgnoreSec) || 0)),
-    );
+    const sec = Math.max(0, Math.min(3600, Math.round(Number(postServiceQueueIgnoreSec) || 0)));
+    const dsec = Math.max(0, Math.min(3600, Number(directServiceCompleteMinSec) || 0));
+    const asec = Math.max(0, Math.min(3600, Number(abandonMinQueueSec) || 0));
     setSavingQueueWaitAnalysis(true);
     try {
       const r = await fetch(`${API_BASE}/api/admin/queue-wait-analysis-config`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ post_service_queue_ignore_sec: sec }),
+        body: JSON.stringify({
+          post_service_queue_ignore_sec: sec,
+          direct_service_complete_min_sec: dsec,
+          abandon_min_queue_sec: asec,
+        }),
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
@@ -499,6 +510,8 @@ const SystemSettingsView: React.FC = () => {
         return;
       }
       setPostServiceQueueIgnoreSec(Number(data?.post_service_queue_ignore_sec ?? sec));
+      setDirectServiceCompleteMinSec(Number(data?.direct_service_complete_min_sec ?? dsec));
+      setAbandonMinQueueSec(Number(data?.abandon_min_queue_sec ?? asec));
       alert("排队时长分析参数已保存（已进行的分析会话将立即使用新值）。");
     } catch (e) {
       console.error(e);
@@ -506,7 +519,7 @@ const SystemSettingsView: React.FC = () => {
     } finally {
       setSavingQueueWaitAnalysis(false);
     }
-  }, [postServiceQueueIgnoreSec]);
+  }, [postServiceQueueIgnoreSec, directServiceCompleteMinSec, abandonMinQueueSec]);
 
   return (
     <div className="min-w-0 space-y-6">
@@ -801,14 +814,28 @@ const SystemSettingsView: React.FC = () => {
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="mb-2 text-sm font-semibold text-slate-800">排队时长分析 · 运行参数</div>
             <p className="mb-3 text-xs text-slate-500">
-              <span className="font-mono text-[11px] text-slate-600">
-                QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_SEC
-              </span>
-              ：一次服务落库后的 N 秒内，若脚底再次进入排队区，视为离场路径<strong className="font-medium">不开启新排队</strong>
-              ，避免「从服务区经排队区出门」被误计为弃单。设为 <strong className="font-medium">0</strong> 关闭。上限
-              3600 秒；环境变量仅在无数据库记录时作为初始默认值。
+              参数落库于 <span className="font-mono text-[11px] text-slate-600">app_settings</span>
+              ，分析进行中的会话会立即读新值。各环境变量名见对应输入说明；无数据库记录时以环境变量为默认。
             </p>
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="mb-3 space-y-3 rounded border border-slate-100 bg-slate-50/80 p-3 text-xs text-slate-600">
+              <p>
+                <span className="font-mono text-[11px]">QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_SEC</span>
+                ：一次服务落库后的 N 秒内再踩排队区<strong className="font-medium text-slate-700">不开启新排队</strong>
+                ，减轻「经排队区出门」误判弃单。<strong className="font-medium text-slate-700">0</strong> 为关闭。
+              </p>
+              <p>
+                <span className="font-mono text-[11px]">QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_SEC</span>
+                ：脚底<strong className="font-medium text-slate-700">直接进入服务区</strong>
+                （未计排队）时，仅当服务停留 ≥ N 秒并离开才落库并计入<strong className="font-medium text-slate-700">完成笔数</strong>。
+              </p>
+              <p>
+                <span className="font-mono text-[11px]">QUEUE_WAIT_ABANDON_MIN_QUEUE_SEC</span>
+                ：进排队区后<strong className="font-medium text-slate-700">未进服务区</strong>就离开：若排队停留 &lt; N
+                秒则<strong className="font-medium text-slate-700">不落库、不计弃单</strong>（视作路过）。
+                达到 N 秒后再离开仍按原逻辑计弃单。
+              </p>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
               <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
                 <span className="shrink-0">服务后忽略排队区（秒）</span>
                 <input
@@ -819,6 +846,32 @@ const SystemSettingsView: React.FC = () => {
                   className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
                   value={postServiceQueueIgnoreSec}
                   onChange={(e) => setPostServiceQueueIgnoreSec(Number(e.target.value || 0))}
+                  disabled={savingQueueWaitAnalysis}
+                />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span className="shrink-0">直进服务区成交最小服务（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={3600}
+                  step={1}
+                  className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                  value={directServiceCompleteMinSec}
+                  onChange={(e) => setDirectServiceCompleteMinSec(Number(e.target.value || 0))}
+                  disabled={savingQueueWaitAnalysis}
+                />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span className="shrink-0">计弃单的最小排队停留（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={3600}
+                  step={1}
+                  className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                  value={abandonMinQueueSec}
+                  onChange={(e) => setAbandonMinQueueSec(Number(e.target.value || 0))}
                   disabled={savingQueueWaitAnalysis}
                 />
               </label>

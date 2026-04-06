@@ -1,3 +1,4 @@
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -6,6 +7,35 @@ from .db import SessionLocal
 from . import models
 
 _db_write_lock = threading.Lock()
+
+# 与 routers/admin.py 中 AppSetting.key 一致（避免 queue_wait_store → admin 循环依赖）
+_QW_KEY_DIRECT_SVC_MIN = "queue_wait_direct_service_complete_min_sec"
+_QW_KEY_ABANDON_MIN_Q = "queue_wait_abandon_min_queue_sec"
+
+
+def _queue_wait_stat_thresholds_sync() -> Tuple[float, float]:
+    """统计口径：直进服务区计完成的最短服务秒数、计弃单的最短排队秒数（与当前数据库设置一致）。"""
+    direct = float(os.environ.get("QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_SEC", "3"))
+    abandon_m = float(os.environ.get("QUEUE_WAIT_ABANDON_MIN_QUEUE_SEC", "2"))
+    try:
+        with SessionLocal() as db:
+            r_d = (
+                db.query(models.AppSetting)
+                .filter(models.AppSetting.key == _QW_KEY_DIRECT_SVC_MIN)
+                .first()
+            )
+            if r_d is not None:
+                direct = max(0.0, float(str(r_d.value)))
+            r_a = (
+                db.query(models.AppSetting)
+                .filter(models.AppSetting.key == _QW_KEY_ABANDON_MIN_Q)
+                .first()
+            )
+            if r_a is not None:
+                abandon_m = max(0.0, float(str(r_a.value)))
+    except Exception:
+        pass
+    return float(direct), float(abandon_m)
 
 
 def _tz_from_offset_minutes(tz_offset_minutes: Optional[int]) -> timezone:
@@ -170,9 +200,10 @@ def _build_trend_series_for_bucket(
         he = min(hour_end, float(end_ts))
         he = max(he, hs + 1e-6)
 
+        direct_min, _abandon_m = _queue_wait_stat_thresholds_sync()
         svc_n = 0
         for v in visits:
-            if v.service_seconds is None:
+            if not _visit_queued_then_served(v, direct_min):
                 continue
             try:
                 et = float(v.end_ts)
@@ -201,22 +232,29 @@ def _build_trend_series_for_bucket(
     return out_tq, out_ts, trend_svc_count, trend_qlen
 
 
-def _visit_is_queue_abandon(v: models.QueueWaitVisit) -> bool:
-    """曾产生排队时长，但未记录服务时长（离开排队区且未进入服务区闭环）。"""
+def _visit_is_queue_abandon(v: models.QueueWaitVisit, abandon_min_queue_sec: float) -> bool:
+    """曾产生排队时长，但未记录服务时长；排队停留需达到阈值才计弃单（低于阈值视为路过）。"""
     try:
         if v.service_seconds is not None:
             return False
-        return float(v.queue_seconds or 0.0) > 1e-6
+        q = float(v.queue_seconds or 0.0)
+        if q <= 1e-6:
+            return False
+        return q >= float(abandon_min_queue_sec) - 1e-9
     except Exception:
         return False
 
 
-def _visit_queued_then_served(v: models.QueueWaitVisit) -> bool:
-    """曾排队且最终完成服务（进入服务区并闭环）。"""
+def _visit_queued_then_served(v: models.QueueWaitVisit, direct_service_min_sec: float) -> bool:
+    """完成服务笔数：曾排队后成交，或直进服务区且服务停留达到阈值。"""
     try:
         if v.service_seconds is None:
             return False
-        return float(v.queue_seconds or 0.0) > 1e-6
+        q = float(v.queue_seconds or 0.0)
+        sv = float(v.service_seconds)
+        if q > 1e-6:
+            return True
+        return sv >= float(direct_service_min_sec) - 1e-9
     except Exception:
         return False
 
@@ -226,6 +264,7 @@ def _trend_abandon_counts_for_bucket(
     start_ts: float,
     end_ts: float,
     bucket: str,
+    abandon_min_queue_sec: float,
 ) -> List[Dict[str, Any]]:
     num_buckets, bucket_seconds = _trend_bucket_layout(bucket)
     out: List[Dict[str, Any]] = []
@@ -234,7 +273,7 @@ def _trend_abandon_counts_for_bucket(
         he = hs + bucket_seconds
         n = 0
         for v in visits:
-            if not _visit_is_queue_abandon(v):
+            if not _visit_is_queue_abandon(v, abandon_min_queue_sec):
                 continue
             try:
                 et = float(v.end_ts)
@@ -251,6 +290,7 @@ def _trend_queued_then_served_counts_for_bucket(
     start_ts: float,
     end_ts: float,
     bucket: str,
+    direct_service_min_sec: float,
 ) -> List[Dict[str, Any]]:
     num_buckets, bucket_seconds = _trend_bucket_layout(bucket)
     out: List[Dict[str, Any]] = []
@@ -259,7 +299,7 @@ def _trend_queued_then_served_counts_for_bucket(
         he = hs + bucket_seconds
         n = 0
         for v in visits:
-            if not _visit_queued_then_served(v):
+            if not _visit_queued_then_served(v, direct_service_min_sec):
                 continue
             try:
                 et = float(v.end_ts)
@@ -325,6 +365,7 @@ def get_queue_wait_stats_sync(
     n_s, _ = _trend_bucket_layout(bs)
     n_f, _ = _trend_bucket_layout(bf)
     n_a, _ = _trend_bucket_layout(ba)
+    direct_min_s, abandon_min_q = _queue_wait_stat_thresholds_sync()
 
     def _empty_payload() -> Dict[str, Any]:
         return {
@@ -406,17 +447,17 @@ def get_queue_wait_stats_sync(
             return cache4[b]
 
         tq_a, t_svc_pts, t_sc_f, t_ql_f = _series_for(bq)[0], _series_for(bs)[1], _series_for(bf)[2], _series_for(bf)[3]
-        abandon_n = sum(1 for v in visits if _visit_is_queue_abandon(v))
-        served_after_q_n = sum(1 for v in visits if _visit_queued_then_served(v))
+        abandon_n = sum(1 for v in visits if _visit_is_queue_abandon(v, abandon_min_q))
+        served_after_q_n = sum(1 for v in visits if _visit_queued_then_served(v, direct_min_s))
         denom = int(abandon_n) + int(served_after_q_n)
         abandon_rate_pct = (
             round(100.0 * float(abandon_n) / float(denom), 2) if denom > 0 else 0.0
         )
         t_abandon_cnt = _trend_abandon_counts_for_bucket(
-            visits, float(start_ts), float(end_ts), ba
+            visits, float(start_ts), float(end_ts), ba, abandon_min_q
         )
         t_served_bucket = _trend_queued_then_served_counts_for_bucket(
-            visits, float(start_ts), float(end_ts), ba
+            visits, float(start_ts), float(end_ts), ba, direct_min_s
         )
         t_abandon_rate = _trend_abandon_rate_for_bucket(t_abandon_cnt, t_served_bucket)
 
