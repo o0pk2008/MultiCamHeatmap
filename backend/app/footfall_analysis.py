@@ -207,7 +207,8 @@ class FootfallAnalyzer:
 
         cross_pos_dist = float(os.environ.get("HEATMAP_CROSS_POS_DIST", "0.03"))
         cross_dedup_dt = float(os.environ.get("HEATMAP_CROSS_DEDUP_DT_SEC", "1.0"))
-        recent_crosses: list[Tuple[float, float, float, str]] = []
+        # (track_id, foot_u, foot_v, ts, direction)：去重仅针对同一 track，避免并排多人互相抑制
+        recent_crosses: list[Tuple[int, float, float, float, str]] = []
 
         # 半平面容差：与 zone_w 成比例，避免在在线附近抖动反复判穿越
         sd_tol_base = float(os.environ.get("HEATMAP_FOOTFALL_SD_TOL_MULT", "0.25"))
@@ -396,17 +397,19 @@ class FootfallAnalyzer:
                             counted_dir = "in" if cross_z > 0 else "out"
 
                     if counted_dir is not None:
-                        # 全局最近穿越去重：同方向、同位置、同时间窗内的重复触发抑制
+                        # 同一 track 的近时、近落脚点、同方向重复触发抑制（抖动/ID 未变时的双计）
                         if recent_crosses:
                             cutoff_ts = det_ts - cross_dedup_dt
-                            recent_crosses = [c for c in recent_crosses if float(c[2]) >= cutoff_ts]
+                            recent_crosses = [c for c in recent_crosses if float(c[3]) >= cutoff_ts]
 
                         suppressed = False
                         if recent_crosses:
                             du = float(foot_u)
                             dv = float(foot_v)
                             r2 = float(cross_pos_dist) * float(cross_pos_dist)
-                            for (ru, rv, rts, rdir) in recent_crosses:
+                            for (rtid, ru, rv, rts, rdir) in recent_crosses:
+                                if int(rtid) != int(tid):
+                                    continue
                                 if rdir != counted_dir:
                                     continue
                                 if abs(det_ts - float(rts)) > cross_dedup_dt:
@@ -466,7 +469,7 @@ class FootfallAnalyzer:
                             except Exception:
                                 pass
 
-                        recent_crosses.append((float(foot_u), float(foot_v), float(det_ts), counted_dir))
+                        recent_crosses.append((int(tid), float(foot_u), float(foot_v), float(det_ts), counted_dir))
 
                         # 穿越一次后先关掉：离开近线带后再允许下一次计数
                         prev["armed"] = False
