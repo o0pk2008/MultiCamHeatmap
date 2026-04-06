@@ -259,15 +259,35 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
         raise HTTPException(status_code=404, detail="Virtual view not found")
 
     def gen():
+        """
+        注意：此 endpoint 是“每请求一条 RTSP + MJPEG”。
+        为降低“客户端慢导致读帧/编码被拖慢 -> 延迟累积”的风险，这里使用：
+        - 读帧线程：持续读 RTSP，并覆盖写入一个有界(=1)的“最新帧”缓存（满时丢旧）
+        - 输出线程：按目标 FPS 从缓存取最新帧编码并 yield
+        """
+        import threading
+        import queue
+
         cap = cv2.VideoCapture(cam.rtsp_url)
-        # 尝试降低缓冲延迟
+        # 尝试降低缓冲延迟（不同 backend 支持程度不同）
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
 
-        boundary = b"--frame"
+        latest_q: "queue.Queue[any]" = queue.Queue(maxsize=1)
+        stop = threading.Event()
         last_ok = time.time()
+
+        boundary = b"--frame"
+        last_jpeg_ts = 0.0
+        # 预览输出限帧：避免前端/网络压力导致延迟与资源消耗放大
+        try:
+            target_fps = float(os.environ.get("VV_PREVIEW_FPS", "10.0"))
+        except Exception:
+            target_fps = 10.0
+        target_fps = max(0.2, min(30.0, float(target_fps)))
+        last_emit_ts = 0.0
         # 定期热加载最新参数（避免前端必须强制重连才能看到保存后的画面）
         last_reload = 0.0
         enabled = view.enabled
@@ -281,6 +301,37 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
         crop_y1 = getattr(view, "crop_y1", None)
         crop_x2 = getattr(view, "crop_x2", None)
         crop_y2 = getattr(view, "crop_y2", None)
+
+        def reader_loop():
+            nonlocal last_ok
+            try:
+                while not stop.is_set():
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        # RTSP 抖动时短暂等待重试；超过 5s 认为断流
+                        if time.time() - last_ok > 5:
+                            break
+                        time.sleep(0.02)
+                        continue
+                    last_ok = time.time()
+                    # 覆盖写入“最新帧”（满了丢旧）
+                    try:
+                        latest_q.put_nowait(frame)
+                    except queue.Full:
+                        try:
+                            _ = latest_q.get_nowait()
+                        except Exception:
+                            pass
+                        try:
+                            latest_q.put_nowait(frame)
+                        except Exception:
+                            pass
+                    time.sleep(0.001)
+            except Exception:
+                return
+
+        t = threading.Thread(target=reader_loop, name=f"vv-preview-reader-{camera_id}-{view_id}", daemon=True)
+        t.start()
         try:
             while True:
                 now = time.time()
@@ -310,14 +361,19 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                                 crop_y2 = getattr(v2, "crop_y2", None)
                     except Exception:
                         pass
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    # RTSP 抖动时短暂等待重试
+                # 限帧：输出线程不需要每次循环都编码
+                if (now - last_emit_ts) < (1.0 / max(0.1, target_fps)):
+                    time.sleep(0.005)
+                    continue
+
+                try:
+                    frame = latest_q.get(timeout=0.5)
+                except Exception:
+                    # reader 可能断流/卡住，给出超时退出条件
                     if time.time() - last_ok > 5:
                         break
-                    time.sleep(0.05)
                     continue
-                last_ok = time.time()
+                last_emit_ts = time.time()
 
                 if not enabled:
                     persp = frame
@@ -338,6 +394,12 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                             out_h=out_h,
                         )
 
+                # 同一帧避免重复编码（极端情况下队列里重复值/时间相同）
+                if last_jpeg_ts == last_emit_ts:
+                    time.sleep(0.005)
+                    continue
+                last_jpeg_ts = last_emit_ts
+
                 ok2, jpg = cv2.imencode(".jpg", persp, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
                 if not ok2:
                     continue
@@ -347,6 +409,10 @@ def preview_virtual_view_mjpeg(camera_id: int, view_id: int, db: Session = Depen
                 yield f"Content-Length: {len(data)}\r\n\r\n".encode("utf-8")
                 yield data + b"\r\n"
         finally:
+            try:
+                stop.set()
+            except Exception:
+                pass
             cap.release()
 
     return StreamingResponse(
