@@ -1349,9 +1349,6 @@ const QueueWaitAnalysisView: React.FC = () => {
                 value={statsData.queuedThenServedCount}
                 className="text-lg font-semibold text-slate-800"
               />
-              <div className="mt-0.5 text-[10px] leading-tight text-slate-500">
-                完成服务笔数：含排队后成交，以及直进服务区且服务时长达系统设置阈值
-              </div>
             </div>
             <div className="rounded border border-slate-200 bg-slate-50 p-2">
               <div className="text-[11px] text-slate-600">含服务时长样本</div>
@@ -1436,8 +1433,6 @@ const QueueWaitAnalysisView: React.FC = () => {
                 </select>
               </div>
               <div className="mb-1.5 shrink-0 text-[10px] leading-snug text-slate-500">
-                柱：各时间桶内<strong className="font-medium text-slate-600">完成服务</strong>人数（按 end_ts）；橙线：排队区
-                <strong className="font-medium text-slate-600">估算平均同时在队人数</strong>
                 {trendGranFootfall === "1h" && "（桶内每分钟采样平均）。"}
                 {trendGranFootfall === "30m" && "（桶内每分钟采样，共 30 次取平均）。"}
                 {trendGranFootfall === "1m" && "（每桶在中点采样 1 次）。"}
@@ -1460,10 +1455,6 @@ const QueueWaitAnalysisView: React.FC = () => {
                   <option value="30m">按30分钟</option>
                   <option value="1m">按1分钟</option>
                 </select>
-              </div>
-              <div className="mb-1.5 shrink-0 text-[10px] leading-snug text-slate-500">
-                弃单：曾排队、未记录服务时长。折线为各时间桶内<strong className="font-medium text-slate-600">弃单率</strong>
-                = 桶内弃单 ÷（桶内弃单 + 桶内排队后成交），按 <strong className="font-medium text-slate-600">end_ts</strong> 入桶。
               </div>
               <div className="min-h-0 flex-1">
                 <FlexHeightReactECharts option={abandonRateTrendOption} />
