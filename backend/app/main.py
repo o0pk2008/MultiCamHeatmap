@@ -104,9 +104,11 @@ app.include_router(cameras_router)
 app.include_router(mappings_router)
 app.include_router(discovery_router)
 from .routers.footfall import router as footfall_router
-from .routers.admin import router as admin_router
+from .routers.queue_wait import router as queue_wait_router
+from .routers.admin import QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY, router as admin_router
 
 app.include_router(footfall_router)
+app.include_router(queue_wait_router)
 app.include_router(admin_router)
 
 
@@ -114,12 +116,23 @@ app.include_router(admin_router)
 async def _load_persisted_runtime_settings() -> None:
     try:
         from .virtual_view_inference import manager as vv_manager
+        from .queue_wait_analysis import analyzer as qw_analyzer
 
         with SessionLocal() as db:
             row = db.query(models.AppSetting).filter(models.AppSetting.key == "face_capture_retention_days").first()
             if row is not None:
                 try:
                     vv_manager.set_face_capture_retention_days(int(str(row.value)))
+                except Exception:
+                    pass
+            row_qw = (
+                db.query(models.AppSetting)
+                .filter(models.AppSetting.key == QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY)
+                .first()
+            )
+            if row_qw is not None:
+                try:
+                    qw_analyzer.set_post_service_queue_ignore_sec(float(str(row_qw.value)))
                 except Exception:
                     pass
     except Exception:

@@ -38,7 +38,14 @@ class FaceCaptureRetentionRequest(BaseModel):
     retention_days: int
 
 
+class QueueWaitAnalysisConfigRequest(BaseModel):
+    """排队时长分析运行参数（与 queue_wait_analysis 状态机一致）。"""
+
+    post_service_queue_ignore_sec: float
+
+
 FACE_CAPTURE_RETENTION_KEY = "face_capture_retention_days"
+QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY = "queue_wait_post_service_queue_ignore_sec"
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -58,29 +65,38 @@ async def admin_db_stats(floor_plan_id: Optional[int] = None):
     with SessionLocal() as db:
         heatmap_q = db.query(models.HeatmapEvent)
         footfall_q = db.query(models.FootfallCrossEvent)
+        queue_wait_q = db.query(models.QueueWaitVisit)
         if floor_plan_id is not None:
             fp_id = int(floor_plan_id)
             heatmap_q = heatmap_q.filter(models.HeatmapEvent.floor_plan_id == fp_id)
             footfall_q = footfall_q.filter(models.FootfallCrossEvent.floor_plan_id == fp_id)
+            queue_wait_q = queue_wait_q.filter(models.QueueWaitVisit.floor_plan_id == fp_id)
 
         heatmap_count = int(heatmap_q.count())
         footfall_count = int(footfall_q.count())
+        queue_wait_count = int(queue_wait_q.count())
 
         heatmap_min = db.query(models.HeatmapEvent.ts)
         heatmap_max = db.query(models.HeatmapEvent.ts)
         footfall_min = db.query(models.FootfallCrossEvent.ts)
         footfall_max = db.query(models.FootfallCrossEvent.ts)
+        queue_wait_min = db.query(models.QueueWaitVisit.end_ts)
+        queue_wait_max = db.query(models.QueueWaitVisit.end_ts)
         if floor_plan_id is not None:
             fp_id = int(floor_plan_id)
             heatmap_min = heatmap_min.filter(models.HeatmapEvent.floor_plan_id == fp_id)
             heatmap_max = heatmap_max.filter(models.HeatmapEvent.floor_plan_id == fp_id)
             footfall_min = footfall_min.filter(models.FootfallCrossEvent.floor_plan_id == fp_id)
             footfall_max = footfall_max.filter(models.FootfallCrossEvent.floor_plan_id == fp_id)
+            queue_wait_min = queue_wait_min.filter(models.QueueWaitVisit.floor_plan_id == fp_id)
+            queue_wait_max = queue_wait_max.filter(models.QueueWaitVisit.floor_plan_id == fp_id)
 
         heatmap_min_ts = heatmap_min.order_by(models.HeatmapEvent.ts.asc()).first()
         heatmap_max_ts = heatmap_max.order_by(models.HeatmapEvent.ts.desc()).first()
         footfall_min_ts = footfall_min.order_by(models.FootfallCrossEvent.ts.asc()).first()
         footfall_max_ts = footfall_max.order_by(models.FootfallCrossEvent.ts.desc()).first()
+        queue_wait_min_ts = queue_wait_min.order_by(models.QueueWaitVisit.end_ts.asc()).first()
+        queue_wait_max_ts = queue_wait_max.order_by(models.QueueWaitVisit.end_ts.desc()).first()
 
     db_file_size = None
     try:
@@ -95,10 +111,13 @@ async def admin_db_stats(floor_plan_id: Optional[int] = None):
         "db_file_size_bytes": db_file_size,
         "heatmap_events_count": heatmap_count,
         "footfall_cross_events_count": footfall_count,
+        "queue_wait_visits_count": queue_wait_count,
         "heatmap_min_ts": float(heatmap_min_ts[0]) if heatmap_min_ts and heatmap_min_ts[0] is not None else None,
         "heatmap_max_ts": float(heatmap_max_ts[0]) if heatmap_max_ts and heatmap_max_ts[0] is not None else None,
         "footfall_min_ts": float(footfall_min_ts[0]) if footfall_min_ts and footfall_min_ts[0] is not None else None,
         "footfall_max_ts": float(footfall_max_ts[0]) if footfall_max_ts and footfall_max_ts[0] is not None else None,
+        "queue_wait_min_ts": float(queue_wait_min_ts[0]) if queue_wait_min_ts and queue_wait_min_ts[0] is not None else None,
+        "queue_wait_max_ts": float(queue_wait_max_ts[0]) if queue_wait_max_ts and queue_wait_max_ts[0] is not None else None,
     }
 
 
@@ -158,6 +177,33 @@ async def admin_purge_heatmap_events(req: PurgeByFloorPlanRequest):
         q = db.query(models.HeatmapEvent).filter(models.HeatmapEvent.floor_plan_id == fp_id)
         if start_ts is not None and end_ts is not None:
             q = q.filter(models.HeatmapEvent.ts >= float(start_ts), models.HeatmapEvent.ts < float(end_ts))
+        deleted_count = q.delete(synchronize_session=False)
+        db.commit()
+    return {
+        "status": "ok",
+        "deleted_count": int(deleted_count or 0),
+        "floor_plan_id": fp_id,
+        "purge_mode": req.purge_mode,
+        "start_ts": start_ts,
+        "end_ts": end_ts,
+    }
+
+
+@router.post("/purge-queue-wait-visits")
+async def admin_purge_queue_wait_visits(req: PurgeByFloorPlanRequest):
+    """
+    按平面图删除排队时长分析落地记录（queue_wait_visits）。不删除 ROI 配置（queue_wait_roi_configs）。
+    日期范围按记录的 end_ts 与热力/人流量清理一致（本地日切到 UTC 时间戳）。
+    """
+    _validate_confirm_text(req.confirm_text)
+    fp_id = int(req.floor_plan_id)
+    start_ts, end_ts = _range_from_req(req)
+    with SessionLocal() as db:
+        if not db.query(models.FloorPlan).filter(models.FloorPlan.id == fp_id).first():
+            raise HTTPException(status_code=404, detail="floor plan not found")
+        q = db.query(models.QueueWaitVisit).filter(models.QueueWaitVisit.floor_plan_id == fp_id)
+        if start_ts is not None and end_ts is not None:
+            q = q.filter(models.QueueWaitVisit.end_ts >= float(start_ts), models.QueueWaitVisit.end_ts < float(end_ts))
         deleted_count = q.delete(synchronize_session=False)
         db.commit()
     return {
@@ -263,3 +309,44 @@ async def admin_set_face_capture_retention(req: FaceCaptureRetentionRequest):
             row.value = str(days)
         db.commit()
     return {"status": "ok", "retention_days": int(days)}
+
+
+@router.get("/queue-wait-analysis-config")
+async def admin_get_queue_wait_analysis_config():
+    from ..queue_wait_analysis import analyzer as qw_analyzer
+
+    sec = float(qw_analyzer.get_post_service_queue_ignore_sec())
+    with SessionLocal() as db:
+        row = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY)
+            .first()
+        )
+        if row is not None:
+            try:
+                sec = max(0.0, float(str(row.value)))
+            except Exception:
+                pass
+    qw_analyzer.set_post_service_queue_ignore_sec(sec)
+    return {"post_service_queue_ignore_sec": float(sec)}
+
+
+@router.post("/queue-wait-analysis-config")
+async def admin_set_queue_wait_analysis_config(req: QueueWaitAnalysisConfigRequest):
+    from ..queue_wait_analysis import analyzer as qw_analyzer
+
+    sec = max(0.0, min(float(req.post_service_queue_ignore_sec), 3600.0))
+    qw_analyzer.set_post_service_queue_ignore_sec(sec)
+    with SessionLocal() as db:
+        row = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY)
+            .first()
+        )
+        if row is None:
+            row = models.AppSetting(key=QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY, value=str(sec))
+            db.add(row)
+        else:
+            row.value = str(sec)
+        db.commit()
+    return {"status": "ok", "post_service_queue_ignore_sec": float(sec)}

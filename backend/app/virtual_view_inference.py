@@ -6,7 +6,7 @@ import base64
 import queue
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -182,6 +182,11 @@ class VirtualViewInferenceManager:
         self._yolo_foot_point_color: str = "green"  # green | blue | white
         # 监控画面映射网格颜色（系统设置）
         self._mapped_cam_grid_color: str = "white"  # white | green | blue
+        # 排队时长分析：ROI 四边形（UV）与每人标签（ASCII，供 cv2.putText）
+        self._queue_wait_quads_by_vv: Dict[
+            int, Tuple[Optional[List[Tuple[float, float]]], Optional[List[Tuple[float, float]]]]
+        ] = {}
+        self._queue_wait_labels_by_vv: Dict[int, Dict[int, str]] = {}
 
     def set_face_capture_retention_days(self, days: int) -> None:
         with self._lock:
@@ -208,6 +213,30 @@ class VirtualViewInferenceManager:
     def get_draw_footfall_line_overlay(self) -> bool:
         with self._lock:
             return bool(self._draw_footfall_line_overlay)
+
+    def set_queue_wait_overlay(
+        self,
+        virtual_view_id: int,
+        queue_pts: Optional[List[Tuple[float, float]]],
+        service_pts: Optional[List[Tuple[float, float]]],
+    ) -> None:
+        with self._lock:
+            self._queue_wait_quads_by_vv[int(virtual_view_id)] = (
+                list(queue_pts) if queue_pts else None,
+                list(service_pts) if service_pts else None,
+            )
+
+    def clear_queue_wait_overlay(self, virtual_view_id: int) -> None:
+        with self._lock:
+            self._queue_wait_quads_by_vv.pop(int(virtual_view_id), None)
+
+    def set_queue_wait_labels(self, virtual_view_id: int, labels: Dict[int, str]) -> None:
+        with self._lock:
+            self._queue_wait_labels_by_vv[int(virtual_view_id)] = dict(labels)
+
+    def clear_queue_wait_labels(self, virtual_view_id: int) -> None:
+        with self._lock:
+            self._queue_wait_labels_by_vv.pop(int(virtual_view_id), None)
 
     def set_yolo_draw_config(
         self,
@@ -293,6 +322,75 @@ class VirtualViewInferenceManager:
         cv2.line(img, (x2 - corner, y2), (x2 - r, y2), color, thickness)
         cv2.line(img, (x2, y2 - corner), (x2, y2 - r), color, thickness)
         cv2.ellipse(img, (x2 - r, y2 - r), (r, r), 0, 0, 90, color, thickness)
+
+    # 与排队/服务 ROI polylines 同色（BGR），用于时长条背景
+    _QUEUE_WAIT_ROI_BGR: Tuple[int, int, int] = (255, 255, 0)
+    _SERVICE_ROI_BGR: Tuple[int, int, int] = (0, 165, 255)
+
+    @classmethod
+    def _draw_queue_wait_duration_caption(
+        cls,
+        img: np.ndarray,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        text: str,
+        bg_bgr: Tuple[int, int, int],
+        w_img: int,
+        h_img: int,
+    ) -> int:
+        """
+        在框顶上方居中绘制与 ROI 同色相的半透明底 + 白字。返回背景块顶边 y（便于在其上方画 person 标签）。
+        """
+        if not text or w_img <= 0 or h_img <= 0:
+            return y1
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.48
+        thickness = 1
+        try:
+            (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+        except Exception:
+            return y1
+        pad_x, pad_y = 6, 4
+        gap = 3
+        block_h = th + baseline + pad_y * 2
+        ry2 = int(y1) - gap
+        baseline_y = ry2 - pad_y
+        ry1 = baseline_y - th - baseline - pad_y
+        cx = (int(x1) + int(x2)) // 2
+        half = tw // 2 + pad_x
+        rx1 = cx - half
+        rx2 = cx + half
+        rx1 = max(0, min(rx1, w_img - 2))
+        rx2 = max(rx1 + 2, min(rx2, w_img - 1))
+        if ry2 < ry1:
+            ry1, ry2 = ry2, ry1
+        if ry1 < 0:
+            delta = -ry1
+            ry1 = 0
+            ry2 = min(h_img - 1, ry2 + delta)
+            baseline_y = min(baseline_y + delta, h_img - 2)
+        ry1 = max(0, min(ry1, h_img - 2))
+        ry2 = max(ry1 + 1, min(ry2, h_img - 1))
+        try:
+            roi = img[ry1 : ry2 + 1, rx1 : rx2 + 1]
+            if roi.size == 0:
+                return y1
+            layer = np.zeros_like(roi)
+            layer[:] = bg_bgr
+            blended = cv2.addWeighted(layer, 0.58, roi, 0.42, 0)
+            img[ry1 : ry2 + 1, rx1 : rx2 + 1] = blended
+        except Exception:
+            pass
+        tx = cx - tw // 2
+        tx = max(rx1 + 1, min(tx, rx2 - tw - 1))
+        ty = min(baseline_y, h_img - 1)
+        try:
+            cv2.putText(img, text, (tx, ty), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        except Exception:
+            pass
+        return ry1
 
     def _ensure_age_gender_model(self) -> None:
         """
@@ -1878,6 +1976,8 @@ class VirtualViewInferenceManager:
                 foot_line_uv = None
                 draw_footfall_line = True
                 yolo_draw_cfg = {}
+                queue_wait_quads = None
+                queue_wait_labels: Dict[int, str] = {}
                 try:
                     with self._lock:
                         foot_line_uv = self._footfall_line_uv_by_vv.get(int(virtual_view_id))
@@ -1889,6 +1989,8 @@ class VirtualViewInferenceManager:
                             "foot_point_style": self._yolo_foot_point_style,
                             "foot_point_color": self._yolo_foot_point_color,
                         }
+                        queue_wait_quads = self._queue_wait_quads_by_vv.get(int(virtual_view_id))
+                        queue_wait_labels = dict(self._queue_wait_labels_by_vv.get(int(virtual_view_id), {}))
                 except Exception:
                     foot_line_uv = None
                     draw_footfall_line = True
@@ -1899,6 +2001,8 @@ class VirtualViewInferenceManager:
                         "foot_point_style": "circle",
                         "foot_point_color": "green",
                     }
+                    queue_wait_quads = None
+                    queue_wait_labels = {}
 
                 if inference_enabled and draw_footfall_line and foot_line_uv is not None:
                     try:
@@ -1923,6 +2027,43 @@ class VirtualViewInferenceManager:
                         cv2.circle(annotated_img, (x2, y2), 4, (255, 0, 255), -1)
                     except Exception:
                         pass
+
+                if inference_enabled and queue_wait_quads is not None and w_img > 0 and h_img > 0:
+                    try:
+                        if annotated_img is plain_img:
+                            annotated_img = plain_img.copy()
+                    except Exception:
+                        annotated_img = plain_img
+                    try:
+                        q_pts, s_pts = queue_wait_quads
+                        if q_pts is not None and len(q_pts) >= 2:
+                            arr = np.array(
+                                [
+                                    [
+                                        int(round(float(p[0]) * float(w_img))),
+                                        int(round(float(p[1]) * float(h_img))),
+                                    ]
+                                    for p in q_pts
+                                ],
+                                dtype=np.int32,
+                            ).reshape((-1, 1, 2))
+                            cv2.polylines(annotated_img, [arr], True, (255, 255, 0), 2)
+                        if s_pts is not None and len(s_pts) >= 2:
+                            arr2 = np.array(
+                                [
+                                    [
+                                        int(round(float(p[0]) * float(w_img))),
+                                        int(round(float(p[1]) * float(h_img))),
+                                    ]
+                                    for p in s_pts
+                                ],
+                                dtype=np.int32,
+                            ).reshape((-1, 1, 2))
+                            cv2.polylines(annotated_img, [arr2], True, (0, 165, 255), 2)
+                        # ROI 区域名称标签仅在前端 canvas 叠加；此处只画边框避免与 canvas 重复。
+                    except Exception:
+                        pass
+
                 if inference_enabled and last_boxes is not None:
                     # 在副本上画框，避免污染 plain 预览
                     try:
@@ -1990,11 +2131,42 @@ class VirtualViewInferenceManager:
                         except Exception:
                             label = "person"
 
+                        tid_lbl = None
+                        try:
+                            if last_ids is not None and i < len(last_ids):
+                                tid_lbl = int(last_ids[i])
+                        except Exception:
+                            tid_lbl = None
+                        qw_txt = None
+                        if tid_lbl is not None and tid_lbl >= 0:
+                            qw_txt = queue_wait_labels.get(int(tid_lbl))
+
+                        caption_top_y = y1_i
+                        if qw_txt:
+                            qw_s = str(qw_txt).strip()
+                            cap_bg = (
+                                self._SERVICE_ROI_BGR
+                                if qw_s.lower().startswith("service")
+                                else self._QUEUE_WAIT_ROI_BGR
+                            )
+                            caption_top_y = self._draw_queue_wait_duration_caption(
+                                annotated_img,
+                                x1_i,
+                                y1_i,
+                                x2_i,
+                                y2_i,
+                                qw_s,
+                                cap_bg,
+                                int(w_img),
+                                int(h_img),
+                            )
+
+                        person_ty = max(caption_top_y - 4, 0) if qw_txt else max(y1_i - 5, 0)
                         # 按产品要求：YOLO 框顶只显示 person/id，不在这里显示性别和年龄
                         cv2.putText(
                             annotated_img,
                             label,
-                            (x1_i, max(y1_i - 5, 0)),
+                            (x1_i, person_ty),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.5,
                             box_color_bgr,

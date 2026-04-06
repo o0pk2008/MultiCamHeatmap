@@ -8,10 +8,13 @@ type DbStats = {
   db_file_size_bytes: number | null;
   heatmap_events_count: number;
   footfall_cross_events_count: number;
+  queue_wait_visits_count: number;
   heatmap_min_ts: number | null;
   heatmap_max_ts: number | null;
   footfall_min_ts: number | null;
   footfall_max_ts: number | null;
+  queue_wait_min_ts: number | null;
+  queue_wait_max_ts: number | null;
 };
 
 const bytesText = (n: number | null): string => {
@@ -57,6 +60,20 @@ const filenameFromDisposition = (v: string | null): string | null => {
   }
 };
 
+/** 本页锚点导航（单页 + 顶部 sticky 目录） */
+const SETTINGS_SECTIONS: { id: string; label: string }[] = [
+  { id: "settings-db-stats", label: "数据库状态" },
+  { id: "settings-backup", label: "备份下载" },
+  { id: "settings-display", label: "画面与标注" },
+  { id: "settings-face", label: "人脸保留" },
+  { id: "settings-queue-wait", label: "排队分析" },
+  { id: "settings-purge", label: "数据清理" },
+];
+
+const scrollToSettingsSection = (id: string) => {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+};
+
 const SystemSettingsView: React.FC = () => {
   const [floorPlans, setFloorPlans] = useState<FloorPlan[]>([]);
   const [selectedFloorPlanId, setSelectedFloorPlanId] = useState<number | "">("");
@@ -66,6 +83,7 @@ const SystemSettingsView: React.FC = () => {
   const [downloading, setDownloading] = useState(false);
   const [purgingHeatmap, setPurgingHeatmap] = useState(false);
   const [purgingFootfall, setPurgingFootfall] = useState(false);
+  const [purgingQueueWait, setPurgingQueueWait] = useState(false);
   const [reanalyzingFootfall, setReanalyzingFootfall] = useState(false);
   const [drawFootfallLineOverlay, setDrawFootfallLineOverlay] = useState(false);
   const [savingFootfallOverlay, setSavingFootfallOverlay] = useState(false);
@@ -77,6 +95,9 @@ const SystemSettingsView: React.FC = () => {
   const [mappedCamGridColor, setMappedCamGridColor] = useState<"white" | "green" | "blue">("white");
   const [faceRetentionDays, setFaceRetentionDays] = useState<number>(30);
   const [savingFaceRetention, setSavingFaceRetention] = useState(false);
+  /** 服务闭环后 N 秒内再踩排队区不计新排队（秒），0 为关闭 */
+  const [postServiceQueueIgnoreSec, setPostServiceQueueIgnoreSec] = useState<number>(30);
+  const [savingQueueWaitAnalysis, setSavingQueueWaitAnalysis] = useState(false);
   const [purgeMode, setPurgeMode] = useState<"all" | "range">("all");
   const [purgeStartDate, setPurgeStartDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [purgeEndDate, setPurgeEndDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
@@ -136,6 +157,21 @@ const SystemSettingsView: React.FC = () => {
       }
     };
     void loadFaceRetention();
+  }, []);
+
+  useEffect(() => {
+    const loadQueueWaitAnalysis = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/queue-wait-analysis-config`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const v = Number(data?.post_service_queue_ignore_sec);
+        if (Number.isFinite(v) && v >= 0) setPostServiceQueueIgnoreSec(v);
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadQueueWaitAnalysis();
   }, []);
 
   const refreshStats = useCallback(async () => {
@@ -278,6 +314,42 @@ const SystemSettingsView: React.FC = () => {
     }
   }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
 
+  const purgeQueueWait = useCallback(async () => {
+    if (selectedFloorPlanId === "") return;
+    if (!confirmDelete(`将清理平面图 [${selectedFloorPlanName}] 的排队时长分析历史数据`)) return;
+    if (purgeMode === "range" && (!purgeStartDate || !purgeEndDate)) {
+      alert("请选择起始日期和结束日期。");
+      return;
+    }
+    setPurgingQueueWait(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/admin/purge-queue-wait-visits`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          floor_plan_id: Number(selectedFloorPlanId),
+          confirm_text: "DELETE",
+          purge_mode: purgeMode,
+          start_date: purgeMode === "range" ? purgeStartDate : null,
+          end_date: purgeMode === "range" ? purgeEndDate : null,
+          tz_offset_minutes: new Date().getTimezoneOffset(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(`清理失败: ${data?.detail || res.status}`);
+        return;
+      }
+      alert(`清理完成，删除 ${Number(data?.deleted_count || 0)} 条排队时长记录（queue_wait_visits）。`);
+      void refreshStats();
+    } catch (e) {
+      console.error(e);
+      alert("清理失败，请稍后重试。");
+    } finally {
+      setPurgingQueueWait(false);
+    }
+  }, [confirmDelete, purgeEndDate, purgeMode, purgeStartDate, refreshStats, selectedFloorPlanId, selectedFloorPlanName]);
+
   const reanalyzeFootfallFaceCaptures = useCallback(async () => {
     if (selectedFloorPlanId === "") return;
     const ok = window.confirm(
@@ -409,331 +481,456 @@ const SystemSettingsView: React.FC = () => {
     }
   }, [faceRetentionDays]);
 
+  const saveQueueWaitAnalysisConfig = useCallback(async () => {
+    const sec = Math.max(
+      0,
+      Math.min(3600, Math.round(Number(postServiceQueueIgnoreSec) || 0)),
+    );
+    setSavingQueueWaitAnalysis(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/admin/queue-wait-analysis-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ post_service_queue_ignore_sec: sec }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(`保存失败: ${data?.detail || r.status}`);
+        return;
+      }
+      setPostServiceQueueIgnoreSec(Number(data?.post_service_queue_ignore_sec ?? sec));
+      alert("排队时长分析参数已保存（已进行的分析会话将立即使用新值）。");
+    } catch (e) {
+      console.error(e);
+      alert("保存失败，请稍后重试。");
+    } finally {
+      setSavingQueueWaitAnalysis(false);
+    }
+  }, [postServiceQueueIgnoreSec]);
+
   return (
-    <div className="space-y-4">
-      <h2 className="text-xl font-semibold text-slate-800">系统设置</h2>
-      <p className="text-xs text-slate-500">
-        提供数据库备份下载与历史数据清理功能。所有清理操作不可撤销，请谨慎执行。
-      </p>
+    <div className="min-w-0 space-y-6">
+      <header className="border-b border-slate-100 pb-4">
+        <h2 className="text-xl font-semibold text-slate-800">系统设置</h2>
+        <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-500">
+          数据库运维、画面标注、业务策略与数据清理集中在本页。标题下方为区块目录，向下滚动时将固定在视口顶部以便快速跳转。清理类操作不可撤销，务必先备份。
+        </p>
+      </header>
 
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-3 flex items-center justify-between">
-          <span className="text-sm font-semibold text-slate-800">数据库状态</span>
-          <button
-            className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
-            onClick={() => void refreshStats()}
-            disabled={loadingStats}
-          >
-            {loadingStats ? "刷新中..." : "刷新"}
-          </button>
-        </div>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold text-slate-800">全局统计</div>
-              <div className="text-[11px] text-slate-500">{bytesText(globalStats?.db_file_size_bytes ?? null)}</div>
+      <div className="sticky top-0 z-20 -mx-4 border-b border-slate-200/80 bg-slate-50/95 px-4 py-2.5 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-slate-50/85">
+        <nav aria-label="系统设置目录" className="flex flex-wrap gap-2 sm:flex-nowrap sm:overflow-x-auto sm:pb-0.5">
+          {SETTINGS_SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              className="shrink-0 rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm hover:border-slate-300 hover:bg-slate-50 hover:text-[#5b3ff6]"
+              onClick={() => scrollToSettingsSection(s.id)}
+            >
+              {s.label}
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      <div className="space-y-6">
+        <section id="settings-db-stats" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-slate-800">数据库状态</span>
+              <button
+                type="button"
+                className="rounded border border-slate-300 bg-white px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                onClick={() => void refreshStats()}
+                disabled={loadingStats}
+              >
+                {loadingStats ? "刷新中..." : "刷新"}
+              </button>
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <StatKpi label="热力事件总数" value={globalStats?.heatmap_events_count ?? "-"} />
-              <StatKpi label="人流事件总数" value={globalStats?.footfall_cross_events_count ?? "-"} />
-            </div>
-            <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-              <div className="mb-2 text-xs font-semibold text-slate-800">时间范围（UTC 本地显示）</div>
-              <div className="space-y-1.5">
-                <StatRow label="热力最早时间" value={tsText(globalStats?.heatmap_min_ts ?? null)} />
-                <StatRow label="热力最新时间" value={tsText(globalStats?.heatmap_max_ts ?? null)} />
-                <div className="my-2 h-px bg-slate-100" />
-                <StatRow label="人流最早时间" value={tsText(globalStats?.footfall_min_ts ?? null)} />
-                <StatRow label="人流最新时间" value={tsText(globalStats?.footfall_max_ts ?? null)} />
+            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-slate-800">全局统计</div>
+                  <div className="shrink-0 text-[11px] text-slate-500">
+                    {bytesText(globalStats?.db_file_size_bytes ?? null)}
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <StatKpi label="热力事件总数" value={globalStats?.heatmap_events_count ?? "-"} />
+                  <StatKpi label="人流事件总数" value={globalStats?.footfall_cross_events_count ?? "-"} />
+                  <StatKpi label="排队时长记录" value={globalStats?.queue_wait_visits_count ?? "-"} />
+                </div>
+                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-2 text-xs font-semibold text-slate-800">时间范围（UTC 本地显示）</div>
+                  <div className="space-y-1.5">
+                    <StatRow label="热力最早时间" value={tsText(globalStats?.heatmap_min_ts ?? null)} />
+                    <StatRow label="热力最新时间" value={tsText(globalStats?.heatmap_max_ts ?? null)} />
+                    <div className="my-2 h-px bg-slate-100" />
+                    <StatRow label="人流最早时间" value={tsText(globalStats?.footfall_min_ts ?? null)} />
+                    <StatRow label="人流最新时间" value={tsText(globalStats?.footfall_max_ts ?? null)} />
+                    <div className="my-2 h-px bg-slate-100" />
+                    <StatRow label="排队记录最早（end_ts）" value={tsText(globalStats?.queue_wait_min_ts ?? null)} />
+                    <StatRow label="排队记录最新（end_ts）" value={tsText(globalStats?.queue_wait_max_ts ?? null)} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-slate-800">按平面图统计</div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="text-[11px] text-slate-500">平面图</span>
+                    <select
+                      className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                      value={selectedFloorPlanId}
+                      onChange={(e) => setSelectedFloorPlanId(e.target.value ? Number(e.target.value) : "")}
+                    >
+                      {floorPlans.length === 0 && <option value="">无平面图</option>}
+                      {floorPlans.map((fp) => (
+                        <option key={fp.id} value={fp.id}>
+                          {fp.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                  <StatKpi label="热力事件数量" value={scopedStats?.heatmap_events_count ?? "-"} />
+                  <StatKpi label="人流事件数量" value={scopedStats?.footfall_cross_events_count ?? "-"} />
+                  <StatKpi label="排队时长记录" value={scopedStats?.queue_wait_visits_count ?? "-"} />
+                </div>
+                <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-2 text-xs font-semibold text-slate-800">提示</div>
+                  <div className="text-[11px] leading-relaxed text-slate-600">
+                    下方「数据清理」与「按平面图」使用同一选择。建议先备份再清理。
+                  </div>
+                </div>
               </div>
             </div>
           </div>
+        </section>
 
-          <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div className="text-sm font-semibold text-slate-800">按平面图统计</div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="text-[11px] text-slate-500">平面图</span>
+        <section id="settings-backup" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 text-sm font-semibold text-slate-800">数据库备份下载</div>
+            <p className="mb-3 text-xs text-slate-500">
+              下载当前 SQLite 数据库副本（.db）。建议在批量清理前先备份。
+            </p>
+            <button
+              type="button"
+              className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
+              onClick={() => void downloadBackup()}
+              disabled={downloading}
+            >
+              {downloading ? "下载中..." : "下载数据库备份"}
+            </button>
+          </div>
+        </section>
+
+        <section id="settings-display" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-1 text-sm font-semibold text-slate-800">人流量分析 · 画面与标注</div>
+            <p className="mb-4 text-xs text-slate-500">
+              仅影响摄像头 YOLO 叠加显示（判定线、检测框、脚部点、映射网格颜色），不参与业务统计计算。
+            </p>
+
+            <div className="space-y-5">
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">显示开关</div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={!drawFootfallLineOverlay}
+                      disabled={savingFootfallOverlay}
+                      onChange={(e) => void toggleFootfallOverlay(!e.target.checked)}
+                    />
+                    <span>隐藏进出判定线（默认勾选）</span>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={!yoloFootPointEnabled}
+                      disabled={savingFootfallOverlay}
+                      onChange={(e) => {
+                        const hideChecked = e.target.checked;
+                        const enabled = !hideChecked;
+                        setYoloFootPointEnabled(enabled);
+                        void saveOverlayConfig({ yolo_foot_point_enabled: enabled });
+                      }}
+                    />
+                    <span>隐藏脚部点（默认勾选）</span>
+                  </label>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">YOLO 检测框</div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                    <span className="text-xs font-medium text-slate-600 sm:w-[5.5rem] sm:shrink-0">框样式</span>
+                    <select
+                      className="w-full max-w-xs rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+                      value={yoloBoxStyle}
+                      disabled={savingFootfallOverlay}
+                      onChange={(e) => {
+                        const v = e.target.value === "corners_rounded" ? "corners_rounded" : "rect";
+                        setYoloBoxStyle(v);
+                        void saveOverlayConfig({ yolo_box_style: v });
+                      }}
+                    >
+                      <option value="rect">矩形框</option>
+                      <option value="corners_rounded">仅四角线段（圆角，默认）</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                    <span className="text-xs font-medium text-slate-600 sm:w-[5.5rem] sm:shrink-0">框颜色</span>
+                    <select
+                      className="w-full max-w-xs rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+                      value={yoloBoxColor}
+                      disabled={savingFootfallOverlay}
+                      onChange={(e) => {
+                        const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
+                        setYoloBoxColor(v);
+                        void saveOverlayConfig({ yolo_box_color: v });
+                      }}
+                    >
+                      <option value="green">绿色</option>
+                      <option value="blue">蓝色</option>
+                      <option value="white">白色（默认）</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">脚部点</div>
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                    <span className="text-xs font-medium text-slate-600 sm:w-[5.5rem] sm:shrink-0">点样式</span>
+                    <select
+                      className="w-full max-w-xs rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+                      value={yoloFootPointStyle}
+                      disabled={savingFootfallOverlay || !yoloFootPointEnabled}
+                      onChange={(e) => {
+                        const v = e.target.value === "square" ? "square" : "circle";
+                        setYoloFootPointStyle(v);
+                        void saveOverlayConfig({ yolo_foot_point_style: v });
+                      }}
+                    >
+                      <option value="circle">圆形点</option>
+                      <option value="square">正方形点</option>
+                    </select>
+                  </div>
+                  <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+                    <span className="text-xs font-medium text-slate-600 sm:w-[5.5rem] sm:shrink-0">点颜色</span>
+                    <select
+                      className="w-full max-w-xs rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+                      value={yoloFootPointColor}
+                      disabled={savingFootfallOverlay || !yoloFootPointEnabled}
+                      onChange={(e) => {
+                        const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
+                        setYoloFootPointColor(v);
+                        void saveOverlayConfig({ yolo_foot_point_color: v });
+                      }}
+                    >
+                      <option value="green">绿色（默认）</option>
+                      <option value="blue">蓝色</option>
+                      <option value="white">白色</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">映射画面</div>
+                <div className="flex flex-col gap-1.5 sm:max-w-md sm:flex-row sm:items-center sm:gap-3">
+                  <span className="text-xs font-medium text-slate-600 sm:w-[5.5rem] sm:shrink-0">网格线颜色</span>
+                  <select
+                    className="w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs sm:flex-1"
+                    value={mappedCamGridColor}
+                    disabled={savingFootfallOverlay}
+                    onChange={(e) => {
+                      const v = e.target.value === "green" ? "green" : e.target.value === "blue" ? "blue" : "white";
+                      setMappedCamGridColor(v);
+                      void saveOverlayConfig({ mapped_cam_grid_color: v });
+                    }}
+                  >
+                    <option value="white">白色（默认）</option>
+                    <option value="green">绿色</option>
+                    <option value="blue">蓝色</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-face" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍保留策略</div>
+            <p className="mb-3 text-xs text-slate-500">
+              设置抓拍图片在磁盘和数据库中的保留天数。0 表示不自动清理，建议生产环境设置为 30~180 天。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                max={3650}
+                step={1}
+                className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                value={faceRetentionDays}
+                onChange={(e) => setFaceRetentionDays(Number(e.target.value || 0))}
+                disabled={savingFaceRetention}
+              />
+              <span className="text-xs text-slate-600">天</span>
+              <button
+                type="button"
+                className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
+                onClick={() => void saveFaceRetention()}
+                disabled={savingFaceRetention}
+              >
+                {savingFaceRetention ? "保存中..." : "保存策略"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-queue-wait" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 text-sm font-semibold text-slate-800">排队时长分析 · 运行参数</div>
+            <p className="mb-3 text-xs text-slate-500">
+              <span className="font-mono text-[11px] text-slate-600">
+                QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_SEC
+              </span>
+              ：一次服务落库后的 N 秒内，若脚底再次进入排队区，视为离场路径<strong className="font-medium">不开启新排队</strong>
+              ，避免「从服务区经排队区出门」被误计为弃单。设为 <strong className="font-medium">0</strong> 关闭。上限
+              3600 秒；环境变量仅在无数据库记录时作为初始默认值。
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span className="shrink-0">服务后忽略排队区（秒）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={3600}
+                  step={1}
+                  className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                  value={postServiceQueueIgnoreSec}
+                  onChange={(e) => setPostServiceQueueIgnoreSec(Number(e.target.value || 0))}
+                  disabled={savingQueueWaitAnalysis}
+                />
+              </label>
+              <button
+                type="button"
+                className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
+                onClick={() => void saveQueueWaitAnalysisConfig()}
+                disabled={savingQueueWaitAnalysis}
+              >
+                {savingQueueWaitAnalysis ? "保存中..." : "保存"}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-purge" className="scroll-mt-24">
+          <div className="rounded-xl border-2 border-rose-200 bg-gradient-to-b from-rose-50/90 to-white p-4 shadow-sm">
+            <div className="mb-1 text-sm font-semibold text-rose-900">数据清理（不可撤销）</div>
+            <p className="mb-3 text-xs text-rose-800/90">
+              以下操作共用「清理范围」与「按平面图」与上方<strong className="font-medium">数据库状态</strong>中的选择一致：
+              <span className="font-medium"> {selectedFloorPlanName || "（未选平面图）"}</span>。
+            </p>
+            <div className="mb-4 rounded-lg border border-rose-200 bg-white p-3">
+              <div className="text-[11px] font-medium text-rose-900">共用选项</div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-700">
+                <span className="text-slate-600">清理范围</span>
                 <select
-                  className="rounded border border-slate-300 bg-white px-2 py-1 text-xs"
-                  value={selectedFloorPlanId}
-                  onChange={(e) => setSelectedFloorPlanId(e.target.value ? Number(e.target.value) : "")}
+                  className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                  value={purgeMode}
+                  onChange={(e) => setPurgeMode((e.target.value as "all" | "range") || "all")}
                 >
-                  {floorPlans.length === 0 && <option value="">无平面图</option>}
-                  {floorPlans.map((fp) => (
-                    <option key={fp.id} value={fp.id}>
-                      {fp.name}
-                    </option>
-                  ))}
+                  <option value="all">全部数据</option>
+                  <option value="range">按日期范围</option>
                 </select>
+                {purgeMode === "range" ? (
+                  <>
+                    <input
+                      type="date"
+                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                      value={purgeStartDate}
+                      onChange={(e) => setPurgeStartDate(e.target.value)}
+                    />
+                    <span className="text-slate-500">至</span>
+                    <input
+                      type="date"
+                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px]"
+                      value={purgeEndDate}
+                      onChange={(e) => setPurgeEndDate(e.target.value)}
+                    />
+                  </>
+                ) : null}
               </div>
             </div>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <StatKpi label="热力事件数量" value={scopedStats?.heatmap_events_count ?? "-"} />
-              <StatKpi label="人流事件数量" value={scopedStats?.footfall_cross_events_count ?? "-"} />
-            </div>
-            <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-              <div className="mb-2 text-xs font-semibold text-slate-800">提示</div>
-              <div className="text-[11px] leading-relaxed text-slate-600">
-                清理操作将按所选平面图全量删除历史事件。建议先在下方下载数据库备份，再执行清理。
+
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+              <div className="rounded-xl border border-amber-200 bg-amber-50/80 p-4 shadow-sm">
+                <div className="mb-2 text-sm font-semibold text-amber-900">热力图</div>
+                <p className="mb-3 text-xs text-amber-900/90">
+                  清理表 <code className="rounded bg-white/80 px-1 text-[10px]">heatmap_events</code>。
+                </p>
+                <button
+                  type="button"
+                  className="rounded bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-60"
+                  onClick={() => void purgeHeatmap()}
+                  disabled={selectedFloorPlanId === "" || purgingHeatmap}
+                >
+                  {purgingHeatmap ? "清理中..." : "清理热力图历史"}
+                </button>
+              </div>
+
+              <div className="rounded-xl border border-rose-200 bg-rose-50/80 p-4 shadow-sm">
+                <div className="mb-2 text-sm font-semibold text-rose-900">人流量</div>
+                <p className="mb-3 text-xs text-rose-900/90">
+                  清理 <code className="rounded bg-white/80 px-1 text-[10px]">footfall_cross_events</code> 与抓拍表。
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="rounded bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-60"
+                    onClick={() => void purgeFootfall()}
+                    disabled={selectedFloorPlanId === "" || purgingFootfall}
+                  >
+                    {purgingFootfall ? "清理中..." : "清理人流量历史"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
+                    onClick={() => void reanalyzeFootfallFaceCaptures()}
+                    disabled={selectedFloorPlanId === "" || reanalyzingFootfall}
+                  >
+                    {reanalyzingFootfall ? "重识别中..." : "重识别抓拍"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-violet-200 bg-violet-50/80 p-4 shadow-sm">
+                <div className="mb-2 text-sm font-semibold text-violet-900">排队时长</div>
+                <p className="mb-3 text-xs text-violet-900/90">
+                  清理 <code className="rounded bg-white/80 px-1 text-[10px]">queue_wait_visits</code>，不删 ROI。
+                </p>
+                <button
+                  type="button"
+                  className="rounded bg-violet-700 px-3 py-1 text-xs font-medium text-white hover:bg-violet-800 disabled:opacity-60"
+                  onClick={() => void purgeQueueWait()}
+                  disabled={selectedFloorPlanId === "" || purgingQueueWait}
+                >
+                  {purgingQueueWait ? "清理中..." : "清理排队时长历史"}
+                </button>
               </div>
             </div>
           </div>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-2 text-sm font-semibold text-slate-800">数据库备份下载</div>
-        <p className="mb-3 text-xs text-slate-500">下载当前 SQLite 数据库副本（.db）。建议在批量清理前先备份。</p>
-        <button
-          className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
-          onClick={() => void downloadBackup()}
-          disabled={downloading}
-        >
-          {downloading ? "下载中..." : "下载数据库备份"}
-        </button>
-      </div>
-
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-2 text-sm font-semibold text-slate-800">人流量分析显示设置</div>
-        <p className="mb-3 text-xs text-slate-500">
-          控制人流量分析中摄像头 YOLO 画面是否绘制进出判定线（仅影响可视化，不影响统计结果）。
-        </p>
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              checked={!drawFootfallLineOverlay}
-              disabled={savingFootfallOverlay}
-              onChange={(e) => void toggleFootfallOverlay(!e.target.checked)}
-            />
-            <span>隐藏判定线（默认勾选）</span>
-          </label>
-
-          <label className="inline-flex items-center gap-2 text-sm text-slate-700">
-            <input
-              type="checkbox"
-              checked={!yoloFootPointEnabled}
-              disabled={savingFootfallOverlay}
-              onChange={(e) => {
-                const hideChecked = e.target.checked;
-                const enabled = !hideChecked;
-                setYoloFootPointEnabled(enabled);
-                void saveOverlayConfig({ yolo_foot_point_enabled: enabled });
-              }}
-            />
-            <span>隐藏脚部点（默认勾选）</span>
-          </label>
-
-          <div className="flex items-center gap-2 text-xs text-slate-700">
-            <span className="shrink-0">YOLO 框样式</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1"
-              value={yoloBoxStyle}
-              disabled={savingFootfallOverlay}
-              onChange={(e) => {
-                const v = e.target.value === "corners_rounded" ? "corners_rounded" : "rect";
-                setYoloBoxStyle(v);
-                void saveOverlayConfig({ yolo_box_style: v });
-              }}
-            >
-              <option value="rect">矩形框</option>
-              <option value="corners_rounded">仅四角线段（圆角，默认）</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs text-slate-700">
-            <span className="shrink-0">YOLO 框颜色</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1"
-              value={yoloBoxColor}
-              disabled={savingFootfallOverlay}
-              onChange={(e) => {
-                const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
-                setYoloBoxColor(v);
-                void saveOverlayConfig({ yolo_box_color: v });
-              }}
-            >
-              <option value="green">绿色</option>
-              <option value="blue">蓝色</option>
-              <option value="white">白色（默认）</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs text-slate-700">
-            <span className="shrink-0">脚部点样式</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1"
-              value={yoloFootPointStyle}
-              disabled={savingFootfallOverlay || !yoloFootPointEnabled}
-              onChange={(e) => {
-                const v = e.target.value === "square" ? "square" : "circle";
-                setYoloFootPointStyle(v);
-                void saveOverlayConfig({ yolo_foot_point_style: v });
-              }}
-            >
-              <option value="circle">圆形点</option>
-              <option value="square">正方形点</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs text-slate-700">
-            <span className="shrink-0">脚部点颜色</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1"
-              value={yoloFootPointColor}
-              disabled={savingFootfallOverlay || !yoloFootPointEnabled}
-              onChange={(e) => {
-                const v = e.target.value === "blue" ? "blue" : e.target.value === "white" ? "white" : "green";
-                setYoloFootPointColor(v);
-                void saveOverlayConfig({ yolo_foot_point_color: v });
-              }}
-            >
-              <option value="green">绿色（默认）</option>
-              <option value="blue">蓝色</option>
-              <option value="white">白色</option>
-            </select>
-          </div>
-
-          <div className="flex items-center gap-2 text-xs text-slate-700">
-            <span className="shrink-0">映射网格颜色</span>
-            <select
-              className="rounded border border-slate-300 bg-white px-2 py-1"
-              value={mappedCamGridColor}
-              disabled={savingFootfallOverlay}
-              onChange={(e) => {
-                const v = e.target.value === "green" ? "green" : e.target.value === "blue" ? "blue" : "white";
-                setMappedCamGridColor(v);
-                void saveOverlayConfig({ mapped_cam_grid_color: v });
-              }}
-            >
-              <option value="white">白色（默认）</option>
-              <option value="green">绿色</option>
-              <option value="blue">蓝色</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="mb-2 text-sm font-semibold text-slate-800">人脸抓拍保留策略</div>
-        <p className="mb-3 text-xs text-slate-500">
-          设置抓拍图片在磁盘和数据库中的保留天数。0 表示不自动清理，建议生产环境设置为 30~180 天。
-        </p>
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            type="number"
-            min={0}
-            max={3650}
-            step={1}
-            className="w-28 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
-            value={faceRetentionDays}
-            onChange={(e) => setFaceRetentionDays(Number(e.target.value || 0))}
-            disabled={savingFaceRetention}
-          />
-          <span className="text-xs text-slate-600">天</span>
-          <button
-            className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
-            onClick={() => void saveFaceRetention()}
-            disabled={savingFaceRetention}
-          >
-            {savingFaceRetention ? "保存中..." : "保存策略"}
-          </button>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4 shadow-sm">
-          <div className="mb-2 text-sm font-semibold text-amber-900">清理热力图历史数据</div>
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-amber-900">
-            <span>清理范围</span>
-            <select
-              className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
-              value={purgeMode}
-              onChange={(e) => setPurgeMode((e.target.value as "all" | "range") || "all")}
-            >
-              <option value="all">全部数据</option>
-              <option value="range">按日期范围</option>
-            </select>
-            {purgeMode === "range" ? (
-              <>
-                <input
-                  type="date"
-                  className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
-                  value={purgeStartDate}
-                  onChange={(e) => setPurgeStartDate(e.target.value)}
-                />
-                <span>至</span>
-                <input
-                  type="date"
-                  className="rounded border border-amber-300 bg-white px-2 py-1 text-[11px]"
-                  value={purgeEndDate}
-                  onChange={(e) => setPurgeEndDate(e.target.value)}
-                />
-              </>
-            ) : null}
-          </div>
-          <p className="mb-3 text-xs text-amber-800">
-            按平面图全量清理 `heatmap_events`。目标平面图：{selectedFloorPlanName || "-"}。
-          </p>
-          <button
-            className="rounded bg-amber-600 px-3 py-1 text-xs font-medium text-white hover:bg-amber-700 disabled:opacity-60"
-            onClick={() => void purgeHeatmap()}
-            disabled={selectedFloorPlanId === "" || purgingHeatmap}
-          >
-            {purgingHeatmap ? "清理中..." : "清理热力图历史"}
-          </button>
-        </div>
-
-        <div className="rounded-xl border border-rose-300 bg-rose-50 p-4 shadow-sm">
-          <div className="mb-2 text-sm font-semibold text-rose-900">清理人流量历史数据</div>
-          <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-rose-900">
-            <span>清理范围</span>
-            <select
-              className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
-              value={purgeMode}
-              onChange={(e) => setPurgeMode((e.target.value as "all" | "range") || "all")}
-            >
-              <option value="all">全部数据</option>
-              <option value="range">按日期范围</option>
-            </select>
-            {purgeMode === "range" ? (
-              <>
-                <input
-                  type="date"
-                  className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
-                  value={purgeStartDate}
-                  onChange={(e) => setPurgeStartDate(e.target.value)}
-                />
-                <span>至</span>
-                <input
-                  type="date"
-                  className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px]"
-                  value={purgeEndDate}
-                  onChange={(e) => setPurgeEndDate(e.target.value)}
-                />
-              </>
-            ) : null}
-          </div>
-          <p className="mb-3 text-xs text-rose-800">
-            清理 `footfall_cross_events` 与 `footfall_face_captures`（base64 抓拍头像）。目标平面图：
-            {selectedFloorPlanName || "-"}。
-          </p>
-          <button
-            className="rounded bg-rose-600 px-3 py-1 text-xs font-medium text-white hover:bg-rose-700 disabled:opacity-60"
-            onClick={() => void purgeFootfall()}
-            disabled={selectedFloorPlanId === "" || purgingFootfall}
-          >
-            {purgingFootfall ? "清理中..." : "清理人流量历史"}
-          </button>
-          <button
-            className="ml-2 rounded bg-indigo-600 px-3 py-1 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-60"
-            onClick={() => void reanalyzeFootfallFaceCaptures()}
-            disabled={selectedFloorPlanId === "" || reanalyzingFootfall}
-          >
-            {reanalyzingFootfall ? "重识别中..." : "重识别历史抓拍"}
-          </button>
-        </div>
+        </section>
       </div>
     </div>
   );

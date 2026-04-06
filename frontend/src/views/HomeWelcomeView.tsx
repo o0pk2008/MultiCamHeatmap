@@ -97,6 +97,28 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
       ),
     },
     {
+      tab: "queueWait" as const,
+      title: "排队时长",
+      desc: "排队/服务 ROI、等候时长统计与客流趋势",
+      bgClass:
+        "bg-gradient-to-br from-[#f5f3ff] via-[#ede9fe] to-[#e4dff9] border-[#ddd6fe]/90 hover:border-[#c4b5fd]",
+      glowClass: "from-[#ddd6fe]/70 via-[#ddd6fe]/20 to-transparent",
+      iconClass: "text-[#694FF9]",
+      ctaClass: "text-[#694FF9]",
+      icon: (
+        <svg viewBox="0 0 24 24" className="h-8 w-8" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.8" />
+          <path
+            d="M12 7v6l4 2"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ),
+    },
+    {
       tab: "mapping" as const,
       title: "虚拟视窗配置",
       desc: "映射管理：平面图与虚拟视窗绑定配置",
@@ -129,7 +151,7 @@ const HomeWelcomeView: React.FC<Props> = ({ onOpenTab }) => {
 
       <section>
         <h2 className="mb-4 text-sm font-semibold text-slate-800">快速入口</h2>
-        <div className="grid gap-4 md:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {entries.map((it) => (
             <button
               key={it.tab}

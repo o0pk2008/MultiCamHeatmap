@@ -14,6 +14,7 @@ import HeatmapViewPage from "./views/HeatmapView";
 import MappedCamerasGrid from "./views/heatmap/MappedCamerasGrid";
 import FloorPlanCanvas from "./components/canvas/FloorPlanCanvas";
 import FootfallAnalysisView from "./views/FootfallAnalysisView";
+import QueueWaitAnalysisView from "./views/QueueWaitAnalysisView";
 import HomeWelcomeView from "./views/HomeWelcomeView";
 import SystemSettingsView from "./views/SystemSettingsView";
 
@@ -115,6 +116,19 @@ const App: React.FC = () => {
             <path d="M5 6v12M19 6v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             <path d="M8 9h8M8 15h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             <path d="M11 7l-3 2 3 2M13 17l3-2-3-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        );
+      case "queueWait":
+        return (
+          <svg viewBox="0 0 24 24" className={cls} fill="none" aria-hidden="true">
+            <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.8" />
+            <path
+              d="M12 7v6l4 2"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
         );
       case "mapping":
@@ -220,6 +234,14 @@ const App: React.FC = () => {
               onChange={setActiveTab}
             />
             <SidebarTabButton
+              label="排队时长分析"
+              icon={renderTabIcon("queueWait")}
+              tab="queueWait"
+              activeTab={activeTab}
+              collapsed={sidebarCollapsed}
+              onChange={setActiveTab}
+            />
+            <SidebarTabButton
               label="映射管理"
               icon={renderTabIcon("mapping")}
               tab="mapping"
@@ -280,6 +302,7 @@ const App: React.FC = () => {
               MappedCamerasGridComponent={MappedCamerasGrid}
             />
           )}
+          {activeTab === "queueWait" && <QueueWaitAnalysisView />}
           {activeTab === "mapping" && <MappingView />}
           {activeTab === "settings" && <SystemSettingsView />}
         </main>

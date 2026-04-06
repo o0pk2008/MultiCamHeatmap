@@ -307,6 +307,49 @@ class FootfallFaceCapture(Base):
     image_base64 = Column(Text, nullable=False)
 
 
+class QueueWaitRoiConfig(Base):
+    """
+    排队 / 服务区 ROI（虚拟视窗 UV 归一化四边形，JSON 存 4 个顶点）。
+    与人流量判定线类似，按 (floor_plan_id, virtual_view_id) 唯一。
+    """
+
+    __tablename__ = "queue_wait_roi_configs"
+    __table_args__ = (
+        UniqueConstraint("floor_plan_id", "virtual_view_id", name="uq_queue_wait_roi_fp_vv"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True
+    )
+    queue_quad_json = Column(Text, nullable=False, default="[]")
+    service_quad_json = Column(Text, nullable=False, default="[]")
+
+
+class QueueWaitVisit(Base):
+    """
+    单次排队/服务停留闭环记录（结束时刻落库）。
+    queue_seconds：在排队 ROI 内累计时长；service_seconds：在服务区 ROI 内时长（未进入则为空）。
+    弃单：曾排队（queue_seconds>0）且未产生服务时长（service_seconds 为空）的闭环，表示离开排队区而未进入服务区。
+    """
+
+    __tablename__ = "queue_wait_visits"
+
+    id = Column(Integer, primary_key=True, index=True)
+    roi_config_id = Column(
+        Integer, ForeignKey("queue_wait_roi_configs.id"), nullable=False, index=True
+    )
+    floor_plan_id = Column(Integer, ForeignKey("floor_plans.id"), nullable=False, index=True)
+    virtual_view_id = Column(
+        Integer, ForeignKey("camera_virtual_views.id"), nullable=False, index=True
+    )
+    track_id = Column(Integer, nullable=True, index=True)
+    queue_seconds = Column(Float, nullable=False)
+    service_seconds = Column(Float, nullable=True)
+    end_ts = Column(Float, nullable=False, index=True)
+
+
 class AppSetting(Base):
     """
     通用系统设置（key/value），用于持久化系统配置项。

@@ -1,4 +1,12 @@
-export type TabKey = "home" | "realtime" | "heatmap" | "people" | "footfall" | "mapping" | "settings";
+export type TabKey =
+  | "home"
+  | "realtime"
+  | "heatmap"
+  | "people"
+  | "footfall"
+  | "queueWait"
+  | "mapping"
+  | "settings";
 
 export type ShareKind = "heatmap" | "people" | "footfall";
 export type ShareRoute =
