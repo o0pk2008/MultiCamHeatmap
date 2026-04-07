@@ -397,6 +397,28 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     filterDateKey?: string;
   } | null>(null);
 
+  /** WS/防抖回调若闭包过旧，会还用「上一条选中的虚拟视窗」过滤或拉错 stats，导致停用 A 时 B 的过线仍改动 A 的面板 */
+  const bindCameraIdRef = useRef(bindCameraId);
+  const bindCameraOptionsRef = useRef(bindCameraOptions);
+  const selectedFloorPlanIdRef = useRef(selectedFloorPlanId);
+  const statsModeRef = useRef(statsMode);
+  const statsDateRef = useRef(statsDate);
+  useEffect(() => {
+    bindCameraIdRef.current = bindCameraId;
+  }, [bindCameraId]);
+  useEffect(() => {
+    bindCameraOptionsRef.current = bindCameraOptions;
+  }, [bindCameraOptions]);
+  useEffect(() => {
+    selectedFloorPlanIdRef.current = selectedFloorPlanId;
+  }, [selectedFloorPlanId]);
+  useEffect(() => {
+    statsModeRef.current = statsMode;
+  }, [statsMode]);
+  useEffect(() => {
+    statsDateRef.current = statsDate;
+  }, [statsDate]);
+
   const resetStats = useCallback(() => {
     if (statsRefreshTimerRef.current != null) {
       window.clearTimeout(statsRefreshTimerRef.current);
@@ -427,13 +449,18 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     }
   }, [bindCameraId, bindCameraOptions, selectedFloorPlanId, statsDate, statsMode]);
 
+  const fetchStatsFromBackendRef = useRef(fetchStatsFromBackend);
+  useEffect(() => {
+    fetchStatsFromBackendRef.current = fetchStatsFromBackend;
+  }, [fetchStatsFromBackend]);
+
   const scheduleRefreshStats = useCallback(() => {
     if (statsRefreshTimerRef.current != null) return;
     statsRefreshTimerRef.current = window.setTimeout(() => {
       statsRefreshTimerRef.current = null;
-      void fetchStatsFromBackend();
+      void fetchStatsFromBackendRef.current();
     }, 120);
-  }, [fetchStatsFromBackend]);
+  }, []);
 
   const fetchLineOverviewStats = useCallback(async () => {
     if (selectedFloorPlanId == null) {
@@ -470,6 +497,11 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     for (const [k, v] of pairs) next[k] = v;
     setLineOverviewStats(next);
   }, [allLineCfg, selectedFloorPlanId, statsDate, statsMode]);
+
+  const fetchLineOverviewStatsRef = useRef(fetchLineOverviewStats);
+  useEffect(() => {
+    fetchLineOverviewStatsRef.current = fetchLineOverviewStats;
+  }, [fetchLineOverviewStats]);
 
   const fetchFaceCaptures = useCallback(async (reset: boolean = true) => {
     const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
@@ -562,22 +594,25 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const handleHeatmapWsEvent = useCallback(
     (raw: any) => {
-      if (selectedFloorPlanId == null) return;
-      const selectedOpt = bindCameraOptions.find((o) => o.key === bindCameraId) || null;
+      if (selectedFloorPlanIdRef.current == null) return;
+      const selectedOpt =
+        bindCameraOptionsRef.current.find((o) => o.key === bindCameraIdRef.current) || null;
       const currentVirtualViewId = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
       if (currentVirtualViewId == null) return;
 
       const evt = raw ?? {};
-      if (evt.floor_plan_id !== selectedFloorPlanId) return;
+      if (evt.floor_plan_id !== selectedFloorPlanIdRef.current) return;
       const vvId = evt.virtual_view_id ?? null;
-      // 闪烁应跟随“当前正在查看”的摄像头，而不是“启动分析当时选中的摄像头”
+      // 必须与当前「监控画面选择」一致，避免 WS 连接未重建时仍按旧 vv 过滤
       if (vvId == null || Number(vvId) !== Number(currentVirtualViewId)) return;
 
-      if (statsMode === "date" && statsDate) {
+      const modeNow = statsModeRef.current;
+      const dateKeyNow = statsDateRef.current;
+      if (modeNow === "date" && dateKeyNow) {
         const tsSec = Number.isFinite(Number(evt.ts)) ? Number(evt.ts) : NaN;
         if (!Number.isFinite(tsSec)) return;
         const dateKey = toUTCDateInputValue(new Date(tsSec * 1000));
-        if (dateKey !== statsDate) return;
+        if (dateKey !== dateKeyNow) return;
       }
 
       const dirRaw = evt.direction;
@@ -597,20 +632,16 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       // 后端是统计权威源：前端仅触发刷新并做视觉闪烁
       scheduleRefreshStats();
-      void fetchLineOverviewStats();
+      void fetchLineOverviewStatsRef.current();
       flashLine(dirRaw);
     },
-    [
-      bindCameraId,
-      bindCameraOptions,
-      fetchLineOverviewStats,
-      flashLine,
-      scheduleRefreshStats,
-      selectedFloorPlanId,
-      statsDate,
-      statsMode,
-    ],
+    [flashLine, scheduleRefreshStats],
   );
+
+  const handleHeatmapWsEventRef = useRef(handleHeatmapWsEvent);
+  useEffect(() => {
+    handleHeatmapWsEventRef.current = handleHeatmapWsEvent;
+  }, [handleHeatmapWsEvent]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; visible: boolean }>({
     x: 0,
     y: 0,
@@ -820,7 +851,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       if (thisSeq !== wsConnectSeqRef.current || wsRef.current !== ws) return;
       try {
         const data = JSON.parse(ev.data);
-        handleHeatmapWsEvent(data);
+        handleHeatmapWsEventRef.current(data);
       } catch (e) {
         console.error(e);
       }
@@ -862,7 +893,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       } catch {}
     };
     wsRef.current = ws;
-  }, [handleHeatmapWsEvent, requiredVirtualViewId, selectedFloorPlanId]);
+  }, [requiredVirtualViewId, selectedFloorPlanId]);
 
   useEffect(() => {
     connectFootfallWsLiveRef.current = connectFootfallWs;
@@ -2269,7 +2300,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
           <span className="text-slate-600">「状态」与「启用 / 停用」</span>
           对本条判定线同时生效：启用时参与实时过线统计（分析运行中即生效），并在画面与平面图上正常绘制方向；停用时
           <span className="text-slate-600">不再产生过线事件与人脸抓拍</span>
-          ，画面与平面图为弱化线型。仅「启用」的线会在点击「开始检测分析」时启动会话。
+          ，并结束该虚拟视窗的人流量分析会话、释放 YOLO 推理引用以节省算力；画面与平面图为弱化线型。仅「启用」的线会在点击「开始检测分析」时启动会话。
         </p>
         <div className="flex-1 min-h-0 overflow-auto rounded-lg border border-slate-200 bg-white">
           {lineCfgRows.length === 0 ? (

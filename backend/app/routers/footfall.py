@@ -126,20 +126,27 @@ async def footfall_start(req: FootfallStartRequest):
         db.commit()
         db.refresh(cfg)
 
+    fp_id = int(req.floor_plan_id)
+    vv_id = int(req.virtual_view_id)
+    if not bool(cfg.enabled):
+        if analyzer.is_running(fp_id, vv_id):
+            analyzer.stop(fp_id, vv_id)
+        return {"status": "skipped_disabled", "floor_plan_id": fp_id, "virtual_view_id": vv_id}
+
     line = FootfallLine(
         p1=(float(req.p1.x), float(req.p1.y)),
         p2=(float(req.p2.x), float(req.p2.y)),
         zone_w=float(req.zone_w),
         line_config_id=int(cfg.id),
-        enabled=bool(cfg.enabled),
+        enabled=True,
     )
     analyzer.start(
-        floor_plan_id=int(req.floor_plan_id),
-        virtual_view_id=int(req.virtual_view_id),
+        floor_plan_id=fp_id,
+        virtual_view_id=vv_id,
         line=line,
         emit_interval_sec=float(req.emit_interval_sec),
     )
-    return {"status": "started", "floor_plan_id": req.floor_plan_id, "virtual_view_id": req.virtual_view_id}
+    return {"status": "started", "floor_plan_id": fp_id, "virtual_view_id": vv_id}
 
 
 @router.post("/lines/upsert", response_model=FootfallLineConfigOut)
@@ -185,15 +192,20 @@ async def footfall_lines_upsert(req: FootfallLineUpsertRequest):
         db.commit()
         db.refresh(cfg)
 
-        if analyzer.is_running(int(cfg.floor_plan_id), int(cfg.virtual_view_id)):
-            analyzer.merge_line_state(
-                floor_plan_id=int(cfg.floor_plan_id),
-                virtual_view_id=int(cfg.virtual_view_id),
-                p1=(float(cfg.p1_u), float(cfg.p1_v)),
-                p2=(float(cfg.p2_u), float(cfg.p2_v)),
-                line_config_id=int(cfg.id),
-                enabled=bool(cfg.enabled),
-            )
+        fp_id = int(cfg.floor_plan_id)
+        vv_id = int(cfg.virtual_view_id)
+        if analyzer.is_running(fp_id, vv_id):
+            if not bool(cfg.enabled):
+                analyzer.stop(fp_id, vv_id)
+            else:
+                analyzer.merge_line_state(
+                    floor_plan_id=fp_id,
+                    virtual_view_id=vv_id,
+                    p1=(float(cfg.p1_u), float(cfg.p1_v)),
+                    p2=(float(cfg.p2_u), float(cfg.p2_v)),
+                    line_config_id=int(cfg.id),
+                    enabled=True,
+                )
 
         return FootfallLineConfigOut(
             id=int(cfg.id),
@@ -230,8 +242,12 @@ async def footfall_lines_delete(floor_plan_id: int, virtual_view_id: int):
         )
         if cfg is None:
             return {"status": "not_found"}
+        fp_id = int(cfg.floor_plan_id)
+        vv_id = int(cfg.virtual_view_id)
         db.delete(cfg)
         db.commit()
+    if analyzer.is_running(fp_id, vv_id):
+        analyzer.stop(fp_id, vv_id)
     return {"status": "deleted"}
 
 
