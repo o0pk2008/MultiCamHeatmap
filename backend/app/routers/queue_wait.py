@@ -272,6 +272,87 @@ async def queue_wait_stats(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/dashboard")
+async def queue_wait_dashboard(
+    response: Response,
+    floor_plan_id: int,
+    virtual_view_id: int,
+    mode: str = "realtime",
+    date_key: Optional[str] = None,
+    tz_offset_minutes: Optional[int] = None,
+    trend_bucket_queue: Optional[str] = None,
+    trend_bucket_service: Optional[str] = None,
+    trend_bucket_footfall: Optional[str] = None,
+    trend_bucket_abandon: Optional[str] = None,
+):
+    """
+    面向外部接入的聚合看板接口：
+    - meta: 请求上下文和口径
+    - kpi: 统计标签区数据
+    - charts: 4 张图表数据
+    """
+    try:
+        payload = get_queue_wait_stats_sync(
+            floor_plan_id=int(floor_plan_id),
+            virtual_view_id=int(virtual_view_id),
+            mode=str(mode),
+            date_key=date_key,
+            tz_offset_minutes=(int(tz_offset_minutes) if tz_offset_minutes is not None else None),
+            trend_bucket_queue=trend_bucket_queue,
+            trend_bucket_service=trend_bucket_service,
+            trend_bucket_footfall=trend_bucket_footfall,
+            trend_bucket_abandon=trend_bucket_abandon,
+        )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return {
+            "schema_version": "1.0",
+            "meta": {
+                "floor_plan_id": int(floor_plan_id),
+                "virtual_view_id": int(virtual_view_id),
+                "mode": str(mode),
+                "date_key": date_key,
+                "tz_offset_minutes": (int(tz_offset_minutes) if tz_offset_minutes is not None else None),
+                "trend_bucket_queue": str(payload.get("trendBucketQueue") or "1h"),
+                "trend_bucket_service": str(payload.get("trendBucketService") or "1h"),
+                "trend_bucket_footfall": str(payload.get("trendBucketFootfall") or "1h"),
+                "trend_bucket_abandon": str(payload.get("trendBucketAbandon") or "1h"),
+            },
+            "kpi": {
+                "visit_count": int(payload.get("visitCount") or 0),
+                "avg_queue_seconds": float(payload.get("avgQueueSeconds") or 0.0),
+                "avg_service_seconds": float(payload.get("avgServiceSeconds") or 0.0),
+                "service_sample_count": int(payload.get("serviceSampleCount") or 0),
+                "abandon_count": int(payload.get("abandonCount") or 0),
+                "queued_then_served_count": int(payload.get("queuedThenServedCount") or 0),
+                "abandon_rate_percent": float(payload.get("abandonRatePercent") or 0.0),
+            },
+            "charts": {
+                "queue_avg": {
+                    "bucket": str(payload.get("trendBucketQueue") or "1h"),
+                    "points": list(payload.get("trendQueueAvg") or []),
+                },
+                "service_avg": {
+                    "bucket": str(payload.get("trendBucketService") or "1h"),
+                    "points": list(payload.get("trendServiceAvg") or []),
+                },
+                "footfall": {
+                    "bucket": str(payload.get("trendBucketFootfall") or "1h"),
+                    "service_count_points": list(payload.get("trendServiceCount") or []),
+                    "avg_queue_length_points": list(payload.get("trendAvgQueueLength") or []),
+                },
+                "abandon": {
+                    "bucket": str(payload.get("trendBucketAbandon") or "1h"),
+                    "rate_points": list(payload.get("trendAbandonRate") or []),
+                    "abandon_count_points": list(payload.get("trendAbandonCount") or []),
+                    "queued_then_served_points": list(payload.get("trendQueuedThenServedByBucket") or []),
+                },
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/visits", response_model=List[QueueVisitOut])
 async def queue_wait_visits(
     response: Response,

@@ -357,6 +357,7 @@ const QueueWaitAnalysisView: React.FC = () => {
   const [draggingVertex, setDraggingVertex] = useState<null | { which: "queue" | "service"; index: number }>(null);
 
   const [drawHint, setDrawHint] = useState("在监控画面上点击 4 次绘制四边形（与热力图映射相同），可拖顶点微调。");
+  const [apiDialogOpen, setApiDialogOpen] = useState(false);
 
   const vvViewportRef = useRef<{ w: number; h: number; aspectW: number; aspectH: number }>({
     w: 0,
@@ -374,8 +375,8 @@ const QueueWaitAnalysisView: React.FC = () => {
     if (vvId == null) return;
     const mode = statsMode === "realtime" ? "realtime" : "date";
     const tz = new Date().getTimezoneOffset();
-    const url =
-      `${API_BASE}/api/queue-wait/stats?floor_plan_id=${selectedFloorPlanId}` +
+    const query =
+      `floor_plan_id=${selectedFloorPlanId}` +
       `&virtual_view_id=${vvId}&mode=${mode}` +
       (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "") +
       `&tz_offset_minutes=${encodeURIComponent(String(tz))}` +
@@ -384,9 +385,62 @@ const QueueWaitAnalysisView: React.FC = () => {
       `&trend_bucket_footfall=${encodeURIComponent(trendGranFootfall)}` +
       `&trend_bucket_abandon=${encodeURIComponent(trendGranAbandon)}`;
     try {
-      const r = await fetch(url);
-      if (!r.ok) return;
-      const raw = (await r.json()) as Partial<QueueWaitStats>;
+      let raw: Partial<QueueWaitStats> | null = null;
+      const dashboardUrl = `${API_BASE}/api/queue-wait/dashboard?${query}`;
+      const dashboardRes = await fetch(dashboardUrl);
+      if (dashboardRes.ok) {
+        const d = (await dashboardRes.json()) as {
+          kpi?: {
+            visit_count?: number;
+            avg_queue_seconds?: number;
+            avg_service_seconds?: number;
+            service_sample_count?: number;
+            abandon_count?: number;
+            queued_then_served_count?: number;
+            abandon_rate_percent?: number;
+          };
+          charts?: {
+            queue_avg?: { points?: TrendPoint[] };
+            service_avg?: { points?: TrendPoint[] };
+            footfall?: { service_count_points?: TrendPoint[]; avg_queue_length_points?: TrendPoint[] };
+            abandon?: {
+              rate_points?: TrendPoint[];
+              abandon_count_points?: TrendPoint[];
+              queued_then_served_points?: TrendPoint[];
+            };
+          };
+        };
+        raw = {
+          visitCount: Number(d.kpi?.visit_count ?? 0),
+          avgQueueSeconds: Number(d.kpi?.avg_queue_seconds ?? 0),
+          avgServiceSeconds: Number(d.kpi?.avg_service_seconds ?? 0),
+          serviceSampleCount: Number(d.kpi?.service_sample_count ?? 0),
+          abandonCount: Number(d.kpi?.abandon_count ?? 0),
+          queuedThenServedCount: Number(d.kpi?.queued_then_served_count ?? 0),
+          abandonRatePercent: Number(d.kpi?.abandon_rate_percent ?? 0),
+          trendQueueAvg: Array.isArray(d.charts?.queue_avg?.points) ? d.charts?.queue_avg?.points : [],
+          trendServiceAvg: Array.isArray(d.charts?.service_avg?.points) ? d.charts?.service_avg?.points : [],
+          trendServiceCount: Array.isArray(d.charts?.footfall?.service_count_points)
+            ? d.charts?.footfall?.service_count_points
+            : [],
+          trendAvgQueueLength: Array.isArray(d.charts?.footfall?.avg_queue_length_points)
+            ? d.charts?.footfall?.avg_queue_length_points
+            : [],
+          trendAbandonRate: Array.isArray(d.charts?.abandon?.rate_points) ? d.charts?.abandon?.rate_points : [],
+          trendAbandonCount: Array.isArray(d.charts?.abandon?.abandon_count_points)
+            ? d.charts?.abandon?.abandon_count_points
+            : [],
+          trendQueuedThenServedByBucket: Array.isArray(d.charts?.abandon?.queued_then_served_points)
+            ? d.charts?.abandon?.queued_then_served_points
+            : [],
+        };
+      } else {
+        const statsUrl = `${API_BASE}/api/queue-wait/stats?${query}`;
+        const legacyRes = await fetch(statsUrl);
+        if (!legacyRes.ok) return;
+        raw = (await legacyRes.json()) as Partial<QueueWaitStats>;
+      }
+      if (!raw) return;
       const base = emptyStats();
       const fallback = 24;
       const abandonLen =
@@ -1280,9 +1334,86 @@ const QueueWaitAnalysisView: React.FC = () => {
     setDrawHint("服务区：在画面上依次点击 4 次。与排队区重叠时，分析以服务区为准。");
   }, [servicePolyImg]);
 
+  const apiExampleUrl = useMemo(() => {
+    if (selectedFloorPlanId == null || vvId == null) return "";
+    const mode = statsMode === "realtime" ? "realtime" : "date";
+    const tz = new Date().getTimezoneOffset();
+    const qp =
+      `floor_plan_id=${selectedFloorPlanId}` +
+      `&virtual_view_id=${vvId}&mode=${mode}` +
+      (mode === "date" ? `&date_key=${encodeURIComponent(statsDate)}` : "") +
+      `&tz_offset_minutes=${encodeURIComponent(String(tz))}` +
+      `&trend_bucket_queue=${encodeURIComponent(trendGranQueue)}` +
+      `&trend_bucket_service=${encodeURIComponent(trendGranService)}` +
+      `&trend_bucket_footfall=${encodeURIComponent(trendGranFootfall)}` +
+      `&trend_bucket_abandon=${encodeURIComponent(trendGranAbandon)}`;
+    return `${API_BASE}/api/queue-wait/dashboard?${qp}`;
+  }, [selectedFloorPlanId, vvId, statsMode, statsDate, trendGranQueue, trendGranService, trendGranFootfall, trendGranAbandon]);
+
+  const apiExampleResponse = useMemo(() => {
+    const sample = {
+      schema_version: "1.0",
+      meta: {
+        floor_plan_id: selectedFloorPlanId ?? 0,
+        virtual_view_id: vvId ?? 0,
+        mode: statsMode === "realtime" ? "realtime" : "date",
+        date_key: statsMode === "date" ? statsDate : null,
+        tz_offset_minutes: new Date().getTimezoneOffset(),
+        trend_bucket_queue: trendGranQueue,
+        trend_bucket_service: trendGranService,
+        trend_bucket_footfall: trendGranFootfall,
+        trend_bucket_abandon: trendGranAbandon,
+      },
+      kpi: {
+        visit_count: Number(statsData.visitCount || 0),
+        avg_queue_seconds: Number(statsData.avgQueueSeconds || 0),
+        avg_service_seconds: Number(statsData.avgServiceSeconds || 0),
+        service_sample_count: Number(statsData.serviceSampleCount || 0),
+        abandon_count: Number(statsData.abandonCount || 0),
+        queued_then_served_count: Number(statsData.queuedThenServedCount || 0),
+        abandon_rate_percent: Number(statsData.abandonRatePercent || 0),
+      },
+      charts: {
+        queue_avg: { bucket: trendGranQueue, points: statsData.trendQueueAvg.slice(0, 4) },
+        service_avg: { bucket: trendGranService, points: statsData.trendServiceAvg.slice(0, 4) },
+        footfall: {
+          bucket: trendGranFootfall,
+          service_count_points: statsData.trendServiceCount.slice(0, 4),
+          avg_queue_length_points: statsData.trendAvgQueueLength.slice(0, 4),
+        },
+        abandon: {
+          bucket: trendGranAbandon,
+          rate_points: statsData.trendAbandonRate.slice(0, 4),
+          abandon_count_points: statsData.trendAbandonCount.slice(0, 4),
+          queued_then_served_points: statsData.trendQueuedThenServedByBucket.slice(0, 4),
+        },
+      },
+    };
+    return JSON.stringify(sample, null, 2);
+  }, [
+    selectedFloorPlanId,
+    vvId,
+    statsMode,
+    statsDate,
+    trendGranQueue,
+    trendGranService,
+    trendGranFootfall,
+    trendGranAbandon,
+    statsData,
+  ]);
+
   return (
     <div className="flex h-[calc(100vh-96px)] min-h-0 flex-col gap-4">
-      <h2 className="shrink-0 text-xl font-semibold text-slate-800">排队时长分析</h2>
+      <div className="flex shrink-0 items-center justify-between gap-2">
+        <h2 className="text-xl font-semibold text-slate-800">排队时长分析</h2>
+        <button
+          type="button"
+          className="rounded border border-indigo-300 bg-indigo-50 px-2 py-1 text-xs font-medium text-indigo-700 hover:bg-indigo-100"
+          onClick={() => setApiDialogOpen(true)}
+        >
+          API
+        </button>
+      </div>
       <p className="shrink-0 text-xs text-slate-500">
         基于检测轨迹估计单次<strong className="font-medium text-slate-600">排队停留</strong>与<strong className="font-medium text-slate-600">服务时长</strong>
         ，区分<strong className="font-medium text-slate-600">排队后成交</strong>与<strong className="font-medium text-slate-600">弃单</strong>（离排队区而未进入服务闭环），并汇总<strong className="font-medium text-slate-600">整体弃单率</strong>
@@ -1584,6 +1715,218 @@ const QueueWaitAnalysisView: React.FC = () => {
           </div>
         </div>
       </div>
+      {apiDialogOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-4">
+          <div className="max-h-[88vh] w-full max-w-3xl overflow-auto rounded-lg border border-slate-200 bg-white p-4 shadow-2xl">
+            <div className="mb-3 flex items-center justify-between">
+              <div className="text-sm font-semibold text-slate-800">排队时长分析 API 接入</div>
+              <button
+                type="button"
+                className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                onClick={() => setApiDialogOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+            <div className="space-y-3 text-xs text-slate-700">
+              <div className="rounded border border-slate-200 bg-slate-50 p-3">
+                <div className="mb-1 font-semibold text-slate-800">接口</div>
+                <div>
+                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-medium text-emerald-700">GET</span>
+                  <span className="ml-2 font-mono">/api/queue-wait/dashboard</span>
+                </div>
+                <div className="mt-2 text-slate-600">聚合返回：统计标签（kpi）+ 四个图表（charts），供第三方直接渲染页面。</div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-1 font-semibold text-slate-800">关键参数</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-[11px]">
+                    <thead>
+                      <tr className="bg-slate-50 text-slate-700">
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">参数名</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">类型</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">是否必填</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">说明</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-slate-700">
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">floor_plan_id</td>
+                        <td className="border border-slate-200 px-2 py-1">int</td>
+                        <td className="border border-slate-200 px-2 py-1">是</td>
+                        <td className="border border-slate-200 px-2 py-1">平面图 ID，用于限定统计空间。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">virtual_view_id</td>
+                        <td className="border border-slate-200 px-2 py-1">int</td>
+                        <td className="border border-slate-200 px-2 py-1">是</td>
+                        <td className="border border-slate-200 px-2 py-1">虚拟视角 ID，用于限定统计来源画面。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">mode</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">`realtime` 或 `date`，默认 `realtime`。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">date_key</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">条件必填</td>
+                        <td className="border border-slate-200 px-2 py-1">当 `mode=date` 时必填，格式 `YYYY-MM-DD`。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">tz_offset_minutes</td>
+                        <td className="border border-slate-200 px-2 py-1">int</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">时区偏移（JS `Date.getTimezoneOffset()`）。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">trend_bucket_queue</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">图1 粒度：`1h` / `30m` / `1m`。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">trend_bucket_service</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">图2 粒度：`1h` / `30m` / `1m`。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">trend_bucket_footfall</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">图3 粒度：`1h` / `30m` / `1m`。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">trend_bucket_abandon</td>
+                        <td className="border border-slate-200 px-2 py-1">string</td>
+                        <td className="border border-slate-200 px-2 py-1">否</td>
+                        <td className="border border-slate-200 px-2 py-1">图4 粒度：`1h` / `30m` / `1m`。</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-1 font-semibold text-slate-800">响应结构概览</div>
+                <div>- `meta`：请求上下文与统计粒度回传</div>
+                <div>- `kpi`：统计卡片指标（均值、完成量、弃单与弃单率）</div>
+                <div>- `charts`：四个图表的数据序列</div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-1 font-semibold text-slate-800">图表字段映射</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-[11px]">
+                    <thead>
+                      <tr className="bg-slate-50 text-slate-700">
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">图表</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">字段路径</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">解释</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-slate-700">
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1">平均排队时长</td>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">charts.queue_avg.points</td>
+                        <td className="border border-slate-200 px-2 py-1">`value` 为时间桶平均排队时长（秒）。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1">平均服务时长</td>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">charts.service_avg.points</td>
+                        <td className="border border-slate-200 px-2 py-1">`value` 为时间桶平均服务时长（秒）。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1">客流趋势（双序列）</td>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">
+                          charts.footfall.service_count_points<br />
+                          charts.footfall.avg_queue_length_points
+                        </td>
+                        <td className="border border-slate-200 px-2 py-1">分别表示服务人数（人次）与平均在队人数（人）。</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1">弃单率统计</td>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">
+                          charts.abandon.rate_points<br />
+                          charts.abandon.abandon_count_points<br />
+                          charts.abandon.queued_then_served_points
+                        </td>
+                        <td className="border border-slate-200 px-2 py-1">主序列为弃单率（%），其余序列用于解释分子/分母变化。</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-1 font-semibold text-slate-800">核心字段说明</div>
+                <div className="overflow-x-auto">
+                  <table className="w-full border-collapse text-[11px]">
+                    <thead>
+                      <tr className="bg-slate-50 text-slate-700">
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">字段路径</th>
+                        <th className="border border-slate-200 px-2 py-1 text-left font-semibold">说明</th>
+                      </tr>
+                    </thead>
+                    <tbody className="text-slate-700">
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.avg_queue_seconds</td>
+                        <td className="border border-slate-200 px-2 py-1">平均排队时长（秒）</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.avg_service_seconds</td>
+                        <td className="border border-slate-200 px-2 py-1">平均服务时长（秒）</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.queued_then_served_count</td>
+                        <td className="border border-slate-200 px-2 py-1">排队后完成服务的笔数</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.service_sample_count</td>
+                        <td className="border border-slate-200 px-2 py-1">含服务时长的样本数</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.abandon_count</td>
+                        <td className="border border-slate-200 px-2 py-1">离开排队区且未进入服务闭环的样本数</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">kpi.abandon_rate_percent</td>
+                        <td className="border border-slate-200 px-2 py-1">弃单率（%）= 弃单 / (弃单 + 排队后成交)</td>
+                      </tr>
+                      <tr>
+                        <td className="border border-slate-200 px-2 py-1 font-mono">charts.*.points</td>
+                        <td className="border border-slate-200 px-2 py-1">
+                          统一结构 <span className="font-mono">[{"{ bucket: 序号, value: 数值 }"}]</span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <details className="rounded border border-slate-200 p-3">
+                <summary className="cursor-pointer select-none font-semibold text-slate-800">示例响应 JSON（可展开）</summary>
+                <pre className="mt-2 overflow-auto rounded bg-slate-50 p-2 text-[11px] leading-relaxed text-slate-700">{apiExampleResponse}</pre>
+              </details>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="mb-1 font-semibold text-slate-800">当前筛选示例 URL</div>
+                <div className="break-all rounded bg-slate-50 p-2 font-mono text-[11px]">{apiExampleUrl || "请先选择平面图与虚拟视角"}</div>
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!apiExampleUrl}
+                    onClick={() => {
+                      if (!apiExampleUrl) return;
+                      void navigator.clipboard.writeText(apiExampleUrl);
+                    }}
+                  >
+                    复制 URL
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 };
