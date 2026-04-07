@@ -65,6 +65,7 @@ const SETTINGS_SECTIONS: { id: string; label: string }[] = [
   { id: "settings-db-stats", label: "数据库状态" },
   { id: "settings-backup", label: "备份下载" },
   { id: "settings-display", label: "画面与标注" },
+  { id: "settings-low-latency", label: "低延迟视频" },
   { id: "settings-face", label: "人脸保留" },
   { id: "settings-queue-wait", label: "排队分析" },
   { id: "settings-purge", label: "数据清理" },
@@ -93,6 +94,16 @@ const SystemSettingsView: React.FC = () => {
   const [yoloFootPointStyle, setYoloFootPointStyle] = useState<"circle" | "square">("circle");
   const [yoloFootPointColor, setYoloFootPointColor] = useState<"green" | "blue" | "white">("green");
   const [mappedCamGridColor, setMappedCamGridColor] = useState<"white" | "green" | "blue">("white");
+  const [lowLatencyStreamFps, setLowLatencyStreamFps] = useState<number>(10);
+  const [lowLatencyAnalyzedStreamFps, setLowLatencyAnalyzedStreamFps] = useState<number>(12);
+  const [lowLatencyIdleStreamFps, setLowLatencyIdleStreamFps] = useState<number>(1);
+  const [lowLatencyPlainJpegQuality, setLowLatencyPlainJpegQuality] = useState<number>(75);
+  const [lowLatencyAnalyzedJpegQuality, setLowLatencyAnalyzedJpegQuality] = useState<number>(70);
+  const [lowLatencyMinimalOverlay, setLowLatencyMinimalOverlay] = useState<boolean>(false);
+  const [savingLowLatencyConfig, setSavingLowLatencyConfig] = useState(false);
+  const [yoloDetectionConfThreshold, setYoloDetectionConfThreshold] = useState<number>(0.25);
+  const [yoloTrackMinConsecutiveFrames, setYoloTrackMinConsecutiveFrames] = useState<number>(1);
+  const [savingYoloTrackingRuntimeConfig, setSavingYoloTrackingRuntimeConfig] = useState(false);
   const [faceRetentionDays, setFaceRetentionDays] = useState<number>(30);
   const [savingFaceRetention, setSavingFaceRetention] = useState(false);
   /** 服务闭环后 N 秒内再踩排队区不计新排队（秒），0 为关闭 */
@@ -146,6 +157,49 @@ const SystemSettingsView: React.FC = () => {
       }
     };
     void loadOverlayConfig();
+  }, []);
+
+  useEffect(() => {
+    const loadLowLatencyConfig = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/low-latency-config`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const sf = Number(data?.stream_fps);
+        const af = Number(data?.analyzed_stream_fps);
+        const idf = Number(data?.idle_stream_fps);
+        const pq = Number(data?.plain_jpeg_quality);
+        const aq = Number(data?.analyzed_jpeg_quality);
+        if (Number.isFinite(sf) && sf > 0) setLowLatencyStreamFps(sf);
+        if (Number.isFinite(af) && af > 0) setLowLatencyAnalyzedStreamFps(af);
+        if (Number.isFinite(idf) && idf > 0) setLowLatencyIdleStreamFps(idf);
+        if (Number.isFinite(pq) && pq > 0) setLowLatencyPlainJpegQuality(Math.round(pq));
+        if (Number.isFinite(aq) && aq > 0) setLowLatencyAnalyzedJpegQuality(Math.round(aq));
+        setLowLatencyMinimalOverlay(Boolean(data?.low_latency_minimal_overlay));
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadLowLatencyConfig();
+  }, []);
+
+  useEffect(() => {
+    const loadYoloTrackingRuntimeConfig = async () => {
+      try {
+        const r = await fetch(`${API_BASE}/api/admin/yolo-tracking-runtime-config`);
+        if (!r.ok) return;
+        const data = await r.json();
+        const conf = Number(data?.detection_conf_threshold);
+        const minFrames = Number(data?.track_min_consecutive_frames);
+        if (Number.isFinite(conf) && conf > 0 && conf < 1) setYoloDetectionConfThreshold(conf);
+        if (Number.isFinite(minFrames) && minFrames >= 1) {
+          setYoloTrackMinConsecutiveFrames(Math.round(minFrames));
+        }
+      } catch (e) {
+        console.error(e);
+      }
+    };
+    void loadYoloTrackingRuntimeConfig();
   }, []);
 
   useEffect(() => {
@@ -489,6 +543,53 @@ const SystemSettingsView: React.FC = () => {
     }
   }, [faceRetentionDays]);
 
+  const saveLowLatencyConfig = useCallback(async () => {
+    const sf = Math.max(0.1, Math.min(60, Number(lowLatencyStreamFps) || 10));
+    const af = Math.max(0.1, Math.min(60, Number(lowLatencyAnalyzedStreamFps) || sf));
+    const idf = Math.max(0.1, Math.min(10, Number(lowLatencyIdleStreamFps) || 1));
+    const pq = Math.max(30, Math.min(95, Math.round(Number(lowLatencyPlainJpegQuality) || 75)));
+    const aq = Math.max(30, Math.min(95, Math.round(Number(lowLatencyAnalyzedJpegQuality) || 70)));
+    setSavingLowLatencyConfig(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/admin/low-latency-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          stream_fps: sf,
+          analyzed_stream_fps: af,
+          idle_stream_fps: idf,
+          plain_jpeg_quality: pq,
+          analyzed_jpeg_quality: aq,
+          low_latency_minimal_overlay: Boolean(lowLatencyMinimalOverlay),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(`保存失败: ${data?.detail || r.status}`);
+        return;
+      }
+      setLowLatencyStreamFps(Number(data?.stream_fps ?? sf));
+      setLowLatencyAnalyzedStreamFps(Number(data?.analyzed_stream_fps ?? af));
+      setLowLatencyIdleStreamFps(Number(data?.idle_stream_fps ?? idf));
+      setLowLatencyPlainJpegQuality(Number(data?.plain_jpeg_quality ?? pq));
+      setLowLatencyAnalyzedJpegQuality(Number(data?.analyzed_jpeg_quality ?? aq));
+      setLowLatencyMinimalOverlay(Boolean(data?.low_latency_minimal_overlay));
+      alert("低延迟视频参数已保存，运行中的分析线程将按新参数输出。");
+    } catch (e) {
+      console.error(e);
+      alert("保存失败，请稍后重试。");
+    } finally {
+      setSavingLowLatencyConfig(false);
+    }
+  }, [
+    lowLatencyAnalyzedJpegQuality,
+    lowLatencyAnalyzedStreamFps,
+    lowLatencyIdleStreamFps,
+    lowLatencyMinimalOverlay,
+    lowLatencyPlainJpegQuality,
+    lowLatencyStreamFps,
+  ]);
+
   const saveQueueWaitAnalysisConfig = useCallback(async () => {
     const sec = Math.max(0, Math.min(3600, Math.round(Number(postServiceQueueIgnoreSec) || 0)));
     const dsec = Math.max(0, Math.min(3600, Number(directServiceCompleteMinSec) || 0));
@@ -520,6 +621,35 @@ const SystemSettingsView: React.FC = () => {
       setSavingQueueWaitAnalysis(false);
     }
   }, [postServiceQueueIgnoreSec, directServiceCompleteMinSec, abandonMinQueueSec]);
+
+  const saveYoloTrackingRuntimeConfig = useCallback(async () => {
+    const conf = Math.max(0.01, Math.min(0.99, Number(yoloDetectionConfThreshold) || 0.25));
+    const minFrames = Math.max(1, Math.min(20, Math.round(Number(yoloTrackMinConsecutiveFrames) || 1)));
+    setSavingYoloTrackingRuntimeConfig(true);
+    try {
+      const r = await fetch(`${API_BASE}/api/admin/yolo-tracking-runtime-config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          detection_conf_threshold: conf,
+          track_min_consecutive_frames: minFrames,
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        alert(`保存失败: ${data?.detail || r.status}`);
+        return;
+      }
+      setYoloDetectionConfThreshold(Number(data?.detection_conf_threshold ?? conf));
+      setYoloTrackMinConsecutiveFrames(Number(data?.track_min_consecutive_frames ?? minFrames));
+      alert("YOLO 检测阈值与轨迹成立门槛已保存并生效。");
+    } catch (e) {
+      console.error(e);
+      alert("保存失败，请稍后重试。");
+    } finally {
+      setSavingYoloTrackingRuntimeConfig(false);
+    }
+  }, [yoloDetectionConfThreshold, yoloTrackMinConsecutiveFrames]);
 
   return (
     <div className="min-w-0 space-y-6">
@@ -776,6 +906,99 @@ const SystemSettingsView: React.FC = () => {
                   </select>
                 </div>
               </div>
+
+              <div>
+                <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-400">检测稳定（误检抑制）</div>
+                <div className="mb-3 rounded border border-slate-100 bg-slate-50/80 p-3 text-xs text-slate-600">
+                  <p>
+                    <span className="font-mono text-[11px]">detection_conf_threshold</span>：提高后可减少椅子/杂物被误检成人。
+                  </p>
+                  <p>
+                    <span className="font-mono text-[11px]">track_min_consecutive_frames</span>：目标至少连续 N 帧才算成立轨迹，抑制“闪一下”误框。
+                  </p>
+                </div>
+                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+                  <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                    <span>检测置信度阈值</span>
+                    <input
+                      type="number"
+                      min={0.01}
+                      max={0.99}
+                      step={0.01}
+                      className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                      value={yoloDetectionConfThreshold}
+                      onChange={(e) => setYoloDetectionConfThreshold(Number(e.target.value || 0.25))}
+                      disabled={savingYoloTrackingRuntimeConfig}
+                    />
+                  </label>
+                  <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                    <span>轨迹成立最小连续帧</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      step={1}
+                      className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+                      value={yoloTrackMinConsecutiveFrames}
+                      onChange={(e) => setYoloTrackMinConsecutiveFrames(Number(e.target.value || 1))}
+                      disabled={savingYoloTrackingRuntimeConfig}
+                    />
+                  </label>
+                  <button
+                    type="button"
+                    className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60"
+                    onClick={() => void saveYoloTrackingRuntimeConfig()}
+                    disabled={savingYoloTrackingRuntimeConfig}
+                  >
+                    {savingYoloTrackingRuntimeConfig ? "保存中..." : "保存检测稳定参数"}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="settings-low-latency" className="scroll-mt-24">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div className="mb-2 text-sm font-semibold text-slate-800">低延迟视频 · 输出参数</div>
+            <p className="mb-3 text-xs text-slate-500">
+              这些参数用于降低 YOLO 分析画面延迟与卡顿。保存后会立即更新运行中的视频线程，并持久化到数据库。
+            </p>
+            <div className="mb-3 space-y-2 rounded border border-slate-100 bg-slate-50/80 p-3 text-xs text-slate-600">
+              <p><span className="font-mono text-[11px]">VV_STREAM_FPS</span>：plain 画面目标刷新率。</p>
+              <p><span className="font-mono text-[11px]">VV_ANALYZED_STREAM_FPS</span>：analyzed 画面目标刷新率。</p>
+              <p><span className="font-mono text-[11px]">VV_IDLE_STREAM_FPS</span>：无人订阅时保活刷新率。</p>
+              <p><span className="font-mono text-[11px]">VV_PLAIN_JPEG_QUALITY / VV_ANALYZED_JPEG_QUALITY</span>：JPEG 编码质量。</p>
+              <p><span className="font-mono text-[11px]">VV_LOW_LATENCY_MINIMAL_OVERLAY</span>：低延迟最小叠加（减少绘制开销）。</p>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-end">
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span>Plain FPS</span>
+                <input type="number" min={1} max={60} step={1} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" value={lowLatencyStreamFps} onChange={(e) => setLowLatencyStreamFps(Number(e.target.value || 10))} disabled={savingLowLatencyConfig} />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span>Analyzed FPS</span>
+                <input type="number" min={1} max={60} step={1} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" value={lowLatencyAnalyzedStreamFps} onChange={(e) => setLowLatencyAnalyzedStreamFps(Number(e.target.value || 12))} disabled={savingLowLatencyConfig} />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span>Idle FPS</span>
+                <input type="number" min={0.1} max={10} step={0.1} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" value={lowLatencyIdleStreamFps} onChange={(e) => setLowLatencyIdleStreamFps(Number(e.target.value || 1))} disabled={savingLowLatencyConfig} />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span>Plain JPEG</span>
+                <input type="number" min={30} max={95} step={1} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" value={lowLatencyPlainJpegQuality} onChange={(e) => setLowLatencyPlainJpegQuality(Number(e.target.value || 75))} disabled={savingLowLatencyConfig} />
+              </label>
+              <label className="flex flex-wrap items-center gap-2 text-xs text-slate-700">
+                <span>Analyzed JPEG</span>
+                <input type="number" min={30} max={95} step={1} className="w-24 rounded border border-slate-300 bg-white px-2 py-1 text-sm" value={lowLatencyAnalyzedJpegQuality} onChange={(e) => setLowLatencyAnalyzedJpegQuality(Number(e.target.value || 70))} disabled={savingLowLatencyConfig} />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-slate-700">
+                <input type="checkbox" checked={lowLatencyMinimalOverlay} onChange={(e) => setLowLatencyMinimalOverlay(e.target.checked)} disabled={savingLowLatencyConfig} />
+                <span>开启最小叠加模式</span>
+              </label>
+              <button type="button" className="rounded bg-[#694FF9] px-3 py-1 text-xs font-medium text-white hover:bg-[#5b3ff6] disabled:opacity-60" onClick={() => void saveLowLatencyConfig()} disabled={savingLowLatencyConfig}>
+                {savingLowLatencyConfig ? "保存中..." : "保存低延迟参数"}
+              </button>
             </div>
           </div>
         </section>

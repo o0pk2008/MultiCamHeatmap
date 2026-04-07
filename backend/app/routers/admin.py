@@ -46,10 +46,32 @@ class QueueWaitAnalysisConfigRequest(BaseModel):
     abandon_min_queue_sec: float
 
 
+class LowLatencyConfigRequest(BaseModel):
+    stream_fps: float
+    analyzed_stream_fps: float
+    idle_stream_fps: float
+    plain_jpeg_quality: int
+    analyzed_jpeg_quality: int
+    low_latency_minimal_overlay: bool
+
+
+class YoloTrackingRuntimeConfigRequest(BaseModel):
+    detection_conf_threshold: float
+    track_min_consecutive_frames: int
+
+
 FACE_CAPTURE_RETENTION_KEY = "face_capture_retention_days"
 QUEUE_WAIT_POST_SERVICE_QUEUE_IGNORE_KEY = "queue_wait_post_service_queue_ignore_sec"
 QUEUE_WAIT_DIRECT_SERVICE_COMPLETE_MIN_KEY = "queue_wait_direct_service_complete_min_sec"
 QUEUE_WAIT_ABANDON_MIN_QUEUE_KEY = "queue_wait_abandon_min_queue_sec"
+VV_STREAM_FPS_KEY = "vv_stream_fps"
+VV_ANALYZED_STREAM_FPS_KEY = "vv_analyzed_stream_fps"
+VV_IDLE_STREAM_FPS_KEY = "vv_idle_stream_fps"
+VV_PLAIN_JPEG_QUALITY_KEY = "vv_plain_jpeg_quality"
+VV_ANALYZED_JPEG_QUALITY_KEY = "vv_analyzed_jpeg_quality"
+VV_LOW_LATENCY_MINIMAL_OVERLAY_KEY = "vv_low_latency_minimal_overlay"
+YOLO_DETECTION_CONF_THRESHOLD_KEY = "yolo_detection_conf_threshold"
+YOLO_TRACK_MIN_CONSECUTIVE_FRAMES_KEY = "yolo_track_min_consecutive_frames"
 
 
 def _resolve_sqlite_db_path() -> Path:
@@ -322,6 +344,20 @@ def _clamp_queue_wait_runtime_secs(v: float, lo: float = 0.0, hi: float = 3600.0
         return lo
 
 
+def _clamp_float(v: float, lo: float, hi: float, default: float) -> float:
+    try:
+        return max(lo, min(float(v), hi))
+    except Exception:
+        return float(default)
+
+
+def _clamp_int(v: int, lo: int, hi: int, default: int) -> int:
+    try:
+        return max(lo, min(int(v), hi))
+    except Exception:
+        return int(default)
+
+
 @router.get("/queue-wait-analysis-config")
 async def admin_get_queue_wait_analysis_config():
     from ..queue_wait_analysis import analyzer as qw_analyzer
@@ -397,4 +433,168 @@ async def admin_set_queue_wait_analysis_config(req: QueueWaitAnalysisConfigReque
         "post_service_queue_ignore_sec": float(post_ign),
         "direct_service_complete_min_sec": float(direct_min),
         "abandon_min_queue_sec": float(abandon_q),
+    }
+
+
+@router.get("/low-latency-config")
+async def admin_get_low_latency_config():
+    cfg = manager.get_low_latency_config()
+    stream_fps = float(cfg.get("stream_fps", 10.0))
+    analyzed_stream_fps = float(cfg.get("analyzed_stream_fps", stream_fps))
+    idle_stream_fps = float(cfg.get("idle_stream_fps", 1.0))
+    plain_jpeg_quality = int(cfg.get("plain_jpeg_quality", 75))
+    analyzed_jpeg_quality = int(cfg.get("analyzed_jpeg_quality", 70))
+    low_latency_minimal_overlay = bool(cfg.get("low_latency_minimal_overlay", False))
+    with SessionLocal() as db:
+        def read_setting(key: str):
+            return db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+
+        r = read_setting(VV_STREAM_FPS_KEY)
+        if r is not None:
+            stream_fps = _clamp_float(float(r.value), 0.1, 60.0, stream_fps)
+        r = read_setting(VV_ANALYZED_STREAM_FPS_KEY)
+        if r is not None:
+            analyzed_stream_fps = _clamp_float(float(r.value), 0.1, 60.0, analyzed_stream_fps)
+        r = read_setting(VV_IDLE_STREAM_FPS_KEY)
+        if r is not None:
+            idle_stream_fps = _clamp_float(float(r.value), 0.1, 10.0, idle_stream_fps)
+        r = read_setting(VV_PLAIN_JPEG_QUALITY_KEY)
+        if r is not None:
+            plain_jpeg_quality = _clamp_int(int(float(r.value)), 30, 95, plain_jpeg_quality)
+        r = read_setting(VV_ANALYZED_JPEG_QUALITY_KEY)
+        if r is not None:
+            analyzed_jpeg_quality = _clamp_int(int(float(r.value)), 30, 95, analyzed_jpeg_quality)
+        r = read_setting(VV_LOW_LATENCY_MINIMAL_OVERLAY_KEY)
+        if r is not None:
+            low_latency_minimal_overlay = str(r.value).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+
+    manager.set_low_latency_config(
+        stream_fps=stream_fps,
+        analyzed_stream_fps=analyzed_stream_fps,
+        idle_stream_fps=idle_stream_fps,
+        plain_jpeg_quality=plain_jpeg_quality,
+        analyzed_jpeg_quality=analyzed_jpeg_quality,
+        low_latency_minimal_overlay=low_latency_minimal_overlay,
+    )
+    return {
+        "stream_fps": float(stream_fps),
+        "analyzed_stream_fps": float(analyzed_stream_fps),
+        "idle_stream_fps": float(idle_stream_fps),
+        "plain_jpeg_quality": int(plain_jpeg_quality),
+        "analyzed_jpeg_quality": int(analyzed_jpeg_quality),
+        "low_latency_minimal_overlay": bool(low_latency_minimal_overlay),
+    }
+
+
+@router.post("/low-latency-config")
+async def admin_set_low_latency_config(req: LowLatencyConfigRequest):
+    stream_fps = _clamp_float(float(req.stream_fps), 0.1, 60.0, 10.0)
+    analyzed_stream_fps = _clamp_float(float(req.analyzed_stream_fps), 0.1, 60.0, stream_fps)
+    idle_stream_fps = _clamp_float(float(req.idle_stream_fps), 0.1, 10.0, 1.0)
+    plain_jpeg_quality = _clamp_int(int(req.plain_jpeg_quality), 30, 95, 75)
+    analyzed_jpeg_quality = _clamp_int(int(req.analyzed_jpeg_quality), 30, 95, 70)
+    low_latency_minimal_overlay = bool(req.low_latency_minimal_overlay)
+
+    manager.set_low_latency_config(
+        stream_fps=stream_fps,
+        analyzed_stream_fps=analyzed_stream_fps,
+        idle_stream_fps=idle_stream_fps,
+        plain_jpeg_quality=plain_jpeg_quality,
+        analyzed_jpeg_quality=analyzed_jpeg_quality,
+        low_latency_minimal_overlay=low_latency_minimal_overlay,
+    )
+    with SessionLocal() as db:
+        def upsert(key: str, val: str) -> None:
+            row = db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+            if row is None:
+                db.add(models.AppSetting(key=key, value=val))
+            else:
+                row.value = val
+
+        upsert(VV_STREAM_FPS_KEY, str(stream_fps))
+        upsert(VV_ANALYZED_STREAM_FPS_KEY, str(analyzed_stream_fps))
+        upsert(VV_IDLE_STREAM_FPS_KEY, str(idle_stream_fps))
+        upsert(VV_PLAIN_JPEG_QUALITY_KEY, str(plain_jpeg_quality))
+        upsert(VV_ANALYZED_JPEG_QUALITY_KEY, str(analyzed_jpeg_quality))
+        upsert(
+            VV_LOW_LATENCY_MINIMAL_OVERLAY_KEY,
+            "1" if low_latency_minimal_overlay else "0",
+        )
+        db.commit()
+    return {
+        "status": "ok",
+        "stream_fps": float(stream_fps),
+        "analyzed_stream_fps": float(analyzed_stream_fps),
+        "idle_stream_fps": float(idle_stream_fps),
+        "plain_jpeg_quality": int(plain_jpeg_quality),
+        "analyzed_jpeg_quality": int(analyzed_jpeg_quality),
+        "low_latency_minimal_overlay": bool(low_latency_minimal_overlay),
+    }
+
+
+@router.get("/yolo-tracking-runtime-config")
+async def admin_get_yolo_tracking_runtime_config():
+    cfg = manager.get_yolo_tracking_runtime_config()
+    detection_conf_threshold = float(cfg.get("detection_conf_threshold", 0.25))
+    track_min_consecutive_frames = int(cfg.get("track_min_consecutive_frames", 1))
+    with SessionLocal() as db:
+        row = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == YOLO_DETECTION_CONF_THRESHOLD_KEY)
+            .first()
+        )
+        if row is not None:
+            detection_conf_threshold = _clamp_float(float(row.value), 0.01, 0.99, detection_conf_threshold)
+        row2 = (
+            db.query(models.AppSetting)
+            .filter(models.AppSetting.key == YOLO_TRACK_MIN_CONSECUTIVE_FRAMES_KEY)
+            .first()
+        )
+        if row2 is not None:
+            track_min_consecutive_frames = _clamp_int(
+                int(float(row2.value)), 1, 20, track_min_consecutive_frames
+            )
+    manager.set_yolo_tracking_runtime_config(
+        detection_conf_threshold=detection_conf_threshold,
+        track_min_consecutive_frames=track_min_consecutive_frames,
+    )
+    return {
+        "detection_conf_threshold": float(detection_conf_threshold),
+        "track_min_consecutive_frames": int(track_min_consecutive_frames),
+    }
+
+
+@router.post("/yolo-tracking-runtime-config")
+async def admin_set_yolo_tracking_runtime_config(req: YoloTrackingRuntimeConfigRequest):
+    detection_conf_threshold = _clamp_float(float(req.detection_conf_threshold), 0.01, 0.99, 0.25)
+    track_min_consecutive_frames = _clamp_int(
+        int(req.track_min_consecutive_frames), 1, 20, 1
+    )
+    manager.set_yolo_tracking_runtime_config(
+        detection_conf_threshold=detection_conf_threshold,
+        track_min_consecutive_frames=track_min_consecutive_frames,
+    )
+    with SessionLocal() as db:
+        def upsert(key: str, val: str) -> None:
+            row = db.query(models.AppSetting).filter(models.AppSetting.key == key).first()
+            if row is None:
+                db.add(models.AppSetting(key=key, value=val))
+            else:
+                row.value = val
+
+        upsert(YOLO_DETECTION_CONF_THRESHOLD_KEY, str(detection_conf_threshold))
+        upsert(
+            YOLO_TRACK_MIN_CONSECUTIVE_FRAMES_KEY,
+            str(int(track_min_consecutive_frames)),
+        )
+        db.commit()
+    return {
+        "status": "ok",
+        "detection_conf_threshold": float(detection_conf_threshold),
+        "track_min_consecutive_frames": int(track_min_consecutive_frames),
     }

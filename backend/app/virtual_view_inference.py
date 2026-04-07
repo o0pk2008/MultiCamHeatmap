@@ -205,6 +205,26 @@ class VirtualViewInferenceManager:
         self._yolo_foot_point_color: str = "green"  # green | blue | white
         # 监控画面映射网格颜色（系统设置）
         self._mapped_cam_grid_color: str = "white"  # white | green | blue
+        # 低延迟流参数（可由系统设置动态改写）
+        self._vv_stream_fps: float = float(os.environ.get("VV_STREAM_FPS", "10.0"))
+        self._vv_analyzed_stream_fps: float = float(
+            os.environ.get("VV_ANALYZED_STREAM_FPS", str(self._vv_stream_fps))
+        )
+        self._vv_idle_stream_fps: float = float(os.environ.get("VV_IDLE_STREAM_FPS", "1.0"))
+        self._vv_plain_jpeg_quality: int = int(os.environ.get("VV_PLAIN_JPEG_QUALITY", "75"))
+        self._vv_analyzed_jpeg_quality: int = int(
+            os.environ.get("VV_ANALYZED_JPEG_QUALITY", "70")
+        )
+        self._vv_low_latency_minimal_overlay: bool = str(
+            os.environ.get("VV_LOW_LATENCY_MINIMAL_OVERLAY", "0")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        # YOLO 检测/跟踪稳定参数（可由系统设置动态改写）
+        self._yolo_detection_conf_threshold: float = float(
+            os.environ.get("YOLO_DETECTION_CONF_THRESHOLD", "0.25")
+        )
+        self._yolo_track_min_consecutive_frames: int = int(
+            os.environ.get("YOLO_TRACK_MIN_CONSECUTIVE_FRAMES", "1")
+        )
         # 排队时长分析：ROI 四边形（UV）与每人标签（ASCII，供 cv2.putText）
         self._queue_wait_quads_by_vv: Dict[
             int, Tuple[Optional[List[Tuple[float, float]]], Optional[List[Tuple[float, float]]]]
@@ -303,6 +323,66 @@ class VirtualViewInferenceManager:
                 "foot_point_style": str(self._yolo_foot_point_style),
                 "foot_point_color": str(self._yolo_foot_point_color),
                 "mapped_cam_grid_color": str(self._mapped_cam_grid_color),
+            }
+
+    def set_low_latency_config(
+        self,
+        *,
+        stream_fps: Optional[float] = None,
+        analyzed_stream_fps: Optional[float] = None,
+        idle_stream_fps: Optional[float] = None,
+        plain_jpeg_quality: Optional[int] = None,
+        analyzed_jpeg_quality: Optional[int] = None,
+        low_latency_minimal_overlay: Optional[bool] = None,
+    ) -> None:
+        with self._lock:
+            if stream_fps is not None:
+                self._vv_stream_fps = max(0.1, min(float(stream_fps), 60.0))
+            if analyzed_stream_fps is not None:
+                self._vv_analyzed_stream_fps = max(0.1, min(float(analyzed_stream_fps), 60.0))
+            if idle_stream_fps is not None:
+                self._vv_idle_stream_fps = max(0.1, min(float(idle_stream_fps), 10.0))
+            if plain_jpeg_quality is not None:
+                self._vv_plain_jpeg_quality = max(30, min(int(plain_jpeg_quality), 95))
+            if analyzed_jpeg_quality is not None:
+                self._vv_analyzed_jpeg_quality = max(30, min(int(analyzed_jpeg_quality), 95))
+            if low_latency_minimal_overlay is not None:
+                self._vv_low_latency_minimal_overlay = bool(low_latency_minimal_overlay)
+
+    def get_low_latency_config(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "stream_fps": float(self._vv_stream_fps),
+                "analyzed_stream_fps": float(self._vv_analyzed_stream_fps),
+                "idle_stream_fps": float(self._vv_idle_stream_fps),
+                "plain_jpeg_quality": int(self._vv_plain_jpeg_quality),
+                "analyzed_jpeg_quality": int(self._vv_analyzed_jpeg_quality),
+                "low_latency_minimal_overlay": bool(self._vv_low_latency_minimal_overlay),
+            }
+
+    def set_yolo_tracking_runtime_config(
+        self,
+        *,
+        detection_conf_threshold: Optional[float] = None,
+        track_min_consecutive_frames: Optional[int] = None,
+    ) -> None:
+        with self._lock:
+            if detection_conf_threshold is not None:
+                self._yolo_detection_conf_threshold = max(
+                    0.01, min(float(detection_conf_threshold), 0.99)
+                )
+            if track_min_consecutive_frames is not None:
+                self._yolo_track_min_consecutive_frames = max(
+                    1, min(int(track_min_consecutive_frames), 20)
+                )
+
+    def get_yolo_tracking_runtime_config(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "detection_conf_threshold": float(self._yolo_detection_conf_threshold),
+                "track_min_consecutive_frames": int(
+                    self._yolo_track_min_consecutive_frames
+                ),
             }
 
     @staticmethod
@@ -1673,8 +1753,6 @@ class VirtualViewInferenceManager:
         后台常驻：拉流 -> 透视 -> YOLO(限帧) -> 叠框 -> JPEG(限帧) -> 写入最新帧
         """
         analyze_fps = float(os.environ.get("VV_ANALYZE_FPS", "6.0"))  # 推理频率（一直运行，便于历史统计）
-        stream_fps = 10.0   # 有人观看时输出 MJPEG 刷新频率
-        idle_stream_fps = 1.0  # 无人观看时仍保留低频编码，避免最新帧长期不更新
 
         last_infer_ts = 0.0
         last_emit_ts = 0.0
@@ -1686,6 +1764,9 @@ class VirtualViewInferenceManager:
             os.environ.get("YOLO_USE_SUPERVISION_BYTETRACK", "1")
         ).strip().lower() in ("1", "true", "yes", "on")
         smoother_len = max(1, int(os.environ.get("YOLO_TRACK_SMOOTHER_LENGTH", "5")))
+        tracking_runtime_cfg = self.get_yolo_tracking_runtime_config()
+        detection_conf_threshold = float(tracking_runtime_cfg["detection_conf_threshold"])
+        track_min_consecutive_frames = int(tracking_runtime_cfg["track_min_consecutive_frames"])
         sv_tracker = None
         sv_smoother = None
         if use_supervision_tracker and sv is not None:
@@ -1699,9 +1780,7 @@ class VirtualViewInferenceManager:
                         os.environ.get("YOLO_TRACK_MATCHING_THRESHOLD", "0.8")
                     ),
                     frame_rate=max(1, int(analyze_fps)),
-                    minimum_consecutive_frames=int(
-                        os.environ.get("YOLO_TRACK_MIN_CONSECUTIVE_FRAMES", "1")
-                    ),
+                    minimum_consecutive_frames=int(track_min_consecutive_frames),
                 )
                 sv_smoother = sv.DetectionsSmoother(length=smoother_len)
             except Exception:
@@ -1711,7 +1790,7 @@ class VirtualViewInferenceManager:
             if use_supervision_tracker and sv_tracker is not None:
                 print(
                     f"[TRACKER][vv={int(virtual_view_id)}] supervision=enabled "
-                    f"bytetrack=on smoother={int(smoother_len)}"
+                    f"bytetrack=on smoother={int(smoother_len)} min_frames={int(track_min_consecutive_frames)}"
                 )
             elif use_supervision_tracker and sv is None:
                 print(
@@ -1755,8 +1834,53 @@ class VirtualViewInferenceManager:
 
         self._acquire_camera_reader(camera_id, rtsp_url)
         try:
+            latency_cfg = self.get_low_latency_config()
+            stream_fps = float(latency_cfg["stream_fps"])
+            analyzed_stream_fps = float(latency_cfg["analyzed_stream_fps"])
+            idle_stream_fps = float(latency_cfg["idle_stream_fps"])
+            plain_jpeg_quality = int(latency_cfg["plain_jpeg_quality"])
+            analyzed_jpeg_quality = int(latency_cfg["analyzed_jpeg_quality"])
+            low_latency_minimal_overlay = bool(latency_cfg["low_latency_minimal_overlay"])
+            print(
+                f"[LATENCY][vv={int(virtual_view_id)}] stream_fps={float(stream_fps):.1f} "
+                f"analyzed_fps={float(analyzed_stream_fps):.1f} idle_fps={float(idle_stream_fps):.1f} "
+                f"jpeg_plain={int(plain_jpeg_quality)} jpeg_analyzed={int(analyzed_jpeg_quality)} "
+                f"minimal_overlay={str(low_latency_minimal_overlay).lower()}"
+            )
             while not stop_event.is_set():
                 now = time.time()
+                latency_cfg_now = self.get_low_latency_config()
+                stream_fps = float(latency_cfg_now["stream_fps"])
+                analyzed_stream_fps = float(latency_cfg_now["analyzed_stream_fps"])
+                idle_stream_fps = float(latency_cfg_now["idle_stream_fps"])
+                plain_jpeg_quality = int(latency_cfg_now["plain_jpeg_quality"])
+                analyzed_jpeg_quality = int(latency_cfg_now["analyzed_jpeg_quality"])
+                low_latency_minimal_overlay = bool(
+                    latency_cfg_now["low_latency_minimal_overlay"]
+                )
+                tracking_runtime_cfg = self.get_yolo_tracking_runtime_config()
+                detection_conf_threshold = float(tracking_runtime_cfg["detection_conf_threshold"])
+                new_track_min_frames = int(tracking_runtime_cfg["track_min_consecutive_frames"])
+                if use_supervision_tracker and sv is not None and new_track_min_frames != int(track_min_consecutive_frames):
+                    track_min_consecutive_frames = int(new_track_min_frames)
+                    try:
+                        sv_tracker = sv.ByteTrack(
+                            track_activation_threshold=float(
+                                os.environ.get("YOLO_TRACK_ACTIVATION_THRESHOLD", "0.25")
+                            ),
+                            lost_track_buffer=int(os.environ.get("YOLO_TRACK_LOST_BUFFER", "30")),
+                            minimum_matching_threshold=float(
+                                os.environ.get("YOLO_TRACK_MATCHING_THRESHOLD", "0.8")
+                            ),
+                            frame_rate=max(1, int(analyze_fps)),
+                            minimum_consecutive_frames=int(track_min_consecutive_frames),
+                        )
+                        sv_smoother = sv.DetectionsSmoother(length=smoother_len)
+                        print(
+                            f"[TRACKER][vv={int(virtual_view_id)}] update min_frames={int(track_min_consecutive_frames)}"
+                        )
+                    except Exception:
+                        pass
                 # 每 1 秒热加载一次参数；若 RTSP 地址变化则重连
                 if now - last_reload >= 1.0:
                     last_reload = now
@@ -1859,7 +1983,11 @@ class VirtualViewInferenceManager:
                     if self._model is not None and (now - last_infer_ts) >= (1.0 / analyze_fps):
                         last_infer_ts = now
                         try:
-                            results = self._model(persp, verbose=False)
+                            results = self._model(
+                                persp,
+                                verbose=False,
+                                conf=float(detection_conf_threshold),
+                            )
                             if results and len(results) > 0:
                                 res = results[0]
                                 boxes = res.boxes
@@ -2164,64 +2292,72 @@ class VirtualViewInferenceManager:
                     queue_wait_labels = {}
 
                 if inference_enabled and draw_footfall_line and foot_line_uv is not None:
-                    try:
-                        annotated_img = plain_img.copy()
-                    except Exception:
-                        annotated_img = plain_img
+                    if low_latency_minimal_overlay:
+                        foot_line_uv = None
+                    else:
+                        try:
+                            annotated_img = plain_img.copy()
+                        except Exception:
+                            annotated_img = plain_img
 
-                    try:
-                        (p1_u, p1_v), (p2_u, p2_v) = foot_line_uv
-                        x1 = int(round(float(p1_u) * float(w_img)))
-                        y1 = int(round(float(p1_v) * float(h_img)))
-                        x2 = int(round(float(p2_u) * float(w_img)))
-                        y2 = int(round(float(p2_v) * float(h_img)))
-                        # Clamp
-                        x1 = max(0, min(x1, max(0, w_img - 1)))
-                        x2 = max(0, min(x2, max(0, w_img - 1)))
-                        y1 = max(0, min(y1, max(0, h_img - 1)))
-                        y2 = max(0, min(y2, max(0, h_img - 1)))
+                        try:
+                            (p1_u, p1_v), (p2_u, p2_v) = foot_line_uv
+                            x1 = int(round(float(p1_u) * float(w_img)))
+                            y1 = int(round(float(p1_v) * float(h_img)))
+                            x2 = int(round(float(p2_u) * float(w_img)))
+                            y2 = int(round(float(p2_v) * float(h_img)))
+                            # Clamp
+                            x1 = max(0, min(x1, max(0, w_img - 1)))
+                            x2 = max(0, min(x2, max(0, w_img - 1)))
+                            y1 = max(0, min(y1, max(0, h_img - 1)))
+                            y2 = max(0, min(y2, max(0, h_img - 1)))
 
-                        cv2.line(annotated_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
-                        cv2.circle(annotated_img, (x1, y1), 4, (255, 0, 255), -1)
-                        cv2.circle(annotated_img, (x2, y2), 4, (255, 0, 255), -1)
-                    except Exception:
-                        pass
+                            cv2.line(annotated_img, (x1, y1), (x2, y2), (255, 0, 255), 2)
+                            cv2.circle(annotated_img, (x1, y1), 4, (255, 0, 255), -1)
+                            cv2.circle(annotated_img, (x2, y2), 4, (255, 0, 255), -1)
+                        except Exception:
+                            pass
 
                 if inference_enabled and queue_wait_quads is not None and w_img > 0 and h_img > 0:
-                    try:
-                        if annotated_img is plain_img:
-                            annotated_img = plain_img.copy()
-                    except Exception:
-                        annotated_img = plain_img
-                    try:
-                        q_pts, s_pts = queue_wait_quads
-                        if q_pts is not None and len(q_pts) >= 2:
-                            arr = np.array(
-                                [
+                    if low_latency_minimal_overlay:
+                        queue_wait_quads = None
+                        queue_wait_labels = {}
+                        yolo_draw_cfg["foot_point_enabled"] = False
+                    else:
+                        try:
+                            if annotated_img is plain_img:
+                                annotated_img = plain_img.copy()
+                        except Exception:
+                            annotated_img = plain_img
+                        try:
+                            q_pts, s_pts = queue_wait_quads
+                            if q_pts is not None and len(q_pts) >= 2:
+                                arr = np.array(
                                     [
-                                        int(round(float(p[0]) * float(w_img))),
-                                        int(round(float(p[1]) * float(h_img))),
-                                    ]
-                                    for p in q_pts
-                                ],
-                                dtype=np.int32,
-                            ).reshape((-1, 1, 2))
-                            cv2.polylines(annotated_img, [arr], True, (255, 255, 0), 2)
-                        if s_pts is not None and len(s_pts) >= 2:
-                            arr2 = np.array(
-                                [
+                                        [
+                                            int(round(float(p[0]) * float(w_img))),
+                                            int(round(float(p[1]) * float(h_img))),
+                                        ]
+                                        for p in q_pts
+                                    ],
+                                    dtype=np.int32,
+                                ).reshape((-1, 1, 2))
+                                cv2.polylines(annotated_img, [arr], True, (255, 255, 0), 2)
+                            if s_pts is not None and len(s_pts) >= 2:
+                                arr2 = np.array(
                                     [
-                                        int(round(float(p[0]) * float(w_img))),
-                                        int(round(float(p[1]) * float(h_img))),
-                                    ]
-                                    for p in s_pts
-                                ],
-                                dtype=np.int32,
-                            ).reshape((-1, 1, 2))
-                            cv2.polylines(annotated_img, [arr2], True, (0, 165, 255), 2)
-                        # ROI 区域名称标签仅在前端 canvas 叠加；此处只画边框避免与 canvas 重复。
-                    except Exception:
-                        pass
+                                        [
+                                            int(round(float(p[0]) * float(w_img))),
+                                            int(round(float(p[1]) * float(h_img))),
+                                        ]
+                                        for p in s_pts
+                                    ],
+                                    dtype=np.int32,
+                                ).reshape((-1, 1, 2))
+                                cv2.polylines(annotated_img, [arr2], True, (0, 165, 255), 2)
+                            # ROI 区域名称标签仅在前端 canvas 叠加；此处只画边框避免与 canvas 重复。
+                        except Exception:
+                            pass
 
                 if inference_enabled and last_boxes is not None:
                     # 在副本上画框，避免污染 plain 预览
@@ -2334,19 +2470,41 @@ class VirtualViewInferenceManager:
                         )
 
                 # 3) 编码/发布（限帧）
-                subs = self.subscriber_total_count(virtual_view_id)
-                target_fps = stream_fps if subs > 0 else idle_stream_fps
-                if (now - last_emit_ts) >= (1.0 / max(0.1, target_fps)):
+                analyzed_subs = self.subscriber_count(virtual_view_id)
+                plain_subs = self.plain_subscriber_count(virtual_view_id)
+                subs = int(analyzed_subs) + int(plain_subs)
+                if subs > 0:
+                    target_fps = max(0.1, float(max(stream_fps, analyzed_stream_fps)))
+                else:
+                    target_fps = max(0.1, float(idle_stream_fps))
+                if (now - last_emit_ts) >= (1.0 / target_fps):
                     last_emit_ts = now
-                    ok_p, jpg_p = cv2.imencode(".jpg", plain_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-                    if ok_p:
-                        self._latest_plain[virtual_view_id] = VirtualViewFrame(jpeg=jpg_p.tobytes(), ts=now)
-                    ok_a, jpg_a = cv2.imencode(".jpg", annotated_img, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-                    if ok_a:
-                        self._latest_annotated[virtual_view_id] = VirtualViewFrame(jpeg=jpg_a.tobytes(), ts=now)
-                    elif ok_p:
-                        # annotated 编码失败时仍发布 plain JPEG，避免 analyzed.mjpeg 长时间无首包导致浏览器黑屏
-                        self._latest_annotated[virtual_view_id] = VirtualViewFrame(jpeg=jpg_p.tobytes(), ts=now)
+                    jpg_p = None
+                    if plain_subs > 0 or analyzed_subs <= 0:
+                        ok_p, jpg_p = cv2.imencode(
+                            ".jpg",
+                            plain_img,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), int(plain_jpeg_quality)],
+                        )
+                        if ok_p:
+                            self._latest_plain[virtual_view_id] = VirtualViewFrame(
+                                jpeg=jpg_p.tobytes(), ts=now
+                            )
+                    if analyzed_subs > 0:
+                        ok_a, jpg_a = cv2.imencode(
+                            ".jpg",
+                            annotated_img,
+                            [int(cv2.IMWRITE_JPEG_QUALITY), int(analyzed_jpeg_quality)],
+                        )
+                        if ok_a:
+                            self._latest_annotated[virtual_view_id] = VirtualViewFrame(
+                                jpeg=jpg_a.tobytes(), ts=now
+                            )
+                        elif jpg_p is not None:
+                            # annotated 编码失败时仍发布 plain JPEG，避免 analyzed.mjpeg 长时间无首包导致浏览器黑屏
+                            self._latest_annotated[virtual_view_id] = VirtualViewFrame(
+                                jpeg=jpg_p.tobytes(), ts=now
+                            )
 
                 # 线程里稍微 sleep，避免 CPU 空转
                 time.sleep(0.001)
