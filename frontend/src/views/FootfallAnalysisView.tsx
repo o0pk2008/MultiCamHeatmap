@@ -377,6 +377,8 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const statsRefreshTimerRef = useRef<number | null>(null);
   const statsPollTimerRef = useRef<number | null>(null);
   const lineOverviewPollTimerRef = useRef<number | null>(null);
+  /** 非当前选中判定线的过线事件：仅批量刷新平面图标签，做短防抖避免连发请求 */
+  const lineOverviewEventThrottleRef = useRef<number | null>(null);
   const faceCapturePollTimerRef = useRef<number | null>(null);
   const faceCaptureContainerRef = useRef<HTMLDivElement | null>(null);
   const faceCaptureReqSeqRef = useRef(0);
@@ -595,16 +597,11 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const handleHeatmapWsEvent = useCallback(
     (raw: any) => {
       if (selectedFloorPlanIdRef.current == null) return;
-      const selectedOpt =
-        bindCameraOptionsRef.current.find((o) => o.key === bindCameraIdRef.current) || null;
-      const currentVirtualViewId = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
-      if (currentVirtualViewId == null) return;
-
       const evt = raw ?? {};
+      if (evt.type != null && evt.type !== "footfall_cross") return;
       if (evt.floor_plan_id !== selectedFloorPlanIdRef.current) return;
       const vvId = evt.virtual_view_id ?? null;
-      // 必须与当前「监控画面选择」一致，避免 WS 连接未重建时仍按旧 vv 过滤
-      if (vvId == null || Number(vvId) !== Number(currentVirtualViewId)) return;
+      if (vvId == null) return;
 
       const modeNow = statsModeRef.current;
       const dateKeyNow = statsDateRef.current;
@@ -617,6 +614,24 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
       const dirRaw = evt.direction;
       if (dirRaw !== "in" && dirRaw !== "out") return;
+
+      const selectedOpt =
+        bindCameraOptionsRef.current.find((o) => o.key === bindCameraIdRef.current) || null;
+      const currentVirtualViewId = selectedOpt?.kind === "virtual" ? selectedOpt.view.id : null;
+      const isForCurrentView =
+        currentVirtualViewId != null && Number(vvId) === Number(currentVirtualViewId);
+
+      // 正在看 B 时 A 过线：主面板与闪烁只应对 A 无感，但平面图上的多线数字必须跟上
+      if (!isForCurrentView) {
+        if (lineOverviewEventThrottleRef.current != null) {
+          window.clearTimeout(lineOverviewEventThrottleRef.current);
+        }
+        lineOverviewEventThrottleRef.current = window.setTimeout(() => {
+          lineOverviewEventThrottleRef.current = null;
+          void fetchLineOverviewStatsRef.current();
+        }, 200);
+        return;
+      }
 
       const sid = evt.stable_id != null ? String(evt.stable_id) : "";
       const tid = evt.track_id != null ? String(evt.track_id) : "";
@@ -787,6 +802,28 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   );
 
   const requiredVirtualViewId = selectedCameraOpt?.kind === "virtual" ? selectedCameraOpt.view.id : null;
+
+  /** 全局「检测分析」开启时，仅对「当前画面且该线仍为启用」拉 analyzed.mjpeg，避免停用线后订阅 YOLO 又把推理挂起 */
+  const useAnalyzedMjpegForSelectedView = useMemo(() => {
+    if (!analyzing) return false;
+    if (!selectedCameraOpt || selectedCameraOpt.kind !== "virtual") return false;
+    const key = `vv:${selectedCameraOpt.view.id}`;
+    const cfg = allLineCfg[key];
+    return !!(cfg?.p1 && cfg?.p2 && cfg.enabled !== false);
+  }, [analyzing, selectedCameraOpt, allLineCfg]);
+
+  const prevAnalyzedStreamRef = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (prevAnalyzedStreamRef.current === null) {
+      prevAnalyzedStreamRef.current = useAnalyzedMjpegForSelectedView;
+      return;
+    }
+    if (prevAnalyzedStreamRef.current !== useAnalyzedMjpegForSelectedView) {
+      prevAnalyzedStreamRef.current = useAnalyzedMjpegForSelectedView;
+      setMjpegStreamEpoch((n) => n + 1);
+    }
+  }, [useAnalyzedMjpegForSelectedView]);
+
   const activeVirtualLines = useMemo(() => {
     return Object.entries(allLineCfg)
       .map(([key, cfg]) => {
@@ -1110,6 +1147,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         window.clearInterval(faceCapturePollTimerRef.current);
         faceCapturePollTimerRef.current = null;
       }
+      if (lineOverviewEventThrottleRef.current != null) {
+        window.clearTimeout(lineOverviewEventThrottleRef.current);
+        lineOverviewEventThrottleRef.current = null;
+      }
     };
   }, [selectedFloorPlanId, requiredVirtualViewId]);
 
@@ -1153,7 +1194,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
         lineOverviewPollTimerRef.current = null;
       }
     };
-  }, [analyzing, fetchLineOverviewStats]);
+  }, [analyzing, bindCameraId, fetchLineOverviewStats]);
 
   useEffect(() => {
     return () => {
@@ -2190,8 +2231,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
                 <VirtualViewMjpeg
                   mjpegUrl={`${API_BASE}/api/cameras/${selectedCameraOpt.view.camera_id}/virtual-views/${
                     selectedCameraOpt.view.id
-                  }/${analyzing ? "analyzed" : "preview_shared"}.mjpeg?stream=${mjpegStreamEpoch}`}
-                  title={`footfall-camera-${selectedCameraOpt.view.id}-${analyzing ? "analyzed" : "preview"}`}
+                  }/${useAnalyzedMjpegForSelectedView ? "analyzed" : "preview_shared"}.mjpeg?stream=${mjpegStreamEpoch}`}
+                  title={`footfall-camera-${selectedCameraOpt.view.id}-${
+                    useAnalyzedMjpegForSelectedView ? "analyzed" : "preview"
+                  }`}
                   frameW={Math.max(1, Number(selectedCameraOpt.view.out_w) || 960)}
                   frameH={Math.max(1, Number(selectedCameraOpt.view.out_h) || 540)}
                   epoch={mjpegStreamEpoch}
