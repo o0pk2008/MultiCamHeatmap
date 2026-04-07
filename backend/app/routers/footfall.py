@@ -131,6 +131,7 @@ async def footfall_start(req: FootfallStartRequest):
         p2=(float(req.p2.x), float(req.p2.y)),
         zone_w=float(req.zone_w),
         line_config_id=int(cfg.id),
+        enabled=bool(cfg.enabled),
     )
     analyzer.start(
         floor_plan_id=int(req.floor_plan_id),
@@ -183,6 +184,16 @@ async def footfall_lines_upsert(req: FootfallLineUpsertRequest):
             cfg.enabled = bool(req.enabled) if req.enabled is not None else cfg.enabled
         db.commit()
         db.refresh(cfg)
+
+        if analyzer.is_running(int(cfg.floor_plan_id), int(cfg.virtual_view_id)):
+            analyzer.merge_line_state(
+                floor_plan_id=int(cfg.floor_plan_id),
+                virtual_view_id=int(cfg.virtual_view_id),
+                p1=(float(cfg.p1_u), float(cfg.p1_v)),
+                p2=(float(cfg.p2_u), float(cfg.p2_v)),
+                line_config_id=int(cfg.id),
+                enabled=bool(cfg.enabled),
+            )
 
         return FootfallLineConfigOut(
             id=int(cfg.id),

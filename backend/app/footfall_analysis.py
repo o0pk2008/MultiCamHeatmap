@@ -16,6 +16,8 @@ class FootfallLine:
     p2: Tuple[float, float]  # (u, v)
     zone_w: float  # near-line band half width in UV signed distance units
     line_config_id: int
+    # False：保留几何与推理会话，但不产生过线事件 / 抓拍（与 DB footfall_line_configs.enabled 一致）
+    enabled: bool = True
 
 
 class FootfallAnalyzer:
@@ -62,6 +64,7 @@ class FootfallAnalyzer:
         if key in self._tasks:
             # 已在运行：只更新上面的几何与可视化，不重复创建任务
             return
+
         stop_event = asyncio.Event()
         self._stops[key] = stop_event
         loop = asyncio.get_running_loop()
@@ -72,6 +75,39 @@ class FootfallAnalyzer:
         # 让 YOLO inference 保持运行（即使没有 analyzed.mjpeg 订阅者）
         try:
             manager.acquire_inference(int(virtual_view_id))
+        except Exception:
+            pass
+
+    def merge_line_state(
+        self,
+        floor_plan_id: int,
+        virtual_view_id: int,
+        *,
+        p1: Tuple[float, float],
+        p2: Tuple[float, float],
+        line_config_id: int,
+        enabled: bool,
+    ) -> None:
+        """在会话已存在时应用 DB / upsert 的最新几何与启用状态（不创建或销毁任务）。"""
+        key = self._session_key(floor_plan_id, virtual_view_id)
+        if key not in self._tasks:
+            return
+        prev = self._session_line.get(key)
+        zone_w = float(prev.zone_w) if prev is not None else 0.05
+        line = FootfallLine(
+            p1=(float(p1[0]), float(p1[1])),
+            p2=(float(p2[0]), float(p2[1])),
+            zone_w=zone_w,
+            line_config_id=int(line_config_id),
+            enabled=bool(enabled),
+        )
+        self._session_line[key] = line
+        try:
+            manager.set_footfall_line_uv(
+                int(virtual_view_id),
+                p1_uv=(float(p1[0]), float(p1[1])),
+                p2_uv=(float(p2[0]), float(p2[1])),
+            )
         except Exception:
             pass
 
@@ -219,6 +255,9 @@ class FootfallAnalyzer:
             while not stop_event.is_set():
                 line = self._session_line.get(session_key)
                 if line is None:
+                    await asyncio.sleep(emit_interval_sec)
+                    continue
+                if not line.enabled:
                     await asyncio.sleep(emit_interval_sec)
                     continue
 

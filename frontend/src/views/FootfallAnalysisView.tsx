@@ -788,7 +788,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   const canStartFootfall =
     selectedFloorPlanId != null &&
     selectedFloorPlan != null &&
-    activeVirtualLines.length > 0;
+    activeVirtualLines.some((ln) => ln.enabled);
 
   const connectFootfallWs = useCallback(() => {
     if (footfallReconnectTimerRef.current != null) {
@@ -921,7 +921,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
   ]);
 
   const startFootfallAnalysis = useCallback(async () => {
-    if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId || activeVirtualLines.length === 0) return;
+    if (!canStartFootfall || !requiredVirtualViewId || !selectedFloorPlanId) return;
 
     // 统计使用的判定线固定在启动瞬间，避免用户在分析过程中移动点导致口径变化
     const vvP1 = savedLineP1 ?? lineP1;
@@ -938,8 +938,10 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
     setMjpegStreamEpoch((n) => n + 1);
 
     try {
+      const linesToStart = activeVirtualLines.filter((ln) => ln.enabled);
+      if (linesToStart.length === 0) return;
       const settled = await Promise.allSettled(
-        activeVirtualLines.map((ln) =>
+        linesToStart.map((ln) =>
           fetch(`${API_BASE}/api/footfall/start`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -952,7 +954,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
               floor_p2: ln.floor_p2,
               in_label: ln.in_label,
               out_label: ln.out_label,
-              enabled: ln.enabled,
+              enabled: true,
               zone_w: LINE_NEAR_ZONE_W,
               emit_interval_sec: 0.03,
             }),
@@ -1592,7 +1594,7 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
 
   const lineCfgRows = useMemo(() => {
     const rows = Object.entries(allLineCfg)
-      .map(([key, cfg], idx) => {
+      .map(([key, cfg]) => {
         const opt = bindCameraOptions.find((o) => o.key === key);
         const cameraId =
           opt?.kind === "virtual"
@@ -1600,17 +1602,22 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
             : opt?.kind === "camera"
               ? opt.camera.id
               : "-";
+        const m = key.match(/^vv:(\d+)$/);
+        const virtualViewId = m && Number.isFinite(Number(m[1])) ? Number(m[1]) : null;
         return {
           key,
           cfg,
-          lineId: `L-${String(idx + 1).padStart(3, "0")}`,
           label: opt?.label || key,
           cameraId,
+          virtualViewId,
         };
       })
       .filter((it) => !!it.cfg?.p1 && !!it.cfg?.p2);
     rows.sort((a, b) => a.label.localeCompare(b.label, "zh-CN"));
-    return rows;
+    return rows.map((r, i) => ({
+      ...r,
+      lineId: `L-${String(i + 1).padStart(3, "0")}`,
+    }));
   }, [allLineCfg, bindCameraOptions]);
 
   const deleteLineByKey = useCallback(
@@ -1641,6 +1648,62 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       }
     },
     [bindCameraId, selectedFloorPlanId],
+  );
+
+  const toggleFootfallLineEnabled = useCallback(
+    (rowKey: string, cfg: LineCfg, nextEnabled: boolean) => {
+      if (selectedFloorPlanId == null) return;
+      if (!cfg?.p1 || !cfg?.p2) return;
+      const m = rowKey.match(/^vv:(\d+)$/);
+      const vvId = m ? Number(m[1]) : NaN;
+      if (!Number.isFinite(vvId)) return;
+
+      setAllLineCfg((old) => {
+        const cur = old[rowKey];
+        if (!cur) return old;
+        const next = { ...old, [rowKey]: { ...cur, enabled: nextEnabled } };
+        writeAllLineCfg(next);
+        return next;
+      });
+
+      if (analyzing && nextEnabled) {
+        void fetch(`${API_BASE}/api/footfall/start`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            floor_plan_id: selectedFloorPlanId,
+            virtual_view_id: vvId,
+            p1: cfg.p1,
+            p2: cfg.p2,
+            floor_p1: cfg.floor_p1 ?? cfg.p1,
+            floor_p2: cfg.floor_p2 ?? cfg.p2,
+            in_label: cfg.inLabel || "进入",
+            out_label: cfg.outLabel || "离开",
+            enabled: true,
+            zone_w: LINE_NEAR_ZONE_W,
+            emit_interval_sec: 0.03,
+          }),
+        }).catch(() => {});
+        return;
+      }
+
+      void fetch(`${API_BASE}/api/footfall/lines/upsert`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          floor_plan_id: selectedFloorPlanId,
+          virtual_view_id: vvId,
+          p1: cfg.p1,
+          p2: cfg.p2,
+          floor_p1: cfg.floor_p1 ?? cfg.p1,
+          floor_p2: cfg.floor_p2 ?? cfg.p2,
+          in_label: cfg.inLabel || "进入",
+          out_label: cfg.outLabel || "离开",
+          enabled: nextEnabled,
+        }),
+      }).catch(() => {});
+    },
+    [selectedFloorPlanId, analyzing, LINE_NEAR_ZONE_W],
   );
 
   const renderFloorOverlay = useCallback(
@@ -2200,68 +2263,126 @@ const FootfallAnalysisConfigView: React.FC<FootfallAnalysisViewProps> = ({
       </div>
 
       <div className="flex min-h-0 flex-col rounded-lg border border-slate-200 bg-white p-4 shadow-sm md:col-start-3 md:row-start-2">
-        <div className="mb-3 text-sm font-semibold text-slate-800">判定线配置</div>
-        <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
-          <div className="flex flex-row gap-2 overflow-x-auto pb-1">
-            {lineCfgRows.length === 0 ? (
-              <div className="flex-shrink-0 min-w-[220px] rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs text-slate-500">
-                暂无已保存线段，请先在监控画面中绘制并保存。
-              </div>
-            ) : (
-              lineCfgRows.map((row) => (
-                <div
-                  key={row.key}
-                  className={`flex-shrink-0 min-w-[220px] rounded-lg border p-2 transition-opacity ${
-                    bindCameraId === row.key
-                      ? "border-slate-200 bg-slate-50 opacity-100"
-                      : "border-slate-200 bg-slate-50 opacity-50"
-                  }`}
-                >
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-700">线段编号</span>
-                    <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.lineId}</span>
-                  </div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-700">绑定设备</span>
-                    <span
-                      className="max-w-[170px] truncate rounded bg-white px-2 py-0.5 text-xs text-slate-700"
-                      title={row.label}
-                    >
-                      {row.label}
-                    </span>
-                  </div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <span className="text-[11px] font-semibold text-slate-700">设备编号</span>
-                    <span className="rounded bg-white px-2 py-0.5 text-xs text-slate-700">{row.cameraId}</span>
-                  </div>
-                  <div className="rounded border border-slate-200 bg-white p-2 text-[11px] text-slate-700">
-                    <div className="mb-0.5 font-medium text-slate-600">线段坐标</div>
-                    <div>A[{`${row.cfg.p1.x.toFixed(3)}, ${row.cfg.p1.y.toFixed(3)}`}]</div>
-                    <div>B[{`${row.cfg.p2.x.toFixed(3)}, ${row.cfg.p2.y.toFixed(3)}`}]</div>
-                  </div>
-                  <div className="mt-2 flex items-center justify-end gap-1.5">
-                    <button
-                      type="button"
-                      className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
-                      onClick={() => {
-                        setBindCameraId(row.key);
-                        setDrawHint("已切换到该线段绑定设备");
-                      }}
-                    >
-                      查看
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
-                      onClick={() => deleteLineByKey(row.key)}
-                    >
-                      删除
-                    </button>
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
+        <div className="mb-1 text-sm font-semibold text-slate-800">判定线配置</div>
+        <p className="mb-2 text-[11px] text-slate-500">
+          点击表格行可在上方「监控画面」中切换至对应虚拟视窗；当前与上方选择一致的行以浅蓝背景标出。
+          <span className="text-slate-600">「状态」与「启用 / 停用」</span>
+          对本条判定线同时生效：启用时参与实时过线统计（分析运行中即生效），并在画面与平面图上正常绘制方向；停用时
+          <span className="text-slate-600">不再产生过线事件与人脸抓拍</span>
+          ，画面与平面图为弱化线型。仅「启用」的线会在点击「开始检测分析」时启动会话。
+        </p>
+        <div className="flex-1 min-h-0 overflow-auto rounded-lg border border-slate-200 bg-white">
+          {lineCfgRows.length === 0 ? (
+            <div className="p-3 text-xs text-slate-500">暂无已保存线段，请先在监控画面中绘制并保存。</div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[820px] border-collapse text-left text-[11px] text-slate-700">
+                <thead className="sticky top-0 z-[1] border-b border-slate-200 bg-slate-100/95 backdrop-blur-sm">
+                  <tr>
+                    <th className="whitespace-nowrap px-2 py-2 font-semibold text-slate-700">线段</th>
+                    <th className="whitespace-nowrap px-2 py-2 font-semibold text-slate-700">虚拟视窗 ID</th>
+                    <th className="min-w-[120px] px-2 py-2 font-semibold text-slate-700">绑定画面</th>
+                    <th className="whitespace-nowrap px-2 py-2 font-semibold text-slate-700">设备 ID</th>
+                    <th className="whitespace-nowrap px-2 py-2 font-semibold text-slate-700">状态</th>
+                    <th className="min-w-[140px] px-2 py-2 font-semibold text-slate-700">坐标 (UV)</th>
+                    <th className="whitespace-nowrap px-2 py-2 text-right font-semibold text-slate-700">操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {lineCfgRows.map((row) => {
+                    const active = bindCameraId === row.key;
+                    const coordTitle = `A: ${row.cfg.p1.x.toFixed(4)}, ${row.cfg.p1.y.toFixed(4)}\nB: ${row.cfg.p2.x.toFixed(4)}, ${row.cfg.p2.y.toFixed(4)}`;
+                    return (
+                      <tr
+                        key={row.key}
+                        title="点击切换到该画面"
+                        className={`cursor-pointer border-b border-slate-100 transition-colors last:border-b-0 ${
+                          active
+                            ? "bg-sky-50 ring-1 ring-inset ring-sky-300/70"
+                            : "hover:bg-slate-50/95"
+                        }`}
+                        onClick={() => {
+                          userSelectedCameraRef.current = true;
+                          setBindCameraId(row.key);
+                          setDrawHint("已切换到该线段绑定设备");
+                        }}
+                      >
+                        <td className="whitespace-nowrap px-2 py-2 font-mono text-xs font-semibold text-slate-800">
+                          {row.lineId}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-2 font-mono text-xs text-slate-600">
+                          {row.virtualViewId != null ? row.virtualViewId : "—"}
+                        </td>
+                        <td className="max-w-[200px] truncate px-2 py-2" title={row.label}>
+                          {row.label}
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-2 font-mono text-xs">{row.cameraId}</td>
+                        <td className="whitespace-nowrap px-2 py-2">
+                          {row.cfg.enabled !== false ? (
+                            <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
+                              启用
+                            </span>
+                          ) : (
+                            <span className="rounded bg-slate-200 px-1.5 py-0.5 text-[10px] font-medium text-slate-600">
+                              停用
+                            </span>
+                          )}
+                        </td>
+                        <td
+                          className="px-2 py-2 font-mono text-[10px] leading-snug text-slate-600"
+                          title={coordTitle}
+                        >
+                          <div>
+                            A {row.cfg.p1.x.toFixed(3)},{row.cfg.p1.y.toFixed(3)}
+                          </div>
+                          <div>
+                            B {row.cfg.p2.x.toFixed(3)},{row.cfg.p2.y.toFixed(3)}
+                          </div>
+                        </td>
+                        <td className="whitespace-nowrap px-2 py-2 text-right">
+                          <div className="flex flex-wrap items-center justify-end gap-1">
+                            {row.cfg.enabled !== false ? (
+                              <button
+                                type="button"
+                                className="rounded border border-slate-300 bg-white px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleFootfallLineEnabled(row.key, row.cfg, false);
+                                }}
+                              >
+                                停用
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                className="rounded border border-emerald-300 bg-white px-2 py-1 text-[11px] font-medium text-emerald-800 hover:bg-emerald-50"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleFootfallLineEnabled(row.key, row.cfg, true);
+                                }}
+                              >
+                                启用
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="rounded border border-rose-300 bg-white px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-50"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteLineByKey(row.key);
+                              }}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>
