@@ -21,6 +21,11 @@ except Exception:  # pragma: no cover
     YOLO = None  # type: ignore
 
 try:
+    import supervision as sv  # type: ignore
+except Exception:  # pragma: no cover
+    sv = None  # type: ignore
+
+try:
     import torch
 except Exception:  # pragma: no cover
     torch = None  # type: ignore
@@ -60,6 +65,24 @@ class VirtualViewDetections:
     # 与 xyxy/cls 对齐：用于业务侧统计（性别/年龄分桶）
     gender: Any  # list[str | None]
     age_bucket: Any  # list[str | None]
+
+
+def _bbox_iou(a: np.ndarray, b: np.ndarray) -> float:
+    ax1, ay1, ax2, ay2 = float(a[0]), float(a[1]), float(a[2]), float(a[3])
+    bx1, by1, bx2, by2 = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    iw = max(0.0, inter_x2 - inter_x1)
+    ih = max(0.0, inter_y2 - inter_y1)
+    inter = iw * ih
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    denom = area_a + area_b - inter
+    if denom <= 1e-9:
+        return 0.0
+    return float(inter / denom)
 
 
 class VirtualViewInferenceManager:
@@ -1659,6 +1682,54 @@ class VirtualViewInferenceManager:
         last_ids = None    # list[int]
         last_genders = None  # list[Optional[str]]
         last_age_buckets = None  # list[Optional[str]]
+        use_supervision_tracker = str(
+            os.environ.get("YOLO_USE_SUPERVISION_BYTETRACK", "1")
+        ).strip().lower() in ("1", "true", "yes", "on")
+        smoother_len = max(1, int(os.environ.get("YOLO_TRACK_SMOOTHER_LENGTH", "5")))
+        sv_tracker = None
+        sv_smoother = None
+        if use_supervision_tracker and sv is not None:
+            try:
+                sv_tracker = sv.ByteTrack(
+                    track_activation_threshold=float(
+                        os.environ.get("YOLO_TRACK_ACTIVATION_THRESHOLD", "0.25")
+                    ),
+                    lost_track_buffer=int(os.environ.get("YOLO_TRACK_LOST_BUFFER", "30")),
+                    minimum_matching_threshold=float(
+                        os.environ.get("YOLO_TRACK_MATCHING_THRESHOLD", "0.8")
+                    ),
+                    frame_rate=max(1, int(analyze_fps)),
+                    minimum_consecutive_frames=int(
+                        os.environ.get("YOLO_TRACK_MIN_CONSECUTIVE_FRAMES", "1")
+                    ),
+                )
+                sv_smoother = sv.DetectionsSmoother(length=smoother_len)
+            except Exception:
+                sv_tracker = None
+                sv_smoother = None
+        try:
+            if use_supervision_tracker and sv_tracker is not None:
+                print(
+                    f"[TRACKER][vv={int(virtual_view_id)}] supervision=enabled "
+                    f"bytetrack=on smoother={int(smoother_len)}"
+                )
+            elif use_supervision_tracker and sv is None:
+                print(
+                    f"[TRACKER][vv={int(virtual_view_id)}] supervision=unavailable "
+                    "fallback=legacy"
+                )
+            elif use_supervision_tracker and sv_tracker is None:
+                print(
+                    f"[TRACKER][vv={int(virtual_view_id)}] supervision=init_failed "
+                    "fallback=legacy"
+                )
+            else:
+                print(
+                    f"[TRACKER][vv={int(virtual_view_id)}] supervision=disabled "
+                    "fallback=legacy"
+                )
+        except Exception:
+            pass
         tracks: Dict[int, Tuple[float, float, float, float, float, int]] = {}
         next_track_id = 1
 
@@ -1728,6 +1799,17 @@ class VirtualViewInferenceManager:
                         last_age_buckets = None
                         tracks = {}
                         next_track_id = 1
+                        if sv_tracker is not None:
+                            try:
+                                sv_tracker.reset()
+                            except Exception:
+                                pass
+                        sv_smoother = None
+                        if use_supervision_tracker and sv is not None:
+                            try:
+                                sv_smoother = sv.DetectionsSmoother(length=smoother_len)
+                            except Exception:
+                                sv_smoother = None
 
                 frame = self._get_latest_camera_frame(camera_id)
                 if frame is None:
@@ -1795,11 +1877,6 @@ class VirtualViewInferenceManager:
                                         genders: list[Optional[str]] = [None for _ in range(n_det)]
                                         age_buckets: list[Optional[str]] = [None for _ in range(n_det)]
                                         try:
-                                            max_dist = max(25.0, 0.08 * float(max(w_img, h_img)))
-                                            base_gate = max(25.0, 0.06 * float(max(w_img, h_img)))
-                                            max_speed = 0.35 * float(max(w_img, h_img))
-                                            used_tracks = set()
-                                            used_dets = set()
                                             person_idxs: list[int] = []
                                             for i, cid in enumerate(cls_ids):
                                                 try:
@@ -1815,79 +1892,161 @@ class VirtualViewInferenceManager:
                                                 key=lambda i: float((xyxy[i][2] - xyxy[i][0]) * (xyxy[i][3] - xyxy[i][1])),
                                                 reverse=True,
                                             )
-
-                                            for i in person_idxs:
-                                                if i in used_dets:
-                                                    continue
-                                                x1, y1, x2, y2 = xyxy[i]
-                                                cx = float(x1 + x2) * 0.5
-                                                cy = float(y1 + y2) * 0.5
-                                                best_tid = None
-                                                best_d2 = None
-                                                for tid, (tx, ty, vx, vy, ts0, _miss) in tracks.items():
-                                                    if tid in used_tracks:
+                                            if sv_tracker is not None and len(person_idxs) > 0:
+                                                person_xyxy = np.asarray(
+                                                    [xyxy[i] for i in person_idxs], dtype=np.float32
+                                                )
+                                                person_conf = (
+                                                    boxes.conf.cpu().numpy()[person_idxs].astype(np.float32)
+                                                    if hasattr(boxes, "conf") and boxes.conf is not None
+                                                    else np.ones(len(person_idxs), dtype=np.float32)
+                                                )
+                                                person_cls = np.asarray(
+                                                    [int(cls_ids[i]) for i in person_idxs], dtype=np.int32
+                                                )
+                                                sv_det = sv.Detections(
+                                                    xyxy=person_xyxy,
+                                                    confidence=person_conf,
+                                                    class_id=person_cls,
+                                                )
+                                                sv_tracked = sv_tracker.update_with_detections(sv_det)
+                                                if sv_smoother is not None:
+                                                    sv_tracked = sv_smoother.update_with_detections(sv_tracked)
+                                                tracked_xyxy = (
+                                                    np.asarray(sv_tracked.xyxy, dtype=np.float32)
+                                                    if getattr(sv_tracked, "xyxy", None) is not None
+                                                    else np.empty((0, 4), dtype=np.float32)
+                                                )
+                                                tracked_ids = (
+                                                    np.asarray(sv_tracked.tracker_id, dtype=np.int32)
+                                                    if getattr(sv_tracked, "tracker_id", None) is not None
+                                                    else np.empty((0,), dtype=np.int32)
+                                                )
+                                                matched_tracked: set[int] = set()
+                                                for p_local_idx, p_global_idx in enumerate(person_idxs):
+                                                    best_t = None
+                                                    best_iou = 0.0
+                                                    p_box = person_xyxy[p_local_idx]
+                                                    for t_idx in range(len(tracked_xyxy)):
+                                                        if t_idx in matched_tracked:
+                                                            continue
+                                                        iou = _bbox_iou(p_box, tracked_xyxy[t_idx])
+                                                        if iou > best_iou:
+                                                            best_iou = iou
+                                                            best_t = int(t_idx)
+                                                    if best_t is not None and best_iou >= 0.3:
+                                                        ids[p_global_idx] = int(tracked_ids[best_t])
+                                                        matched_tracked.add(best_t)
+                                            else:
+                                                max_dist = max(25.0, 0.08 * float(max(w_img, h_img)))
+                                                base_gate = max(25.0, 0.06 * float(max(w_img, h_img)))
+                                                max_speed = 0.35 * float(max(w_img, h_img))
+                                                used_tracks = set()
+                                                used_dets = set()
+                                                for i in person_idxs:
+                                                    if i in used_dets:
                                                         continue
-                                                    dtp = float(now) - float(ts0)
-                                                    if dtp < 0.0:
-                                                        dtp = 0.0
-                                                    px = float(tx) + float(vx) * float(dtp)
-                                                    py = float(ty) + float(vy) * float(dtp)
-                                                    dx = float(px) - cx
-                                                    dy = float(py) - cy
-                                                    d2 = dx * dx + dy * dy
-                                                    if best_d2 is None or d2 < best_d2:
-                                                        best_d2 = d2
-                                                        best_tid = int(tid)
-                                                if best_tid is not None and best_d2 is not None:
-                                                    try:
-                                                        tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
+                                                    x1, y1, x2, y2 = xyxy[i]
+                                                    cx = float(x1 + x2) * 0.5
+                                                    cy = float(y1 + y2) * 0.5
+                                                    best_tid = None
+                                                    best_d2 = None
+                                                    for tid, (tx, ty, vx, vy, ts0, _miss) in tracks.items():
+                                                        if tid in used_tracks:
+                                                            continue
                                                         dtp = float(now) - float(ts0)
                                                         if dtp < 0.0:
                                                             dtp = 0.0
-                                                        gate = float(base_gate) + float(max_dist) + float(max_speed) * float(dtp)
-                                                        gate2 = float(gate) * float(gate)
-                                                    except Exception:
-                                                        gate2 = float(max_dist) * float(max_dist)
-                                                    ok_match = float(best_d2) <= float(gate2)
-                                                else:
-                                                    ok_match = False
+                                                        px = float(tx) + float(vx) * float(dtp)
+                                                        py = float(ty) + float(vy) * float(dtp)
+                                                        dx = float(px) - cx
+                                                        dy = float(py) - cy
+                                                        d2 = dx * dx + dy * dy
+                                                        if best_d2 is None or d2 < best_d2:
+                                                            best_d2 = d2
+                                                            best_tid = int(tid)
+                                                    if best_tid is not None and best_d2 is not None:
+                                                        try:
+                                                            tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
+                                                            dtp = float(now) - float(ts0)
+                                                            if dtp < 0.0:
+                                                                dtp = 0.0
+                                                            gate = (
+                                                                float(base_gate)
+                                                                + float(max_dist)
+                                                                + float(max_speed) * float(dtp)
+                                                            )
+                                                            gate2 = float(gate) * float(gate)
+                                                        except Exception:
+                                                            gate2 = float(max_dist) * float(max_dist)
+                                                        ok_match = float(best_d2) <= float(gate2)
+                                                    else:
+                                                        ok_match = False
 
-                                                if ok_match:
-                                                    ids[i] = int(best_tid)
-                                                    used_tracks.add(int(best_tid))
-                                                    used_dets.add(int(i))
-                                                    try:
-                                                        tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
-                                                        dt0 = float(now) - float(ts0)
-                                                        if dt0 <= 1e-3:
-                                                            dt0 = 1e-3
-                                                        ovx = (cx - float(tx0)) / float(dt0)
-                                                        ovy = (cy - float(ty0)) / float(dt0)
-                                                        nvx = 0.7 * float(vx0) + 0.3 * float(ovx)
-                                                        nvy = 0.7 * float(vy0) + 0.3 * float(ovy)
-                                                        tracks[int(best_tid)] = (cx, cy, float(nvx), float(nvy), float(now), 0)
-                                                    except Exception:
-                                                        tracks[int(best_tid)] = (cx, cy, 0.0, 0.0, float(now), 0)
-                                                else:
-                                                    tid = int(next_track_id)
-                                                    next_track_id += 1
-                                                    ids[i] = tid
-                                                    used_tracks.add(tid)
-                                                    used_dets.add(int(i))
-                                                    tracks[tid] = (cx, cy, 0.0, 0.0, float(now), 0)
+                                                    if ok_match:
+                                                        ids[i] = int(best_tid)
+                                                        used_tracks.add(int(best_tid))
+                                                        used_dets.add(int(i))
+                                                        try:
+                                                            tx0, ty0, vx0, vy0, ts0, _m0 = tracks[int(best_tid)]
+                                                            dt0 = float(now) - float(ts0)
+                                                            if dt0 <= 1e-3:
+                                                                dt0 = 1e-3
+                                                            ovx = (cx - float(tx0)) / float(dt0)
+                                                            ovy = (cy - float(ty0)) / float(dt0)
+                                                            nvx = 0.7 * float(vx0) + 0.3 * float(ovx)
+                                                            nvy = 0.7 * float(vy0) + 0.3 * float(ovy)
+                                                            tracks[int(best_tid)] = (
+                                                                cx,
+                                                                cy,
+                                                                float(nvx),
+                                                                float(nvy),
+                                                                float(now),
+                                                                0,
+                                                            )
+                                                        except Exception:
+                                                            tracks[int(best_tid)] = (
+                                                                cx,
+                                                                cy,
+                                                                0.0,
+                                                                0.0,
+                                                                float(now),
+                                                                0,
+                                                            )
+                                                    else:
+                                                        tid = int(next_track_id)
+                                                        next_track_id += 1
+                                                        ids[i] = tid
+                                                        used_tracks.add(tid)
+                                                        used_dets.add(int(i))
+                                                        tracks[tid] = (cx, cy, 0.0, 0.0, float(now), 0)
 
-                                            next_tracks: Dict[int, Tuple[float, float, float, float, float, int]] = {}
-                                            for tid, (tx, ty, vx, vy, ts0, miss) in tracks.items():
-                                                if int(tid) in used_tracks:
-                                                    next_tracks[int(tid)] = (float(tx), float(ty), float(vx), float(vy), float(ts0), 0)
-                                                    continue
-                                                miss2 = int(miss) + 1
-                                                if miss2 > 8:
-                                                    continue
-                                                if float(now) - float(ts0) > 2.5:
-                                                    continue
-                                                next_tracks[int(tid)] = (float(tx), float(ty), float(vx), float(vy), float(ts0), miss2)
-                                            tracks = next_tracks
+                                                next_tracks: Dict[int, Tuple[float, float, float, float, float, int]] = {}
+                                                for tid, (tx, ty, vx, vy, ts0, miss) in tracks.items():
+                                                    if int(tid) in used_tracks:
+                                                        next_tracks[int(tid)] = (
+                                                            float(tx),
+                                                            float(ty),
+                                                            float(vx),
+                                                            float(vy),
+                                                            float(ts0),
+                                                            0,
+                                                        )
+                                                        continue
+                                                    miss2 = int(miss) + 1
+                                                    if miss2 > 8:
+                                                        continue
+                                                    if float(now) - float(ts0) > 2.5:
+                                                        continue
+                                                    next_tracks[int(tid)] = (
+                                                        float(tx),
+                                                        float(ty),
+                                                        float(vx),
+                                                        float(vy),
+                                                        float(ts0),
+                                                        miss2,
+                                                    )
+                                                tracks = next_tracks
                                         except Exception:
                                             pass
                                         # 2.5) 二阶段性别/年龄识别（按 track_id 缓存限频）

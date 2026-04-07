@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 opencv-python
 ultralytics
+supervision
 numpy
 matplotlib
 sqlalchemy

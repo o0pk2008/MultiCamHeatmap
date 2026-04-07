@@ -271,7 +271,13 @@ class QueueWaitAnalyzer:
         queue_neither_grace = float(os.environ.get("QUEUE_WAIT_QUEUE_NEITHER_GRACE_SEC", "1.2"))
         # 脚步短暂跑出服务区多边形（遮挡/抖动）时，不立刻结束服务；持续超过该秒数才闭环为一次成交。
         service_out_grace = float(os.environ.get("QUEUE_WAIT_SERVICE_OUT_GRACE_SEC", "0.45"))
+        # 脚底点平滑：EMA 系数（越大越跟随当前帧，越小越平滑）。
+        foot_smooth_alpha = float(os.environ.get("QUEUE_WAIT_FOOT_SMOOTH_ALPHA", "0.65"))
+        foot_smooth_alpha = min(1.0, max(0.0, foot_smooth_alpha))
+        # track 若长时间未出现，清理其平滑状态，避免后续复用 track_id 时继承旧位置。
+        foot_smooth_ttl = float(os.environ.get("QUEUE_WAIT_FOOT_SMOOTH_TTL_SEC", "3.0"))
         states: Dict[int, Dict[str, Any]] = {}
+        foot_smooth: Dict[int, Tuple[float, float, float]] = {}
         last_emit_det_ts = 0.0
 
         try:
@@ -342,6 +348,17 @@ class QueueWaitAnalyzer:
                     if foot_uv is None:
                         continue
                     foot_u, foot_v = foot_uv
+                    prev_s = foot_smooth.get(int(tid))
+                    if prev_s is not None:
+                        prev_u, prev_v, prev_ts = prev_s
+                        if float(det_ts) - float(prev_ts) <= foot_smooth_ttl:
+                            foot_u = (foot_smooth_alpha * float(foot_u)) + (
+                                (1.0 - foot_smooth_alpha) * float(prev_u)
+                            )
+                            foot_v = (foot_smooth_alpha * float(foot_v)) + (
+                                (1.0 - foot_smooth_alpha) * float(prev_v)
+                            )
+                    foot_smooth[int(tid)] = (float(foot_u), float(foot_v), float(det_ts))
                     active[int(tid)] = (float(foot_u), float(foot_v), int(idx))
 
                 cnt_queue_geom = 0
@@ -503,6 +520,9 @@ class QueueWaitAnalyzer:
                             tid=int(tid),st=st,now_ts=float(det_ts),roi_config_id=roi_config_id,floor_plan_id=floor_plan_id,virtual_view_id=virtual_view_id,
                         )
                         states.pop(int(tid), None)
+                    ps = foot_smooth.get(int(tid))
+                    if ps is not None and float(det_ts) - float(ps[2]) > foot_smooth_ttl:
+                        foot_smooth.pop(int(tid), None)
 
                 try:
                     manager.set_queue_wait_labels(int(virtual_view_id), labels)

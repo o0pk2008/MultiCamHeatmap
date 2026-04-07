@@ -1,5 +1,6 @@
 opencv-python
 ultralytics
+supervision
 numpy
 matplotlib
 uniface
